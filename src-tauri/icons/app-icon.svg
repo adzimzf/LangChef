@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0ea5e9"/>
+      <stop offset="100%" stop-color="#2563eb"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="1024" height="1024" rx="180" fill="url(#bg)"/>
+  <g transform="translate(180,220)">
+    <rect x="0" y="0" width="520" height="520" rx="36" fill="#ffffff" opacity="0.9"/>
+    <rect x="144" y="144" width="520" height="520" rx="36" fill="#0b1220" opacity="0.8"/>
+    <text x="260" y="440" font-family="system-ui, -apple-system, Segoe UI" font-size="220" fill="#ffffff">A</text>
+  </g>
+  <g transform="translate(540,160)">
+    <path d="M180 200c-60 0-108-36-108-80 0-36 28-66 66-76 2-40 42-72 90-72 42 0 78 22 88 52 10-4 22-6 34-6 48 0 86 32 86 72 0 44-48 80-108 80H180z" fill="#ffffff"/>
+    <rect x="160" y="200" width="240" height="160" rx="28" fill="#ffffff"/>
+    <rect x="192" y="360" width="176" height="28" rx="14" fill="#0b1220" opacity="0.2"/>
+  </g>
+</svg>

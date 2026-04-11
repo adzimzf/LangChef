@@ -1,0 +1,10 @@
+# Build
+/target/
+WixTools/
+
+# Cargo
+Cargo.lock
+
+# OS
+.DS_Store
+Thumbs.db

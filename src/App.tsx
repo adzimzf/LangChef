@@ -1,0 +1,25 @@
+import { BrowserRouter, Route, Routes } from 'react-router-dom'
+import Home from './pages/Home'
+import Chat from './pages/Chat'
+import Chats from './pages/Chats'
+import Settings from './pages/Settings'
+import Review from './pages/Review'
+import Telemetry from './pages/Telemetry'
+import Layout from './components/Layout'
+
+export default function App() {
+  return (
+    <BrowserRouter>
+      <Layout>
+        <Routes>
+          <Route path="/" element={<Home />} />
+          <Route path="/chats" element={<Chats />} />
+          <Route path="/chat" element={<Chat />} />
+          <Route path="/review" element={<Review />} />
+          <Route path="/telemetry" element={<Telemetry />} />
+          <Route path="/settings" element={<Settings />} />
+        </Routes>
+      </Layout>
+    </BrowserRouter>
+  )
+}
