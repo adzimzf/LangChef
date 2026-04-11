@@ -1,56 +1,40 @@
 import { useEffect, useMemo, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
 import {
   FireOutlined,
   ThunderboltOutlined,
   BookOutlined,
   BulbOutlined,
 } from '@ant-design/icons'
-
-type Day = { date: string; sessions: number }
-
-function todayKey() {
-  const d = new Date()
-  return d.toISOString().slice(0, 10)
-}
+import { type Day, todayKey, computeStreak, getLastNDays } from '../lib/stats'
 
 export default function Telemetry() {
   const [days, setDays] = useState<Day[]>([])
+  const [mastery, setMastery] = useState({ mastered: 0, total: 0 })
+  const [knownWords, setKnownWords] = useState(0)
 
   useEffect(() => {
-    const saved = JSON.parse(localStorage.getItem('telemetry_days') || '[]')
-    setDays(saved)
-  }, [])
-
-  const streak = useMemo(() => {
-    const sorted = [...days].sort((a, b) => a.date.localeCompare(b.date))
-    let s = 0
-    let prev: string | null = null
-    for (let i = sorted.length - 1; i >= 0; i--) {
-      const d = sorted[i].date
-      if (prev == null) {
-        if (d === todayKey()) s++
-        else break
-      } else {
-        const prevDate = new Date(prev)
-        const currDate = new Date(d)
-        const diff = (prevDate.getTime() - currDate.getTime()) / (24 * 60 * 60 * 1000)
-        if (diff === 1) s++
-        else break
+    async function loadStats() {
+      try {
+        const [telemetryDays, reviewItems] = await Promise.all([
+          invoke<Day[]>('db_get_telemetry_days'),
+          invoke<{ R: number }[]>('db_get_review_items'),
+        ])
+        setDays(telemetryDays)
+        const mastered = reviewItems.filter((c) => c.R >= 3).length
+        setMastery({
+          mastered,
+          total: reviewItems.length,
+        })
+        setKnownWords(mastered)
+      } catch (e) {
+        console.error('Failed to load stats:', e)
       }
-      prev = d
     }
-    return s
-  }, [days])
-
-  const mastery = useMemo(() => {
-    const items = JSON.parse(localStorage.getItem('review_items') || '[]')
-    const mastered = items.filter((c: any) => c.R >= 3).length
-    return { mastered, total: items.length }
+    loadStats()
   }, [])
 
-  const knownWords = useMemo(() => {
-    return (JSON.parse(localStorage.getItem('known_words') || '[]') as string[]).length
-  }, [])
+  const streak = useMemo(() => computeStreak(days), [days])
 
   const sessionsToday = days.find((d) => d.date === todayKey())?.sessions ?? 0
 
@@ -92,18 +76,7 @@ export default function Telemetry() {
   ]
 
   // Last 7 days activity
-  const last7 = useMemo(() => {
-    const result: { day: string; count: number }[] = []
-    for (let i = 6; i >= 0; i--) {
-      const d = new Date()
-      d.setDate(d.getDate() - i)
-      const key = d.toISOString().slice(0, 10)
-      const dayName = d.toLocaleDateString('en', { weekday: 'short' })
-      const entry = days.find((dy) => dy.date === key)
-      result.push({ day: dayName, count: entry?.sessions ?? 0 })
-    }
-    return result
-  }, [days])
+  const last7 = useMemo(() => getLastNDays(days, 7), [days])
 
   const maxCount = Math.max(...last7.map((d) => d.count), 1)
 

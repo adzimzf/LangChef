@@ -1,4 +1,4 @@
-import { useEffect, useMemo } from 'react'
+import { useEffect, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
 import {
@@ -8,44 +8,42 @@ import {
   ThunderboltOutlined,
   RightOutlined,
 } from '@ant-design/icons'
-
-type Day = { date: string; sessions: number }
-
-function todayKey() {
-  return new Date().toISOString().slice(0, 10)
-}
+import { type Day, todayKey, computeStreak } from '../lib/stats'
 
 export default function Home() {
   const navigate = useNavigate()
 
-  const stats = useMemo(() => {
-    const days: Day[] = JSON.parse(localStorage.getItem('telemetry_days') || '[]')
-    const reviewItems = JSON.parse(localStorage.getItem('review_items') || '[]')
-    const knownWords: string[] = JSON.parse(localStorage.getItem('known_words') || '[]')
+  const [stats, setStats] = useState({
+    streak: 0,
+    mastered: 0,
+    total: 0,
+    sessionsToday: 0,
+    knownWords: 0,
+  })
 
-    const streak = (() => {
-      const sorted = [...days].sort((a, b) => a.date.localeCompare(b.date))
-      let s = 0
-      let prev: string | null = null
-      for (let i = sorted.length - 1; i >= 0; i--) {
-        const d = sorted[i].date
-        if (prev == null) {
-          if (d === todayKey()) s++
-          else break
-        } else {
-          const diff = (new Date(prev).getTime() - new Date(d).getTime()) / (24 * 60 * 60 * 1000)
-          if (diff === 1) s++
-          else break
-        }
-        prev = d
+  useEffect(() => {
+    async function loadStats() {
+      try {
+        const [telemetryDays, reviewItems] = await Promise.all([
+          invoke<Day[]>('db_get_telemetry_days'),
+          invoke<{ R: number }[]>('db_get_review_items'),
+        ])
+        const streak = computeStreak(telemetryDays)
+        const mastered = reviewItems.filter((c) => c.R >= 3).length
+        const sessionsToday = telemetryDays.find((d) => d.date === todayKey())?.sessions ?? 0
+
+        setStats({
+          streak,
+          mastered,
+          total: reviewItems.length,
+          sessionsToday,
+          knownWords: mastered,
+        })
+      } catch (e) {
+        console.error('Failed to load stats:', e)
       }
-      return s
-    })()
-
-    const mastered = reviewItems.filter((c: any) => c.R >= 3).length
-    const sessionsToday = days.find((d) => d.date === todayKey())?.sessions ?? 0
-
-    return { streak, mastered, total: reviewItems.length, sessionsToday, knownWords: knownWords.length }
+    }
+    loadStats()
   }, [])
 
   const actions = [

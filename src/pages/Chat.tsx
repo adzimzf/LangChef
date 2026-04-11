@@ -3,6 +3,8 @@ import { invoke } from '@tauri-apps/api/core'
 import { tokenize, splitTappable, isWordSegment } from '../lib/unknown'
 import { renderFurigana, hasFuriganaAnnotations, stripFurigana } from '../lib/furigana'
 import { difficultyColor } from '../lib/srs'
+import { JLPT_LEVELS, DEFAULT_JLPT_LEVEL, JLPT_LEVEL_STORAGE_KEY } from '../lib/jlpt'
+import type { JLPTLevel } from '../lib/jlpt'
 import { Input } from 'antd'
 const { TextArea } = Input
 import { ArrowLeftOutlined, SendOutlined } from '@ant-design/icons'
@@ -34,7 +36,14 @@ export default function Chat() {
   const [params] = useSearchParams()
   const initialSid = params.get('sid') || ''
   const lang = params.get('lang') || ''
+  const jlptParam = params.get('jlpt') || ''
   const [sessionId, setSessionId] = useState(initialSid)
+  const [jlptLevel, setJlptLevel] = useState<JLPTLevel>(() => {
+    if (jlptParam && jlptParam in JLPT_LEVELS) return jlptParam as JLPTLevel
+    const saved = localStorage.getItem(JLPT_LEVEL_STORAGE_KEY)
+    if (saved && saved in JLPT_LEVELS) return saved as JLPTLevel
+    return DEFAULT_JLPT_LEVEL
+  })
   const [apiHost, setApiHost] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [model, setModel] = useState('')
@@ -191,6 +200,12 @@ export default function Chat() {
 
     if (lang === 'ja') {
       prompt += `\n\nFURIGANA RULE: For every word containing kanji in your response, you MUST annotate it with its reading using this format: {kanji|reading}. Examples: {日本|にほん}, {食べ|た}べ{物|もの}, {先生|せんせい}, {行|い}きます. Annotate EACH kanji or kanji compound with its correct reading in context. Do NOT annotate hiragana, katakana, or non-kanji text. Place the annotation around the kanji portion only. Example: "{食|た}べた{後|あと}で{散歩|さんぽ}しました"`
+
+      // JLPT level constraints
+      const jlptInfo = JLPT_LEVELS[jlptLevel]
+      if (jlptInfo) {
+        prompt += `\n\n${jlptInfo.promptRule}`
+      }
     }
 
     if (selectedDifficult.length > 0 || selectedKnown.length > 0) {
@@ -353,9 +368,16 @@ export default function Chat() {
           <h2 className="text-base font-semibold truncate">
             {langInfo ? `${langInfo.flag} ${langInfo.label}` : 'Conversation'}
           </h2>
-          {loading && (
-            <span className="text-xs text-gray-400">typing...</span>
-          )}
+          <div className="flex items-center gap-1.5">
+            {loading && (
+              <span className="text-xs text-gray-400">typing...</span>
+            )}
+            {lang === 'ja' && (
+              <span className="text-xs font-medium px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600">
+                {jlptLevel}
+              </span>
+            )}
+          </div>
         </div>
         {lang === 'ja' && (
           <button

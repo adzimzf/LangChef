@@ -297,6 +297,12 @@ struct ReviewItem {
     detail: Option<String>,
 }
 
+#[derive(Serialize, Deserialize)]
+struct TelemetryDay {
+    date: String,
+    sessions: i64,
+}
+
 // ─── SRS Configuration ────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize, Serialize, Clone)]
@@ -579,13 +585,31 @@ fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRS
 #[tauri::command]
 fn db_increment_session_today(app: tauri::AppHandle) -> Result<(), String> {
     let conn = open_db(&app)?;
-    let today = chrono::Utc::now().date_naive().to_string();
+    let today = chrono::Local::now().date_naive().to_string();
     conn.execute(
         "INSERT INTO telemetry_days(date, sessions) VALUES (?1, 1)
          ON CONFLICT(date) DO UPDATE SET sessions=sessions+1",
         params![today],
     ).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[tauri::command]
+fn db_get_telemetry_days(app: tauri::AppHandle) -> Result<Vec<TelemetryDay>, String> {
+    let conn = open_db(&app)?;
+    let mut stmt = conn.prepare("SELECT date, sessions FROM telemetry_days ORDER BY date ASC")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| {
+        Ok(TelemetryDay {
+            date: row.get(0)?,
+            sessions: row.get(1)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -748,6 +772,7 @@ pub fn run() {
             db_get_review_items,
             db_update_srs,
             db_increment_session_today,
+            db_get_telemetry_days,
             db_list_known_words,
             db_add_known_word,
             db_rename_session,

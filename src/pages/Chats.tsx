@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { PlusOutlined, CloseOutlined, EditOutlined, DeleteOutlined } from '@ant-design/icons'
 import { useNavigate } from 'react-router-dom'
+import { JLPT_LEVELS, JLPT_LEVEL_ORDER, DEFAULT_JLPT_LEVEL, JLPT_LEVEL_STORAGE_KEY } from '../lib/jlpt'
+import type { JLPTLevel } from '../lib/jlpt'
 
 type ChatSession = {
   id: string
@@ -50,6 +52,11 @@ function getLangLabel(code: string | null | undefined): string {
 export default function Chats() {
   const [sessions, setSessions] = useState<ChatSession[]>([])
   const [showLangPicker, setShowLangPicker] = useState(false)
+  const [showJlptPicker, setShowJlptPicker] = useState(false)
+  const [selectedLang, setSelectedLang] = useState('')
+  const [jlptLevel, setJlptLevel] = useState<JLPTLevel>(
+    (localStorage.getItem(JLPT_LEVEL_STORAGE_KEY) as JLPTLevel) || DEFAULT_JLPT_LEVEL
+  )
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editTitle, setEditTitle] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -67,10 +74,30 @@ export default function Chats() {
   }, [])
 
   async function newChat(language: string) {
+    if (language === 'ja') {
+      // For Japanese, show JLPT level picker first
+      setSelectedLang(language)
+      setShowLangPicker(false)
+      // Delay to avoid the backdrop click from the language picker
+      // immediately closing the JLPT picker that replaces it
+      setTimeout(() => setShowJlptPicker(true), 50)
+      return
+    }
     try {
       const id = await invoke<string>('db_new_session', { title: null, language })
       setShowLangPicker(false)
       navigate(`/chat?sid=${id}&lang=${language}`)
+    } catch {}
+  }
+
+  async function startJlptChat(level: JLPTLevel) {
+    // Persist the chosen level for next time
+    localStorage.setItem(JLPT_LEVEL_STORAGE_KEY, level)
+    setJlptLevel(level)
+    try {
+      const id = await invoke<string>('db_new_session', { title: null, language: selectedLang })
+      setShowJlptPicker(false)
+      navigate(`/chat?sid=${id}&lang=${selectedLang}&jlpt=${level}`)
     } catch {}
   }
 
@@ -135,6 +162,46 @@ export default function Chats() {
                   <span className="text-[15px] font-medium">{lang.label}</span>
                 </button>
               ))}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* JLPT level picker modal */}
+      {showJlptPicker && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/30" onClick={() => setShowJlptPicker(false)}>
+          <div
+            className="w-full max-w-lg bg-white rounded-t-2xl p-5 safe-bottom"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-base font-semibold">Choose JLPT Level</h3>
+              <button
+                onClick={() => setShowJlptPicker(false)}
+                className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 active:bg-gray-200"
+              >
+                <CloseOutlined />
+              </button>
+            </div>
+            <p className="text-xs text-gray-500 mb-3">This sets the grammar difficulty and sentence length for the conversation.</p>
+            <div className="space-y-2">
+              {JLPT_LEVEL_ORDER.map(level => {
+                const info = JLPT_LEVELS[level]
+                return (
+                  <button
+                    key={level}
+                    onClick={() => startJlptChat(level)}
+                    className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-colors text-left ${
+                      jlptLevel === level
+                        ? 'bg-blue-50 ring-1 ring-blue-200'
+                        : 'hover:bg-gray-50 active:bg-gray-100'
+                    }`}
+                  >
+                    <span className="text-[15px] font-semibold w-8 text-center">{info.label}</span>
+                    <span className="text-sm text-gray-600">{info.description}</span>
+                  </button>
+                )
+              })}
             </div>
           </div>
         </div>

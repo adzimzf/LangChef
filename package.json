@@ -7,8 +7,11 @@
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview",
+    "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "tauri:build": "tauri build",
+    "tauri:android:dev": "tauri android dev",
+    "tauri:android:build": "tauri android build"
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.1",
