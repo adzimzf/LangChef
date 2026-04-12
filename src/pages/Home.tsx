@@ -8,6 +8,7 @@ import {
   ThunderboltOutlined,
   RightOutlined,
   UnorderedListOutlined,
+  ReadOutlined,
 } from '@ant-design/icons'
 import { type Day, todayKey, computeStreak } from '../lib/stats'
 
@@ -71,6 +72,14 @@ export default function Home() {
       desc: `${stats.total} words in your deck`,
       color: 'bg-amber-500',
       onClick: () => navigate('/words'),
+    },
+    {
+      key: 'grammar',
+      icon: <ReadOutlined className="text-xl" />,
+      label: 'Grammar',
+      desc: 'Manage grammar patterns per level',
+      color: 'bg-indigo-500',
+      onClick: () => navigate('/grammar'),
     },
     {
       key: 'telemetry',

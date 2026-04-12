@@ -5,6 +5,8 @@ import { useNavigate } from 'react-router-dom'
 import { JLPT_LEVELS, JLPT_LEVEL_ORDER, DEFAULT_JLPT_LEVEL, JLPT_LEVEL_STORAGE_KEY } from '../lib/jlpt'
 import type { JLPTLevel } from '../lib/jlpt'
 
+type GrammarLevelInfo = { level: string; count: number }
+
 type ChatSession = {
   id: string
   title?: string | null
@@ -60,6 +62,7 @@ export default function Chats() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editTitle, setEditTitle] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [dbLevels, setDbLevels] = useState<string[]>(JLPT_LEVEL_ORDER)
   const navigate = useNavigate()
 
   async function load() {
@@ -68,6 +71,17 @@ export default function Chats() {
       setSessions(res)
     } catch {}
   }
+
+  // Load grammar levels from DB
+  useEffect(() => {
+    async function loadLevels() {
+      try {
+        const levels = await invoke<string[]>('db_get_grammar_levels', { language: 'ja' })
+        if (levels.length > 0) setDbLevels(levels)
+      } catch {}
+    }
+    loadLevels()
+  }, [])
 
   useEffect(() => {
     load()
@@ -175,7 +189,7 @@ export default function Chats() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-base font-semibold">Choose JLPT Level</h3>
+              <h3 className="text-base font-semibold">Choose Level</h3>
               <button
                 onClick={() => setShowJlptPicker(false)}
                 className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 active:bg-gray-200"
@@ -185,20 +199,20 @@ export default function Chats() {
             </div>
             <p className="text-xs text-gray-500 mb-3">This sets the grammar difficulty and sentence length for the conversation.</p>
             <div className="space-y-2">
-              {JLPT_LEVEL_ORDER.map(level => {
-                const info = JLPT_LEVELS[level]
+              {dbLevels.map(level => {
+                const jlptInfo = JLPT_LEVELS[level as JLPTLevel]
                 return (
                   <button
                     key={level}
-                    onClick={() => startJlptChat(level)}
+                    onClick={() => startJlptChat(level as JLPTLevel)}
                     className={`w-full flex items-center gap-3 px-4 py-3 rounded-xl transition-colors text-left ${
                       jlptLevel === level
                         ? 'bg-blue-50 ring-1 ring-blue-200'
                         : 'hover:bg-gray-50 active:bg-gray-100'
                     }`}
                   >
-                    <span className="text-[15px] font-semibold w-8 text-center">{info.label}</span>
-                    <span className="text-sm text-gray-600">{info.description}</span>
+                    <span className="text-[15px] font-semibold w-10 text-center">{level}</span>
+                    <span className="text-sm text-gray-600">{jlptInfo?.description || `Grammar level ${level}`}</span>
                   </button>
                 )
               })}

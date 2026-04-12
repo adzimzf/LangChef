@@ -186,6 +186,14 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
           created_at INTEGER NOT NULL,
           last_activity INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS grammar_items(
+          id TEXT PRIMARY KEY,
+          pattern TEXT NOT NULL,
+          detail TEXT NOT NULL DEFAULT '',
+          language TEXT NOT NULL,
+          level TEXT NOT NULL DEFAULT '',
+          is_default INTEGER NOT NULL DEFAULT 0
+        );
         "
     ).map_err(|e| e.to_string())?;
     // best-effort: add session_id column if missing
@@ -202,7 +210,99 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     // Migrate existing cards that have NULL state to 'review' if they have R > 0
     let _ = conn.execute("UPDATE review_items SET state = 'review' WHERE state IS NULL OR state = ''", []);
     let _ = conn.execute("UPDATE review_items SET state = 'new' WHERE state IS NULL OR state = ''", []);
+    // Auto-seed bundled grammar data if grammar_items is empty
+    seed_bundled_grammar_if_empty(&conn);
     Ok(conn)
+}
+
+// ─── Bundled Grammar Markdown Data ──────────────────────────────────────────
+// These .md files are embedded at compile time from the grammar/ directory.
+// Format: each file is split by "---" separators. Each section starts with
+// "## pattern" on the first line, followed by the Markdown detail.
+
+static BUNDLED_GRAMMAR: &[(&str, &str, &str)] = &[
+    ("ja", "N5", include_str!("../../grammar/ja/N5.md")),
+    ("ja", "N4", include_str!("../../grammar/ja/N4.md")),
+    ("ja", "N3", include_str!("../../grammar/ja/N3.md")),
+    ("ja", "N2", include_str!("../../grammar/ja/N2.md")),
+    ("ja", "N1", include_str!("../../grammar/ja/N1.md")),
+    ("id", "A1", include_str!("../../grammar/id/A1.md")),
+    ("id", "A2", include_str!("../../grammar/id/A2.md")),
+];
+
+/// Parse a Markdown grammar file.
+///
+/// Each section is separated by a line containing only "---".
+/// The first line of each section must be "## pattern" where pattern is the grammar name.
+/// Everything after that line (until the next "---") is the detail (raw Markdown).
+fn parse_grammar_md(content: &str) -> Vec<(String, String)> {
+    let mut items = Vec::new();
+    let sections = content.split("\n---\n");
+
+    for section in sections {
+        let section = section.trim();
+        if section.is_empty() {
+            continue;
+        }
+
+        // Find the first line starting with "## "
+        let mut pattern = String::new();
+        let mut detail_start = 0;
+        for (i, line) in section.lines().enumerate() {
+            if let Some(rest) = line.strip_prefix("## ") {
+                pattern = rest.trim().to_string();
+                detail_start = i + 1;
+                break;
+            }
+        }
+
+        if pattern.is_empty() {
+            continue;
+        }
+
+        // Everything after the "##" line is the detail
+        let detail: String = section
+            .lines()
+            .skip(detail_start)
+            .collect::<Vec<&str>>()
+            .join("\n")
+            .trim()
+            .to_string();
+
+        items.push((pattern, detail));
+    }
+    items
+}
+
+/// Seed the grammar_items table from bundled CSV data if it's currently empty.
+/// Checks per-language so that adding a new language's CSV will seed correctly
+/// even if other languages already have data.
+fn seed_bundled_grammar_if_empty(conn: &Connection) {
+    for &(lang, level, csv) in BUNDLED_GRAMMAR {
+        // Check if this specific language+level already has data
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM grammar_items WHERE language=?1 AND level=?2",
+            params![lang, level],
+            |row| row.get(0),
+        ).unwrap_or(0);
+
+        if count > 0 {
+            continue; // This level already has data
+        }
+
+        let items = parse_grammar_md(csv);
+        eprintln!("[seed] grammar/{}/{level}: parsed {} items", lang, items.len());
+        for (pattern, detail) in items {
+            let id = uuid::Uuid::new_v4().to_string();
+            match conn.execute(
+                "INSERT INTO grammar_items(id, pattern, detail, language, level, is_default) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+                params![id, pattern, detail, lang, level],
+            ) {
+                Ok(_) => {}
+                Err(e) => eprintln!("[seed] FAILED to insert '{}': {}", pattern, e),
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -694,6 +794,49 @@ fn db_get_review_items_by_language(app: tauri::AppHandle, language: String) -> R
 }
 
 #[tauri::command]
+fn db_delete_review_item(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    conn.execute("DELETE FROM review_items WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct UpdateReviewItem {
+    id: String,
+    content: Option<String>,
+    tags: Option<String>,
+    language: Option<String>,
+}
+
+#[tauri::command]
+fn db_update_review_item(app: tauri::AppHandle, item: UpdateReviewItem) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    if let Some(content) = item.content {
+        // Check for UNIQUE constraint conflict: another row already has this content
+        let existing_id: Option<String> = conn.query_row(
+            "SELECT id FROM review_items WHERE content=?1 AND id!=?2",
+            params![content, item.id],
+            |row| row.get(0),
+        ).ok();
+        if existing_id.is_some() {
+            return Err(format!("A word with content \"{}\" already exists.", content));
+        }
+        conn.execute("UPDATE review_items SET content=?1 WHERE id=?2", params![content, item.id])
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(tags) = item.tags {
+        conn.execute("UPDATE review_items SET tags=?1 WHERE id=?2", params![tags, item.id])
+            .map_err(|e| e.to_string())?;
+    }
+    if let Some(language) = item.language {
+        conn.execute("UPDATE review_items SET language=?1 WHERE id=?2", params![language, item.id])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 fn db_import_review_items(app: tauri::AppHandle, items: Vec<ImportItem>) -> Result<String, String> {
     let conn = open_db(&app)?;
     let mut imported = 0u32;
@@ -755,6 +898,152 @@ async fn db_generate_detail(app: tauri::AppHandle, api_host: String, api_key: St
     Ok(text)
 }
 
+// ─── Grammar Items ──────────────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+struct GrammarItem {
+    id: String,
+    pattern: String,
+    detail: String,
+    language: String,
+    level: String,
+    is_default: i64,
+}
+
+#[tauri::command]
+fn db_list_grammar_items(app: tauri::AppHandle, language: Option<String>, level: Option<String>) -> Result<Vec<GrammarItem>, String> {
+    let conn = open_db(&app)?;
+    let mut items = Vec::new();
+    match (language, level) {
+        (Some(lang), Some(lvl)) => {
+            let mut stmt = conn.prepare(
+                "SELECT id, pattern, detail, language, level, is_default FROM grammar_items WHERE language=?1 AND level=?2 ORDER BY is_default DESC, pattern ASC"
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map(params![lang, lvl], |row| {
+                Ok(GrammarItem { id: row.get(0)?, pattern: row.get(1)?, detail: row.get(2)?, language: row.get(3)?, level: row.get(4)?, is_default: row.get(5)? })
+            }).map_err(|e| e.to_string())?;
+            for r in rows { items.push(r.map_err(|e| e.to_string())?); }
+        }
+        (Some(lang), None) => {
+            let mut stmt = conn.prepare(
+                "SELECT id, pattern, detail, language, level, is_default FROM grammar_items WHERE language=?1 ORDER BY level ASC, is_default DESC, pattern ASC"
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map(params![lang], |row| {
+                Ok(GrammarItem { id: row.get(0)?, pattern: row.get(1)?, detail: row.get(2)?, language: row.get(3)?, level: row.get(4)?, is_default: row.get(5)? })
+            }).map_err(|e| e.to_string())?;
+            for r in rows { items.push(r.map_err(|e| e.to_string())?); }
+        }
+        (None, Some(lvl)) => {
+            let mut stmt = conn.prepare(
+                "SELECT id, pattern, detail, language, level, is_default FROM grammar_items WHERE level=?1 ORDER BY language ASC, is_default DESC, pattern ASC"
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map(params![lvl], |row| {
+                Ok(GrammarItem { id: row.get(0)?, pattern: row.get(1)?, detail: row.get(2)?, language: row.get(3)?, level: row.get(4)?, is_default: row.get(5)? })
+            }).map_err(|e| e.to_string())?;
+            for r in rows { items.push(r.map_err(|e| e.to_string())?); }
+        }
+        (None, None) => {
+            let mut stmt = conn.prepare(
+                "SELECT id, pattern, detail, language, level, is_default FROM grammar_items ORDER BY language ASC, level ASC, is_default DESC, pattern ASC"
+            ).map_err(|e| e.to_string())?;
+            let rows = stmt.query_map([], |row| {
+                Ok(GrammarItem { id: row.get(0)?, pattern: row.get(1)?, detail: row.get(2)?, language: row.get(3)?, level: row.get(4)?, is_default: row.get(5)? })
+            }).map_err(|e| e.to_string())?;
+            for r in rows { items.push(r.map_err(|e| e.to_string())?); }
+        }
+    }
+    Ok(items)
+}
+
+#[tauri::command]
+fn db_add_grammar_item(app: tauri::AppHandle, pattern: String, detail: String, language: String, level: String) -> Result<GrammarItem, String> {
+    let conn = open_db(&app)?;
+    let id = uuid::Uuid::new_v4().to_string();
+    conn.execute(
+        "INSERT INTO grammar_items(id, pattern, detail, language, level, is_default) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+        params![id, pattern, detail, language, level],
+    ).map_err(|e| e.to_string())?;
+    Ok(GrammarItem { id, pattern, detail, language, level, is_default: 0 })
+}
+
+#[tauri::command]
+fn db_update_grammar_item(app: tauri::AppHandle, id: String, pattern: Option<String>, detail: Option<String>, level: Option<String>) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    if let Some(p) = pattern {
+        conn.execute("UPDATE grammar_items SET pattern=?1 WHERE id=?2", params![p, id]).map_err(|e| e.to_string())?;
+    }
+    if let Some(d) = detail {
+        conn.execute("UPDATE grammar_items SET detail=?1 WHERE id=?2", params![d, id]).map_err(|e| e.to_string())?;
+    }
+    if let Some(l) = level {
+        conn.execute("UPDATE grammar_items SET level=?1 WHERE id=?2", params![l, id]).map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+fn db_delete_grammar_item(app: tauri::AppHandle, id: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    conn.execute("DELETE FROM grammar_items WHERE id=?1", params![id]).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Debug, Deserialize)]
+struct SeedGrammarItem {
+    pattern: String,
+    detail: String,
+    language: String,
+    level: String,
+}
+
+#[tauri::command]
+fn db_seed_grammar_items(app: tauri::AppHandle, items: Vec<SeedGrammarItem>) -> Result<String, String> {
+    let conn = open_db(&app)?;
+    let mut seeded = 0u32;
+    for item in items {
+        let id = uuid::Uuid::new_v4().to_string();
+        let result = conn.execute(
+            "INSERT INTO grammar_items(id, pattern, detail, language, level, is_default) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+            params![id, item.pattern, item.detail, item.language, item.level],
+        );
+        if let Ok(n) = result {
+            if n > 0 { seeded += 1; }
+        }
+    }
+    Ok(format!("Seeded {} grammar items", seeded))
+}
+
+#[tauri::command]
+fn db_get_grammar_levels(app: tauri::AppHandle, language: String) -> Result<Vec<String>, String> {
+    let conn = open_db(&app)?;
+    let mut stmt = conn.prepare(
+        "SELECT DISTINCT level FROM grammar_items WHERE language=?1 ORDER BY level ASC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![language], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
+    let mut levels = Vec::new();
+    for r in rows {
+        levels.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(levels)
+}
+
+#[tauri::command]
+fn db_import_grammar_csv(app: tauri::AppHandle, items: Vec<SeedGrammarItem>) -> Result<String, String> {
+    let conn = open_db(&app)?;
+    let mut imported = 0u32;
+    for item in items {
+        let id = uuid::Uuid::new_v4().to_string();
+        let result = conn.execute(
+            "INSERT INTO grammar_items(id, pattern, detail, language, level, is_default) VALUES (?1, ?2, ?3, ?4, ?5, 0)",
+            params![id, item.pattern, item.detail, item.language, item.level],
+        );
+        if let Ok(n) = result {
+            if n > 0 { imported += 1; }
+        }
+    }
+    Ok(format!("Imported {} grammar items", imported))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -780,7 +1069,16 @@ pub fn run() {
             db_update_review_detail,
             db_get_review_items_by_language,
             db_import_review_items,
-            db_generate_detail
+            db_generate_detail,
+            db_delete_review_item,
+            db_update_review_item,
+            db_list_grammar_items,
+            db_add_grammar_item,
+            db_update_grammar_item,
+            db_delete_grammar_item,
+            db_seed_grammar_items,
+            db_get_grammar_levels,
+            db_import_grammar_csv
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

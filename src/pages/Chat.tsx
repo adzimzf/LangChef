@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { tokenize, splitTappable, isWordSegment } from '../lib/unknown'
+import { splitTappable, isWordSegment } from '../lib/unknown'
 import { renderFurigana, hasFuriganaAnnotations, stripFurigana } from '../lib/furigana'
 import { difficultyColor } from '../lib/srs'
 import { JLPT_LEVELS, DEFAULT_JLPT_LEVEL, JLPT_LEVEL_STORAGE_KEY } from '../lib/jlpt'
@@ -18,6 +18,10 @@ const LANGUAGES: Record<string, { label: string, flag: string }> = {
 }
 
 const SUGGESTIONS = ['Travel', 'Food', 'Work', 'Daily routine', 'Hobbies']
+
+type GrammarDBItem = { id: string; pattern: string; detail: string; language: string; level: string; is_default: number }
+
+type ChipItem = { type: 'topic' | 'grammar'; label: string; action: string }
 
 function TypingIndicator() {
   return (
@@ -53,10 +57,63 @@ export default function Chat() {
   const [known, setKnown] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
   const [showFurigana, setShowFurigana] = useState(false)
+  const [showMoreChips, setShowMoreChips] = useState(false)
+  const [grammarItems, setGrammarItems] = useState<GrammarDBItem[]>([])
   const logRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<any>(null)
+  const chipsScrollRef = useRef<HTMLDivElement | null>(null)
+  const [hasChipOverflow, setHasChipOverflow] = useState(false)
 
   const langInfo = LANGUAGES[lang]
+
+  // Build chip items: topics + grammar (loaded from DB)
+  const allChips = useMemo<ChipItem[]>(() => {
+    const items: ChipItem[] = SUGGESTIONS.map(s => ({
+      type: 'topic',
+      label: s,
+      action: `Talk about ${s.toLowerCase()}.`,
+    }))
+    if (lang === 'ja') {
+      grammarItems.forEach(g => {
+        items.push({
+          type: 'grammar',
+          label: g.pattern,
+          action: `Let's practice the grammar pattern: ${g.pattern}. ${g.detail ? `(${g.detail}) ` : ''}Please use it in a sentence and explain it.`,
+        })
+      })
+    }
+    return items
+  }, [lang, grammarItems])
+
+  // Detect chip overflow — compare scrollWidth vs clientWidth on the scroll container
+  useEffect(() => {
+    function checkOverflow() {
+      const el = chipsScrollRef.current
+      if (!el) return
+      setHasChipOverflow(el.scrollWidth > el.clientWidth + 2)
+    }
+    // Delay to ensure layout is painted
+    const id = requestAnimationFrame(() => {
+      requestAnimationFrame(checkOverflow)
+    })
+    window.addEventListener('resize', checkOverflow)
+    return () => {
+      cancelAnimationFrame(id)
+      window.removeEventListener('resize', checkOverflow)
+    }
+  }, [allChips, hasChipOverflow])
+
+  // Close dropdown on outside click
+  useEffect(() => {
+    if (!showMoreChips) return
+    function handleClick(e: MouseEvent) {
+      const target = e.target as HTMLElement
+      if (target.closest('[data-chips-dropdown]') || target.closest('[data-more-btn]')) return
+      setShowMoreChips(false)
+    }
+    document.addEventListener('click', handleClick)
+    return () => document.removeEventListener('click', handleClick)
+  }, [showMoreChips])
 
   // Load settings
   useEffect(() => {
@@ -67,6 +124,20 @@ export default function Chat() {
     setApiKey(key)
     setModel(m)
   }, [])
+
+  // Load grammar items from DB for current language + level
+  useEffect(() => {
+    if (lang !== 'ja') { setGrammarItems([]); return }
+    async function load() {
+      try {
+        const res = await invoke<GrammarDBItem[]>('db_list_grammar_items', { language: lang, level: jlptLevel })
+        setGrammarItems(res)
+      } catch {
+        setGrammarItems([])
+      }
+    }
+    load()
+  }, [lang, jlptLevel])
 
   // Load session messages
   useEffect(() => {
@@ -87,7 +158,8 @@ export default function Chat() {
         const items = await invoke<{ id: string, content: string, EF: number, I: number, R: number, tags: string | null }[]>('db_get_review_items')
         const hardMap = new Map<string, { EF: number; R: number }>()
         items.forEach(i => {
-          if (i.tags === 'hard') hardMap.set(i.content.toLowerCase(), { EF: i.EF, R: i.R })
+          // Words tagged 'hard' OR new/learning words (R < 3) need reinforcement
+          if (i.tags === 'hard' || i.R < 3) hardMap.set(i.content.toLowerCase(), { EF: i.EF, R: i.R })
         })
         setDifficult(hardMap)
         const knownWords = new Set(items.filter(i => i.R >= 3).map(i => i.content.toLowerCase()))
@@ -119,12 +191,20 @@ export default function Chat() {
     }
   }, [messages.length, loading])
 
-  function markWordDifficult(word: string) {
+  async function markWordDifficult(word: string) {
     const w = word.toLowerCase()
     const next = new Map(difficult)
     next.set(w, { EF: 2.5, R: 0 })
     setDifficult(next)
-    invoke('db_upsert_review_item', { content: w, tag: 'hard', language: lang || null }).catch(() => {})
+    try {
+      await invoke('db_upsert_review_item', { content: w, tag: 'hard', language: lang || null })
+    } catch (e) {
+      console.error('Failed to save difficult word to DB:', e)
+      // Roll back local state if DB write fails
+      const reverted = new Map(difficult)
+      reverted.delete(w)
+      setDifficult(reverted)
+    }
   }
 
   /**
@@ -209,14 +289,15 @@ export default function Chat() {
     }
 
     if (selectedDifficult.length > 0 || selectedKnown.length > 0) {
-      prompt += `\n\nIMPORTANT SSR RULE: In your response, you must use vocabulary strategically:\n`
+      prompt += `\n\nCRITICAL SSR RULE — YOU MUST FOLLOW THIS:\n`
       if (selectedDifficult.length > 0) {
-        prompt += `- DIFFICULT words (use ~50% of these to reinforce them): ${selectedDifficult.join(', ')}\n`
+        prompt += `- DIFFICULT words (you MUST use ALL of these in your response): ${selectedDifficult.join(', ')}\n`
+        prompt += `  These are words the learner is struggling with. Using them reinforces memory. Do NOT skip any.\n`
       }
       if (selectedKnown.length > 0) {
-        prompt += `- KNOWN words (use ~50% of these to maintain retention): ${selectedKnown.join(', ')}\n`
+        prompt += `- KNOWN words (use at least half of these to maintain retention): ${selectedKnown.join(', ')}\n`
       }
-      prompt += `\nMix these naturally into your response. Do NOT list them explicitly. Use them in context.`
+      prompt += `\nWeave these naturally into your sentences. Do NOT list them explicitly. Each difficult word MUST appear at least once in your response.`
     }
 
     prompt += `\n\nIf the user seems stuck, offer a hint or rephrase. Encourage them to keep trying in ${langName}.`
@@ -355,9 +436,9 @@ export default function Chat() {
   }
 
   return (
-    <div className="flex flex-col h-screen bg-gray-50">
+    <div className="flex flex-col h-dvh bg-gray-50">
       {/* Top bar */}
-      <div className="flex items-center gap-3 px-3 py-2 bg-white border-b shrink-0 safe-top">
+      <div className="sticky top-0 z-10 flex items-center gap-3 px-3 py-2 bg-white border-b shrink-0 safe-top">
         <button
           onClick={() => navigate('/chats')}
           className="flex items-center justify-center w-9 h-9 rounded-full hover:bg-gray-100 active:bg-gray-200 transition-colors"
@@ -391,26 +472,67 @@ export default function Chat() {
             {showFurigana ? 'ふりがな ON' : 'ふりがな OFF'}
           </button>
         )}
-        {difficult.size > 0 && (
-          <div className="shrink-0 px-2 py-1 rounded-full bg-orange-100 text-orange-700 text-xs font-medium">
-            {difficult.size} marked
-          </div>
-        )}
       </div>
 
-      {/* Suggestion chips - horizontal scroll */}
-      <div className="shrink-0 bg-white border-b px-3 py-2">
-        <div className="flex gap-2 overflow-x-auto no-scrollbar">
-          {SUGGESTIONS.map(s => (
+      {/* Suggestion chips with overflow */}
+      <div className="shrink-0 bg-white border-b px-3 py-2 relative flex items-center gap-2">
+        <div
+          ref={chipsScrollRef}
+          className="flex gap-2 overflow-hidden flex-1 min-w-0"
+        >
+          {allChips.map(chip => (
             <button
-              key={s}
-              onClick={() => setInput(`Talk about ${s.toLowerCase()}.`)}
-              className="shrink-0 px-3 py-1.5 rounded-full text-sm bg-gray-100 text-gray-700 hover:bg-blue-50 hover:text-blue-600 active:bg-blue-100 transition-colors"
+              key={chip.label}
+              onClick={() => setInput(chip.action)}
+              className={`shrink-0 whitespace-nowrap px-3 py-1.5 rounded-full text-sm transition-colors ${
+                chip.type === 'grammar'
+                  ? 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100 active:bg-indigo-200'
+                  : 'bg-gray-100 text-gray-700 hover:bg-blue-50 hover:text-blue-600 active:bg-blue-100'
+              }`}
             >
-              {s}
+              {chip.label}
             </button>
           ))}
         </div>
+        {hasChipOverflow && (
+          <button
+            data-more-btn
+            onClick={() => setShowMoreChips(!showMoreChips)}
+            className="shrink-0 px-3 py-1.5 rounded-full text-sm bg-gray-200 text-gray-600 hover:bg-gray-300 active:bg-gray-400 transition-colors flex items-center gap-1"
+          >
+            More
+            <svg className={`w-3 h-3 transition-transform ${showMoreChips ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </button>
+        )}
+
+        {/* Floating scrollable dropdown for all chips */}
+        {showMoreChips && hasChipOverflow && (
+          <div
+            data-chips-dropdown
+            className="absolute right-3 top-full mt-1 bg-white rounded-xl shadow-lg border border-gray-200 z-20 py-2 w-56 max-h-60 overflow-y-auto"
+          >
+            <div className="px-2 space-y-1">
+              {allChips.map(chip => (
+                <button
+                  key={chip.label}
+                  onClick={() => {
+                    setInput(chip.action)
+                    setShowMoreChips(false)
+                  }}
+                  className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${
+                    chip.type === 'grammar'
+                      ? 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100 active:bg-indigo-200'
+                      : 'text-gray-700 hover:bg-gray-100 active:bg-gray-200'
+                  }`}
+                >
+                  {chip.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
 
       {/* Messages area */}
