@@ -81,8 +81,10 @@ export default function Settings() {
   const currentStatus = statusConfig[status]
 
   return (
-    <div className="space-y-5">
-      <h2 className="text-lg font-semibold">Settings</h2>
+    <div className="space-y-5 h-full overflow-y-auto">
+      <div className="sticky top-0 z-10 pt-4 pb-2 bg-gray-50">
+        <h2 className="text-lg font-semibold">Settings</h2>
+      </div>
 
       {/* Provider section */}
       <div className="space-y-3">

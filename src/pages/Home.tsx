@@ -7,6 +7,7 @@ import {
   FireOutlined,
   ThunderboltOutlined,
   RightOutlined,
+  UnorderedListOutlined,
 } from '@ant-design/icons'
 import { type Day, todayKey, computeStreak } from '../lib/stats'
 
@@ -64,6 +65,14 @@ export default function Home() {
       onClick: () => navigate('/review'),
     },
     {
+      key: 'words',
+      icon: <UnorderedListOutlined className="text-xl" />,
+      label: 'Words List',
+      desc: `${stats.total} words in your deck`,
+      color: 'bg-amber-500',
+      onClick: () => navigate('/words'),
+    },
+    {
       key: 'telemetry',
       icon: <ThunderboltOutlined className="text-xl" />,
       label: 'Your Stats',
@@ -74,7 +83,12 @@ export default function Home() {
   ]
 
   return (
-    <div className="space-y-5">
+    <div className="space-y-5 h-full overflow-y-auto">
+      {/* Sticky page header */}
+      <div className="sticky top-0 z-10 pt-4 pb-2 bg-gray-50">
+        <h2 className="text-lg font-semibold">LangChef</h2>
+      </div>
+
       {/* Hero section */}
       <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl p-5 text-white">
         <h2 className="text-xl font-bold mb-1">LangChef</h2>

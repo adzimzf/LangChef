@@ -123,8 +123,8 @@ export default function Chats() {
   }
 
   return (
-    <div className="flex flex-col h-full">
-      <div className="flex items-center justify-between mb-3">
+    <div className="flex flex-col h-full overflow-y-auto overflow-x-hidden">
+      <div className="sticky top-0 z-10 py-3 bg-gray-50 flex items-center justify-between shrink-0">
         <h2 className="text-lg font-semibold">Chats</h2>
         <button
           onClick={() => setShowLangPicker(true)}
@@ -246,7 +246,7 @@ export default function Chats() {
           </button>
         </div>
       ) : (
-        <div className="flex flex-col -mx-4">
+        <div className="flex flex-col -mx-4 overflow-x-hidden">
           {sessions.map(s => (
             <div
               key={s.id}

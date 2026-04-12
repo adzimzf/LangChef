@@ -31,16 +31,9 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   }, [location.pathname])
 
   return (
-    <div className="min-h-screen bg-gray-50 flex flex-col">
-      {/* Header */}
-      {!isChatPage && (
-        <header className="shrink-0 bg-white border-b border-gray-100 px-4 h-12 flex items-center safe-top">
-          <h1 className="text-lg font-bold tracking-tight">LangChef</h1>
-        </header>
-      )}
-
+    <div className="h-dvh bg-gray-50 flex flex-col">
       {/* Content */}
-      <main className={`flex-1 ${isChatPage ? '' : 'p-4 pb-24'}`}>{children}</main>
+      <main className={`flex-1 overflow-hidden ${isChatPage ? '' : 'px-4 pb-[50px]'}`}>{children}</main>
 
       {/* Bottom navigation */}
       {!isChatPage && (

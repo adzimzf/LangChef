@@ -632,9 +632,9 @@ export default function Review() {
   }
 
   return (
-    <div className="flex flex-col h-full -m-4 p-4">
+    <div className="flex flex-col h-full -m-4 p-4 overflow-y-auto">
       {/* Header with language tabs */}
-      <div className="mb-3 shrink-0">
+      <div className="mb-3 shrink-0 sticky top-0 z-10 bg-gray-50 pt-4 pb-2">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-lg font-semibold">Review</h2>
           <div className="flex items-center gap-2">
@@ -774,15 +774,15 @@ export default function Review() {
             </div>
           </div>
 
-          {/* Grade buttons - Anki style with next review preview */}
-          <div className="shrink-0 pb-2">
+          {/* Grade buttons - fixed at bottom for one-handed reach */}
+          <div className="fixed bottom-14 left-0 right-0 px-4 pt-3 pb-4 z-40">
             {revealed ? (
-              <div className="grid grid-cols-4 gap-2 pt-4">
+              <div className="grid grid-cols-4 gap-2">
                 {gradeOptions.map((g) => (
                   <button
                     key={g.grade}
                     onClick={() => handleGrade(g.grade)}
-                    className={`flex flex-col items-center justify-center gap-1 py-4 rounded-2xl text-white font-medium ${g.color} hover:opacity-90 active:opacity-80 transition-opacity shadow-sm`}
+                    className={`flex flex-col items-center justify-center gap-1 py-3 rounded-2xl text-white font-medium ${g.color} hover:opacity-90 active:opacity-80 transition-opacity shadow-sm`}
                   >
                     <span className="font-semibold text-sm leading-none">{g.label}</span>
                     <span className="text-[10px] opacity-75 leading-none">{g.nextLabel}</span>
@@ -790,10 +790,10 @@ export default function Review() {
                 ))}
               </div>
             ) : (
-              <div className="flex items-center justify-center pt-4">
+              <div className="flex items-center justify-center">
                 <button
                   onClick={() => setRevealed(true)}
-                  className="px-8 py-3.5 rounded-full bg-blue-500 text-white font-medium text-sm hover:bg-blue-600 active:bg-blue-700 transition-colors shadow-sm"
+                  className="w-full py-3.5 rounded-full bg-blue-500 text-white font-medium text-sm hover:bg-blue-600 active:bg-blue-700 transition-colors shadow-sm"
                 >
                   Show Answer
                 </button>
