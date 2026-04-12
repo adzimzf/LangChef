@@ -32,3 +32,6 @@ Thumbs.db
 
 # Trae
 .trae/
+
+# android
+*.keystore
