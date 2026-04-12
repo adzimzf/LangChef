@@ -42,10 +42,17 @@ const LANGUAGES: Record<string, { label: string; flag: string }> = {
 
 const MAX_REVIEWS_DEFAULT = 100
 const MAX_REVIEWS_KEY = 'max_reviews_per_day'
+const MAX_NEW_CARDS_DEFAULT = 20
+const MAX_NEW_CARDS_KEY = 'max_new_cards_per_day'
 
 function getMaxReviews(): number {
   const val = localStorage.getItem(MAX_REVIEWS_KEY)
   return val ? parseInt(val, 10) || MAX_REVIEWS_DEFAULT : MAX_REVIEWS_DEFAULT
+}
+
+function getMaxNewCards(): number {
+  const val = localStorage.getItem(MAX_NEW_CARDS_KEY)
+  return val ? parseInt(val, 10) || MAX_NEW_CARDS_DEFAULT : MAX_NEW_CARDS_DEFAULT
 }
 
 function todayKey(): string {
@@ -60,6 +67,17 @@ function getReviewedToday(): number {
 function incrementReviewedToday() {
   const key = `reviewed_${todayKey()}`
   const current = getReviewedToday()
+  localStorage.setItem(key, String(current + 1))
+}
+
+function getNewCardsToday(): number {
+  const stored = localStorage.getItem(`new_seen_${todayKey()}`)
+  return stored ? parseInt(stored, 10) : 0
+}
+
+function incrementNewCardsToday() {
+  const key = `new_seen_${todayKey()}`
+  const current = getNewCardsToday()
   localStorage.setItem(key, String(current + 1))
 }
 
@@ -112,8 +130,10 @@ export default function Review() {
   const [importResult, setImportResult] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [reviewedToday, setReviewedToday] = useState(getReviewedToday())
+  const [newCardsToday, setNewCardsToday] = useState(getNewCardsToday())
   const fileInputRef = useRef<HTMLInputElement>(null)
   const maxReviews = getMaxReviews()
+  const maxNewCards = getMaxNewCards()
 
   // Session queue: ordered list of cards to review.
   // Lapsed cards go to the back; passed cards are removed.
@@ -176,15 +196,24 @@ export default function Review() {
     }
     const items: ReviewItem[] = languageGroups[lang] || []
     const now = Date.now() / 1000
+    const newCardsSeen = getNewCardsToday()
     // Cards are due if: no next_review, or next_review <= now
     // Also include new/learning/relearning cards (they may have short-term next_review already passed)
+    // But limit the number of new (state='new') cards introduced today
+    let newCardsInQueue = 0
     const due = items.filter((item: ReviewItem) => {
-      if (!item.next_review) return true
-      return item.next_review <= now
+      // Skip cards that aren't due yet
+      if (item.next_review && item.next_review > now) return false
+      // For new cards, enforce the daily new card limit
+      if (item.state === 'new' || !item.state) {
+        if (newCardsSeen + newCardsInQueue >= maxNewCards) return false
+        newCardsInQueue++
+      }
+      return true
     })
     setSessionQueue(due)
     setSessionCompleted(0)
-  }, [languageGroups])
+  }, [languageGroups, maxNewCards])
 
   // Build queue on initial load
   useEffect(() => {
@@ -254,6 +283,13 @@ export default function Review() {
 
     incrementReviewedToday()
     setReviewedToday(prev => prev + 1)
+
+    // Track new cards introduced today
+    if (card.state === 'new') {
+      incrementNewCardsToday()
+      setNewCardsToday(prev => prev + 1)
+    }
+
     setRevealed(false)
 
     // Determine if the card graduated (left learning/relearning into review)
@@ -280,18 +316,27 @@ export default function Review() {
         next_review: updated.nextReview ? Math.round(updated.nextReview / 1000) : null,
       }
 
+      let newQueue: ReviewItem[]
       if (graduated && !lapsed) {
         // Card graduated to Review: remove from session queue entirely.
         // It will reappear on a future day when its next_review arrives.
-        return [...before, ...after]
+        newQueue = [...before, ...after]
       } else if (lapsed) {
         // Lapse: move updated card to the back of the queue (Anki behavior)
-        return [...before, ...after, updatedItem]
+        newQueue = [...before, ...after, updatedItem]
       } else {
         // Still in learning/relearning: keep in queue with updated next_review.
         // It will become visible again once the step timer elapses.
-        return [...before, updatedItem, ...after]
+        newQueue = [...before, updatedItem, ...after]
       }
+
+      // If new card limit reached, remove remaining new cards from the queue
+      const newSeenAfterGrade = card.state === 'new' ? newCardsToday + 1 : newCardsToday
+      if (newSeenAfterGrade >= maxNewCards) {
+        newQueue = newQueue.filter(item => item.state !== 'new' && item.state !== null)
+      }
+
+      return newQueue
     })
 
     if (graduated && !lapsed) {
@@ -618,9 +663,9 @@ export default function Review() {
         <div className="text-5xl">🏆</div>
         <h3 className="text-lg font-medium text-gray-600">Daily limit reached!</h3>
         <p className="text-sm text-center max-w-xs">
-          You've reviewed {reviewedToday} cards today. Come back tomorrow to keep learning!
+          You've reviewed {reviewedToday} cards today ({newCardsToday} new). Come back tomorrow to keep learning!
         </p>
-        <p className="text-xs text-gray-300">Limit: {maxReviews} reviews/day</p>
+        <p className="text-xs text-gray-300">Limit: {maxReviews} reviews/day · {maxNewCards} new cards/day</p>
         <button
           onClick={loadItems}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gray-100 text-gray-600 text-sm font-medium hover:bg-gray-200 transition-colors"
@@ -638,7 +683,7 @@ export default function Review() {
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-lg font-semibold">Review</h2>
           <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-400">{reviewedToday}/{maxReviews} today</span>
+            <span className="text-xs text-gray-400">{reviewedToday}/{maxReviews} today · {newCardsToday}/{maxNewCards} new</span>
             <button
               onClick={() => setShowImport(true)}
               className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-gray-100 text-gray-600 text-xs font-medium hover:bg-gray-200 transition-colors"
@@ -706,6 +751,9 @@ export default function Review() {
               <div className="text-4xl">🎉</div>
               <p className="text-sm text-center">All done for {LANGUAGES[selectedLang || '']?.label || selectedLang}!</p>
               <p className="text-xs text-gray-300">{deckItems.length} cards in deck, {dueInDeck} due now</p>
+              {newCardsToday >= maxNewCards && (
+                <p className="text-xs text-amber-500">New card limit reached ({maxNewCards}/day) — remaining new cards will appear tomorrow</p>
+              )}
             </>
           )}
           <button

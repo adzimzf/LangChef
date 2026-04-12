@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react'
+import { useState, useEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
   ApiOutlined,
@@ -10,10 +10,13 @@ import {
   ExperimentOutlined,
   InfoCircleOutlined,
   BookOutlined,
+  CloseOutlined,
 } from '@ant-design/icons'
 
 const MAX_REVIEWS_DEFAULT = 100
 const MAX_REVIEWS_KEY = 'max_reviews_per_day'
+const MAX_NEW_CARDS_DEFAULT = 20
+const MAX_NEW_CARDS_KEY = 'max_new_cards_per_day'
 
 export default function Settings() {
   const [apiHost, setApiHost] = useState('')
@@ -21,27 +24,67 @@ export default function Settings() {
   const [model, setModel] = useState('')
   const [models, setModels] = useState<string[]>([])
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'testing' | 'ok' | 'error'>('idle')
-  const [maxReviews, setMaxReviews] = useState(MAX_REVIEWS_DEFAULT)
+  const [maxReviews, setMaxReviews] = useState(String(MAX_REVIEWS_DEFAULT))
+  const [maxNewCards, setMaxNewCards] = useState(String(MAX_NEW_CARDS_DEFAULT))
+  const [dirty, setDirty] = useState(false)
+
+  // Track the last-saved values to detect changes and enable cancel
+  const savedValues = useRef({ apiHost: '', apiKey: '', model: '', maxReviews: String(MAX_REVIEWS_DEFAULT), maxNewCards: String(MAX_NEW_CARDS_DEFAULT) })
 
   useEffect(() => {
     const host = localStorage.getItem('api_host') || ''
     const key = localStorage.getItem('api_key') || ''
     const savedModel = localStorage.getItem('api_model') || ''
     const savedMax = localStorage.getItem(MAX_REVIEWS_KEY)
+    const savedNewCards = localStorage.getItem(MAX_NEW_CARDS_KEY)
+    const mr = savedMax || String(MAX_REVIEWS_DEFAULT)
+    const mnc = savedNewCards || String(MAX_NEW_CARDS_DEFAULT)
     setApiHost(host)
     setApiKey(key)
     setModel(savedModel)
-    setMaxReviews(savedMax ? parseInt(savedMax, 10) || MAX_REVIEWS_DEFAULT : MAX_REVIEWS_DEFAULT)
+    setMaxReviews(mr)
+    setMaxNewCards(mnc)
+    savedValues.current = { apiHost: host, apiKey: key, model: savedModel, maxReviews: mr, maxNewCards: mnc }
   }, [])
 
   function save() {
+    const parsedReviews = Math.max(1, parseInt(maxReviews, 10) || MAX_REVIEWS_DEFAULT)
+    const parsedNewCards = Math.max(0, parseInt(maxNewCards, 10) || MAX_NEW_CARDS_DEFAULT)
     localStorage.setItem('api_host', apiHost.trim())
     localStorage.setItem('api_key', apiKey.trim())
     localStorage.setItem('api_model', model.trim())
-    localStorage.setItem(MAX_REVIEWS_KEY, String(maxReviews))
+    localStorage.setItem(MAX_REVIEWS_KEY, String(parsedReviews))
+    localStorage.setItem(MAX_NEW_CARDS_KEY, String(parsedNewCards))
+    const mr = String(parsedReviews)
+    const mnc = String(parsedNewCards)
+    setMaxReviews(mr)
+    setMaxNewCards(mnc)
+    savedValues.current = { apiHost: apiHost.trim(), apiKey: apiKey.trim(), model: model.trim(), maxReviews: mr, maxNewCards: mnc }
+    setDirty(false)
     setStatus('saved')
     setTimeout(() => setStatus('idle'), 2000)
   }
+
+  function cancel() {
+    setApiHost(savedValues.current.apiHost)
+    setApiKey(savedValues.current.apiKey)
+    setModel(savedValues.current.model)
+    setMaxReviews(savedValues.current.maxReviews)
+    setMaxNewCards(savedValues.current.maxNewCards)
+    setDirty(false)
+  }
+
+  // Detect dirty state
+  useEffect(() => {
+    const sv = savedValues.current
+    const isDirty =
+      apiHost !== sv.apiHost ||
+      apiKey !== sv.apiKey ||
+      model !== sv.model ||
+      maxReviews !== sv.maxReviews ||
+      maxNewCards !== sv.maxNewCards
+    setDirty(isDirty)
+  }, [apiHost, apiKey, model, maxReviews, maxNewCards])
 
   async function test() {
     setStatus('testing')
@@ -81,7 +124,7 @@ export default function Settings() {
   const currentStatus = statusConfig[status]
 
   return (
-    <div className="space-y-5 h-full overflow-y-auto">
+    <div className={`space-y-5 h-full overflow-y-auto ${dirty ? 'pb-28' : ''}`}>
       <div className="sticky top-0 z-10 pt-4 pb-2 bg-gray-50">
         <h2 className="text-lg font-semibold">Settings</h2>
       </div>
@@ -157,13 +200,6 @@ export default function Settings() {
         {/* Action buttons */}
         <div className="flex gap-2">
           <button
-            onClick={save}
-            className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-blue-500 text-white font-medium text-sm hover:bg-blue-600 active:bg-blue-700 transition-colors"
-          >
-            <SaveOutlined />
-            Save
-          </button>
-          <button
             onClick={test}
             className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-gray-100 text-gray-700 font-medium text-sm hover:bg-gray-200 active:bg-gray-300 transition-colors"
           >
@@ -196,7 +232,7 @@ export default function Settings() {
         <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wide px-1">Review</h3>
 
         <div className="bg-white rounded-xl shadow-sm overflow-hidden">
-          <div className="px-4 py-3">
+          <div className="px-4 py-3 border-b border-gray-50">
             <label className="flex items-center gap-2 text-sm text-gray-500 mb-1.5">
               <BookOutlined />
               Max reviews per day
@@ -206,15 +242,54 @@ export default function Settings() {
               min={1}
               max={999}
               value={maxReviews}
-              onChange={(e) => setMaxReviews(Math.max(1, parseInt(e.target.value) || MAX_REVIEWS_DEFAULT))}
+              onChange={(e) => setMaxReviews(e.target.value)}
               className="w-full text-[15px] bg-transparent outline-none placeholder:text-gray-300"
             />
             <p className="text-xs text-gray-400 mt-1">
-              Prevent burnout by limiting daily reviews. Anki default: 100. Current: {maxReviews}
+              Total reviews (new + review cards). Current: {Math.max(1, parseInt(maxReviews, 10) || MAX_REVIEWS_DEFAULT)}
+            </p>
+          </div>
+          <div className="px-4 py-3">
+            <label className="flex items-center gap-2 text-sm text-gray-500 mb-1.5">
+              <BookOutlined />
+              Max new cards per day
+            </label>
+            <input
+              type="number"
+              min={0}
+              max={999}
+              value={maxNewCards}
+              onChange={(e) => setMaxNewCards(e.target.value)}
+              className="w-full text-[15px] bg-transparent outline-none placeholder:text-gray-300"
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              How many new cards to introduce each day. Anki default: 20. Current: {Math.max(0, parseInt(maxNewCards, 10) || MAX_NEW_CARDS_DEFAULT)}
             </p>
           </div>
         </div>
       </div>
+
+      {/* Sticky save/cancel bar when there are unsaved changes */}
+      {dirty && (
+        <div className="fixed bottom-14 left-0 right-0 z-50 px-4 pt-3 pb-4 bg-white/90 backdrop-blur border-t border-gray-100">
+          <div className="flex gap-2">
+            <button
+              onClick={cancel}
+              className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-gray-100 text-gray-700 font-medium text-sm hover:bg-gray-200 active:bg-gray-300 transition-colors"
+            >
+              <CloseOutlined />
+              Cancel
+            </button>
+            <button
+              onClick={save}
+              className="flex-1 flex items-center justify-center gap-2 py-3 rounded-xl bg-blue-500 text-white font-medium text-sm hover:bg-blue-600 active:bg-blue-700 transition-colors"
+            >
+              <SaveOutlined />
+              Save Changes
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }
