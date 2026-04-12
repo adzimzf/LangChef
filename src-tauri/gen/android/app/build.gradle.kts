@@ -14,6 +14,14 @@ val tauriProperties = Properties().apply {
 }
 
 android {
+    signingConfigs {
+        create("release") {
+            storeFile = file("../../../../langchef-release.keystore")
+            storePassword = "langchef123"
+            keyAlias = "langchef"
+            keyPassword = "langchef123"
+        }
+    }
     compileSdk = 36
     namespace = "app.langchef"
     defaultConfig {
@@ -38,6 +46,7 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = true
+            signingConfig = signingConfigs.getByName("release")
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))
