@@ -7,10 +7,11 @@ import { JLPT_LEVELS, DEFAULT_JLPT_LEVEL, JLPT_LEVEL_STORAGE_KEY } from '../lib/
 import type { JLPTLevel } from '../lib/jlpt'
 import { Input } from 'antd'
 const { TextArea } = Input
-import { ArrowLeftOutlined, SendOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, SendOutlined, InfoCircleOutlined, CloseOutlined, PlusOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
+import ReactMarkdown from 'react-markdown'
 
-type Msg = { role: 'user' | 'assistant' | 'system', content: string }
+type Msg = { id: number | null, role: 'user' | 'assistant' | 'system', content: string }
 
 const LANGUAGES: Record<string, { label: string, flag: string }> = {
   ja: { label: 'Japanese', flag: '🇯🇵' },
@@ -21,7 +22,6 @@ const SUGGESTIONS = ['Travel', 'Food', 'Work', 'Daily routine', 'Hobbies']
 
 type GrammarDBItem = { id: string; pattern: string; detail: string; language: string; level: string; is_default: number }
 
-type ChipItem = { type: 'topic' | 'grammar'; label: string; action: string }
 
 function TypingIndicator() {
   return (
@@ -57,64 +57,39 @@ export default function Chat() {
   const [known, setKnown] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
   const [showFurigana, setShowFurigana] = useState(false)
-  const [showMoreChips, setShowMoreChips] = useState(false)
   const [grammarItems, setGrammarItems] = useState<GrammarDBItem[]>([])
+  const [selectedGrammar, setSelectedGrammar] = useState<Set<string>>(new Set())
+  const [showGrammarPicker, setShowGrammarPicker] = useState(false)
+  const [grammarInfoItem, setGrammarInfoItem] = useState<GrammarDBItem | null>(null)
+  const [grammarAnalysis, setGrammarAnalysis] = useState<string | null>(null)
+  const [grammarAnalysisLoading, setGrammarAnalysisLoading] = useState<number | null>(null)
   const logRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<any>(null)
-  const chipsScrollRef = useRef<HTMLDivElement | null>(null)
-  const [hasChipOverflow, setHasChipOverflow] = useState(false)
   const [keyboardInset, setKeyboardInset] = useState(0)
 
   const langInfo = LANGUAGES[lang]
 
-  // Build chip items: topics + grammar (loaded from DB)
-  const allChips = useMemo<ChipItem[]>(() => {
-    const items: ChipItem[] = SUGGESTIONS.map(s => ({
-      type: 'topic',
-      label: s,
-      action: `Talk about ${s.toLowerCase()}.`,
-    }))
-    if (lang === 'ja') {
-      grammarItems.forEach(g => {
-        items.push({
-          type: 'grammar',
-          label: g.pattern,
-          action: `Let's practice the grammar pattern: ${g.pattern}. ${g.detail ? `(${g.detail}) ` : ''}Please use it in a sentence and explain it.`,
-        })
-      })
-    }
-    return items
-  }, [lang, grammarItems])
+  // Selected grammar items (full objects) derived from selectedGrammar IDs
+  const selectedGrammarItems = useMemo(() => {
+    return grammarItems.filter(g => selectedGrammar.has(g.id))
+  }, [grammarItems, selectedGrammar])
 
-  // Detect chip overflow — compare scrollWidth vs clientWidth on the scroll container
+  // Clear grammar selection when JLPT level changes
   useEffect(() => {
-    function checkOverflow() {
-      const el = chipsScrollRef.current
-      if (!el) return
-      setHasChipOverflow(el.scrollWidth > el.clientWidth + 2)
-    }
-    // Delay to ensure layout is painted
-    const id = requestAnimationFrame(() => {
-      requestAnimationFrame(checkOverflow)
-    })
-    window.addEventListener('resize', checkOverflow)
-    return () => {
-      cancelAnimationFrame(id)
-      window.removeEventListener('resize', checkOverflow)
-    }
-  }, [allChips, hasChipOverflow])
+    setSelectedGrammar(new Set())
+  }, [jlptLevel])
 
-  // Close dropdown on outside click
+  // Close grammar picker on outside click
   useEffect(() => {
-    if (!showMoreChips) return
+    if (!showGrammarPicker) return
     function handleClick(e: MouseEvent) {
       const target = e.target as HTMLElement
-      if (target.closest('[data-chips-dropdown]') || target.closest('[data-more-btn]')) return
-      setShowMoreChips(false)
+      if (target.closest('[data-grammar-picker]') || target.closest('[data-grammar-btn]')) return
+      setShowGrammarPicker(false)
     }
     document.addEventListener('click', handleClick)
     return () => document.removeEventListener('click', handleClick)
-  }, [showMoreChips])
+  }, [showGrammarPicker])
 
   // Load settings
   useEffect(() => {
@@ -165,8 +140,8 @@ export default function Chat() {
     async function load() {
       if (!sessionId) return
       try {
-        const res = await invoke<{ role: string, content: string, created_at: number }[]>('db_list_session_messages', { sessionId })
-        setMessages(res.map(m => ({ role: m.role as Msg['role'], content: m.content })))
+        const res = await invoke<{ id: number, role: string, content: string, created_at: number }[]>('db_list_session_messages', { sessionId })
+        setMessages(res.map(m => ({ id: m.id, role: m.role as Msg['role'], content: m.content })))
       } catch {}
     }
     load()
@@ -232,6 +207,46 @@ export default function Chat() {
       const reverted = new Map(difficult)
       reverted.delete(w)
       setDifficult(reverted)
+    }
+  }
+
+  function stripMarkdownFence(text: string): string {
+    return text.replace(/^```markdown\s*\n?/i, '').replace(/\n?```\s*$/,'').trim()
+  }
+
+  async function handleGrammarAnalysis(messageId: number | null, messageContent: string) {
+    if (!messageId) return
+    if (grammarAnalysisLoading === messageId) return
+
+    // Check cache
+    try {
+      const cached = await invoke<{ message_id: number; analysis: string } | null>('db_get_grammar_analysis', { messageId })
+      if (cached) {
+        setGrammarAnalysis(stripMarkdownFence(cached.analysis))
+        return
+      }
+    } catch {}
+
+    // No cache — call LLM
+    if (!apiHost || !apiKey) return
+
+    setGrammarAnalysisLoading(messageId)
+    try {
+      const analysis = await invoke<string>('db_analyze_grammar', {
+        apiHost,
+        apiKey,
+        model,
+        messageId,
+        messageContent,
+        language: lang || 'ja',
+        grammarPatterns: selectedGrammarItems.map(g => g.pattern),
+      })
+      setGrammarAnalysis(stripMarkdownFence(analysis))
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e)
+      setGrammarAnalysis(`**Error analyzing grammar:** ${errMsg}`)
+    } finally {
+      setGrammarAnalysisLoading(null)
     }
   }
 
@@ -316,6 +331,14 @@ export default function Chat() {
       }
     }
 
+    // Grammar practice instructions
+    if (selectedGrammar.size > 0) {
+      const patterns = selectedGrammarItems.map(g => g.pattern)
+      prompt += `\n\nGRAMMAR PRACTICE RULE — YOU MUST FOLLOW THIS:\n`
+      prompt += `The learner wants to practice these grammar patterns: ${patterns.join(', ')}.\n`
+      prompt += `You MUST use ALL of them in your response. Weave them naturally into your sentences.\n`
+    }
+
     if (selectedDifficult.length > 0 || selectedKnown.length > 0) {
       prompt += `\n\nCRITICAL SSR RULE — YOU MUST FOLLOW THIS:\n`
       if (selectedDifficult.length > 0) {
@@ -340,10 +363,13 @@ export default function Chat() {
         setSessionId(id)
       } catch {}
     }
-    const user: Msg = { role: 'user', content: input }
+    const user: Msg = { id: null, role: 'user', content: input }
     const nextMessages = [...messages, user]
     setMessages(nextMessages)
-    await invoke('db_add_message_in_session', { sessionId, role: 'user', content: user.content }).catch(() => {})
+    const userId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'user', content: user.content }).catch(() => -1)
+    if (userId >= 0) {
+      setMessages(prev => prev.map((m, idx) => idx === nextMessages.length - 1 ? { ...m, id: userId } : m))
+    }
     setInput('')
     await invoke('db_increment_session_today').catch(() => {})
     setTimeout(() => {
@@ -368,20 +394,34 @@ export default function Chat() {
           model,
           messages: llmMessages,
         })
-        const assistant: Msg = { role: 'assistant', content: res }
+        const assistant: Msg = { id: null, role: 'assistant', content: res }
+        const targetIdx = nextMessages.length // index in nextMessages+1 array
         setMessages(prev => [...prev, assistant])
-        await invoke('db_add_message_in_session', { sessionId, role: 'assistant', content: res }).catch(() => {})
+        const assistantId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: res }).catch(() => -1)
+        if (assistantId >= 0) {
+          setMessages(prev => prev.map((m, idx) => idx === targetIdx ? { ...m, id: assistantId } : m))
+        }
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e)
-        setMessages(prev => [...prev, { role: 'assistant', content: `[Error] ${errMsg}` }])
-        await invoke('db_add_message_in_session', { sessionId, role: 'assistant', content: `[Error] ${errMsg}` }).catch(() => {})
+        const errorMsg: Msg = { id: null, role: 'assistant', content: `[Error] ${errMsg}` }
+        const errorIdx = nextMessages.length
+        setMessages(prev => [...prev, errorMsg])
+        const errorId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: `[Error] ${errMsg}` }).catch(() => -1)
+        if (errorId >= 0) {
+          setMessages(prev => prev.map((m, idx) => idx === errorIdx ? { ...m, id: errorId } : m))
+        }
       } finally {
         setLoading(false)
       }
     } else {
       const fallback = `Let's talk about it. Which parts feel tricky for you? Try rephrasing in the target language.`
-      setMessages(prev => [...prev, { role: 'assistant', content: fallback }])
-      await invoke('db_add_message_in_session', { sessionId, role: 'assistant', content: fallback }).catch(() => {})
+      const fallbackMsg: Msg = { id: null, role: 'assistant', content: fallback }
+      const fallbackIdx = nextMessages.length
+      setMessages(prev => [...prev, fallbackMsg])
+      const fallbackId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: fallback }).catch(() => -1)
+      if (fallbackId >= 0) {
+        setMessages(prev => prev.map((m, idx) => idx === fallbackIdx ? { ...m, id: fallbackId } : m))
+      }
     }
   }
 
@@ -389,6 +429,10 @@ export default function Chat() {
     if (content.startsWith('[Error]')) {
       return <span className="text-red-500 text-sm">{content}</span>
     }
+    return renderTextSegment(content)
+  }
+
+  function renderTextSegment(content: string) {
     const locale = lang === 'id' ? 'id' : 'ja'
     const isJapanese = lang === 'ja'
 
@@ -505,66 +549,155 @@ export default function Chat() {
         )}
       </div>
 
-      {/* Suggestion chips with overflow */}
-      <div className="shrink-0 bg-white border-b px-3 py-2 relative flex items-center gap-2">
-        <div
-          ref={chipsScrollRef}
-          className="flex gap-2 overflow-hidden flex-1 min-w-0"
-        >
-          {allChips.map(chip => (
+      {/* Topic pills */}
+      <div className="shrink-0 bg-white border-b px-3 py-2">
+        <div className="flex gap-2 overflow-x-auto no-scrollbar">
+          {SUGGESTIONS.map(s => (
             <button
-              key={chip.label}
-              onClick={() => setInput(chip.action)}
-              className={`shrink-0 whitespace-nowrap px-3 py-1.5 rounded-full text-sm transition-colors ${
-                chip.type === 'grammar'
-                  ? 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100 active:bg-indigo-200'
-                  : 'bg-gray-100 text-gray-700 hover:bg-blue-50 hover:text-blue-600 active:bg-blue-100'
-              }`}
+              key={s}
+              onClick={() => setInput(`Talk about ${s.toLowerCase()}.`)}
+              className="shrink-0 whitespace-nowrap px-3 py-1.5 rounded-full text-sm bg-gray-100 text-gray-700 hover:bg-blue-50 hover:text-blue-600 active:bg-blue-100 transition-colors"
             >
-              {chip.label}
+              {s}
             </button>
           ))}
         </div>
-        {hasChipOverflow && (
-          <button
-            data-more-btn
-            onClick={() => setShowMoreChips(!showMoreChips)}
-            className="shrink-0 px-3 py-1.5 rounded-full text-sm bg-gray-200 text-gray-600 hover:bg-gray-300 active:bg-gray-400 transition-colors flex items-center gap-1"
-          >
-            More
-            <svg className={`w-3 h-3 transition-transform ${showMoreChips ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
-            </svg>
-          </button>
-        )}
+      </div>
 
-        {/* Floating scrollable dropdown for all chips */}
-        {showMoreChips && hasChipOverflow && (
-          <div
-            data-chips-dropdown
-            className="absolute right-3 top-full mt-1 bg-white rounded-xl shadow-lg border border-gray-200 z-20 py-2 w-56 max-h-60 overflow-y-auto"
-          >
-            <div className="px-2 space-y-1">
-              {allChips.map(chip => (
+      {/* Grammar selection row */}
+      {lang === 'ja' && (
+        <div className="shrink-0 bg-white border-b px-3 py-2 relative">
+          <div className="flex items-center gap-2 flex-wrap">
+            {selectedGrammarItems.length === 0 && (
+              <span className="text-xs text-gray-400">Select grammar to practice</span>
+            )}
+            {selectedGrammarItems.map(g => (
+              <span
+                key={g.id}
+                className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-sm bg-indigo-50 text-indigo-600"
+              >
                 <button
-                  key={chip.label}
-                  onClick={() => {
-                    setInput(chip.action)
-                    setShowMoreChips(false)
-                  }}
-                  className={`w-full text-left px-3 py-2 rounded-lg text-sm transition-colors ${
-                    chip.type === 'grammar'
-                      ? 'bg-indigo-50 text-indigo-600 hover:bg-indigo-100 active:bg-indigo-200'
-                      : 'text-gray-700 hover:bg-gray-100 active:bg-gray-200'
-                  }`}
+                  onClick={() => setGrammarInfoItem(g)}
+                  className="hover:text-indigo-800 transition-colors"
+                  title="Grammar info"
                 >
-                  {chip.label}
+                  <InfoCircleOutlined style={{ fontSize: 12 }} />
                 </button>
-              ))}
+                <span>{g.pattern}</span>
+                <button
+                  onClick={() => {
+                    const next = new Set(selectedGrammar)
+                    next.delete(g.id)
+                    setSelectedGrammar(next)
+                  }}
+                  className="hover:text-indigo-800 transition-colors"
+                  title="Remove"
+                >
+                  <CloseOutlined style={{ fontSize: 10 }} />
+                </button>
+              </span>
+            ))}
+            <button
+              data-grammar-btn
+              onClick={() => setShowGrammarPicker(!showGrammarPicker)}
+              className="shrink-0 px-2.5 py-1 rounded-full text-sm bg-indigo-50 text-indigo-600 hover:bg-indigo-100 active:bg-indigo-200 transition-colors flex items-center gap-1"
+            >
+              <PlusOutlined style={{ fontSize: 11 }} />
+              Grammar
+            </button>
+          </div>
+
+          {/* Grammar picker dropdown */}
+          {showGrammarPicker && (
+            <div
+              data-grammar-picker
+              className="absolute left-3 right-3 top-full mt-1 bg-white rounded-xl shadow-lg border border-gray-200 z-20 py-2 max-h-[50vh] overflow-y-auto"
+            >
+              <div className="px-2 space-y-0.5">
+                {grammarItems.length === 0 && (
+                  <div className="px-3 py-2 text-sm text-gray-400">No grammar items for this level</div>
+                )}
+                {grammarItems.map(g => {
+                  const isSelected = selectedGrammar.has(g.id)
+                  return (
+                    <label
+                      key={g.id}
+                      className="flex items-center gap-2 px-3 py-2 rounded-lg text-sm hover:bg-gray-50 cursor-pointer transition-colors"
+                    >
+                      <input
+                        type="checkbox"
+                        checked={isSelected}
+                        onChange={() => {
+                          const next = new Set(selectedGrammar)
+                          if (isSelected) next.delete(g.id)
+                          else next.add(g.id)
+                          setSelectedGrammar(next)
+                        }}
+                        className="accent-indigo-500"
+                      />
+                      <span className={isSelected ? 'text-indigo-600 font-medium' : 'text-gray-700'}>
+                        {g.pattern}
+                      </span>
+                    </label>
+                  )
+                })}
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Grammar info modal */}
+      {grammarInfoItem && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+          onClick={() => setGrammarInfoItem(null)}
+        >
+          <div
+            className="bg-white rounded-2xl p-5 mx-4 max-w-sm w-full max-h-[70vh] overflow-y-auto"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-base font-semibold">{grammarInfoItem.pattern}</h3>
+              <button
+                onClick={() => setGrammarInfoItem(null)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <CloseOutlined />
+              </button>
+            </div>
+            <div className="grammar-detail prose prose-sm max-w-none text-gray-600">
+              <ReactMarkdown>{grammarInfoItem.detail}</ReactMarkdown>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      )}
+
+      {/* Grammar analysis modal */}
+      {grammarAnalysis !== null && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+          onClick={() => setGrammarAnalysis(null)}
+        >
+          <div
+            className="bg-white rounded-2xl p-5 mx-4 max-w-sm w-full max-h-[70vh] overflow-y-auto"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-base font-semibold">Grammar Analysis</h3>
+              <button
+                onClick={() => setGrammarAnalysis(null)}
+                className="text-gray-400 hover:text-gray-600"
+              >
+                <CloseOutlined />
+              </button>
+            </div>
+            <div className="grammar-detail prose prose-sm max-w-none text-gray-600">
+              <ReactMarkdown>{grammarAnalysis}</ReactMarkdown>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Messages area */}
       <div ref={logRef} className="flex-1 overflow-y-auto px-3 py-3">
@@ -589,7 +722,20 @@ export default function Chat() {
                 }
               `}
             >
-              {m.role === 'assistant' ? renderAssistantContent(m.content) : m.content}
+              {m.role === 'assistant' ? (
+                <div>
+                  {renderAssistantContent(m.content)}
+                  <button
+                    onClick={() => handleGrammarAnalysis(m.id, m.content)}
+                    disabled={m.id === null || grammarAnalysisLoading === m.id}
+                    className="mt-1 text-gray-400 hover:text-indigo-500 transition-colors disabled:opacity-30"
+                    title="Analyze grammar"
+                  >
+                    <InfoCircleOutlined style={{ fontSize: 14 }} />
+                    {grammarAnalysisLoading === m.id && <span className="ml-1 text-xs text-gray-400">analyzing...</span>}
+                  </button>
+                </div>
+              ) : m.content}
             </div>
           </div>
         ))}
