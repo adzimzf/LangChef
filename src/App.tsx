@@ -5,6 +5,8 @@ import Chats from './pages/Chats'
 import Settings from './pages/Settings'
 import Review from './pages/Review'
 import Telemetry from './pages/Telemetry'
+import WordsList from './pages/WordsList'
+import Grammar from './pages/Grammar'
 import Layout from './components/Layout'
 
 export default function App() {
@@ -16,6 +18,8 @@ export default function App() {
           <Route path="/chats" element={<Chats />} />
           <Route path="/chat" element={<Chat />} />
           <Route path="/review" element={<Review />} />
+          <Route path="/words" element={<WordsList />} />
+          <Route path="/grammar" element={<Grammar />} />
           <Route path="/telemetry" element={<Telemetry />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
