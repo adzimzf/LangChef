@@ -63,6 +63,7 @@ export default function Chat() {
   const inputRef = useRef<any>(null)
   const chipsScrollRef = useRef<HTMLDivElement | null>(null)
   const [hasChipOverflow, setHasChipOverflow] = useState(false)
+  const [keyboardInset, setKeyboardInset] = useState(0)
 
   const langInfo = LANGUAGES[lang]
 
@@ -123,6 +124,26 @@ export default function Chat() {
     setApiHost(host)
     setApiKey(key)
     setModel(m)
+  }, [])
+
+  useEffect(() => {
+    const vv: any = (window as any).visualViewport
+    function updateInset() {
+      if (!vv) { setKeyboardInset(0); return }
+      const inset = Math.max(0, window.innerHeight - vv.height - vv.offsetTop)
+      setKeyboardInset(inset)
+    }
+    updateInset()
+    if (vv) {
+      vv.addEventListener('resize', updateInset)
+      vv.addEventListener('scroll', updateInset)
+    }
+    return () => {
+      if (vv) {
+        vv.removeEventListener('resize', updateInset)
+        vv.removeEventListener('scroll', updateInset)
+      }
+    }
   }, [])
 
   // Load grammar items from DB for current language + level
@@ -190,6 +211,13 @@ export default function Chat() {
       logRef.current.scrollTop = logRef.current.scrollHeight
     }
   }, [messages.length, loading])
+
+  // When keyboard opens, keep latest messages visible
+  useEffect(() => {
+    if (keyboardInset > 0 && logRef.current) {
+      logRef.current.scrollTop = logRef.current.scrollHeight
+    }
+  }, [keyboardInset])
 
   async function markWordDifficult(word: string) {
     const w = word.toLowerCase()
@@ -436,7 +464,10 @@ export default function Chat() {
   }
 
   return (
-    <div className="flex flex-col h-dvh bg-gray-50">
+    <div
+      className="flex flex-col h-dvh bg-gray-50"
+      style={{ height: `calc(100vh - ${keyboardInset}px)` }}
+    >
       {/* Top bar */}
       <div className="sticky top-0 z-10 flex items-center gap-3 px-3 py-2 bg-white border-b shrink-0 safe-top">
         <button
@@ -566,7 +597,10 @@ export default function Chat() {
       </div>
 
       {/* Bottom input bar */}
-      <div className="shrink-0 bg-white border-t px-3 py-2 safe-bottom mb-1">
+      <div
+        className="shrink-0 bg-white border-t px-3 py-2 safe-bottom mb-1"
+        style={{ paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + ${keyboardInset}px)` }}
+      >
         <div className="flex items-end gap-2">
           <TextArea
             ref={inputRef}
