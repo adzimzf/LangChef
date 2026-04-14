@@ -20,7 +20,24 @@ const LANGUAGES: Record<string, { label: string, flag: string }> = {
 
 const SUGGESTIONS = ['Travel', 'Food', 'Work', 'Daily routine', 'Hobbies']
 
+const MAX_REVIEWS_DEFAULT = 100
+const MAX_REVIEWS_KEY = 'max_reviews_per_day'
+const MAX_NEW_CARDS_DEFAULT = 20
+const MAX_NEW_CARDS_KEY = 'max_new_cards_per_day'
+
+function getMaxReviews(): number {
+  const val = localStorage.getItem(MAX_REVIEWS_KEY)
+  return val ? parseInt(val, 10) || MAX_REVIEWS_DEFAULT : MAX_REVIEWS_DEFAULT
+}
+
+function getMaxNewCards(): number {
+  const val = localStorage.getItem(MAX_NEW_CARDS_KEY)
+  return val ? parseInt(val, 10) || MAX_NEW_CARDS_DEFAULT : MAX_NEW_CARDS_DEFAULT
+}
+
 type GrammarDBItem = { id: string; pattern: string; detail: string; language: string; level: string; is_default: number }
+
+type ReviewItemRaw = { id: string; content: string; EF: number; I: number; R: number; tags: string | null; state: string | null; next_review: number | null }
 
 
 function TypingIndicator() {
@@ -53,7 +70,7 @@ export default function Chat() {
   const [model, setModel] = useState('')
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<Msg[]>([])
-  const [difficult, setDifficult] = useState<Map<string, { EF: number; R: number }>>(new Map())
+  const [difficult, setDifficult] = useState<Map<string, { EF: number; R: number; isNew: boolean }>>(new Map())
   const [known, setKnown] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
   const [showFurigana, setShowFurigana] = useState(false)
@@ -148,17 +165,41 @@ export default function Chat() {
   }, [sessionId])
 
   // Load difficult words from review_items (with EF and R for color)
+  // Applies same max_new_cards and max_reviews limits as the review menu
   useEffect(() => {
     async function load() {
       try {
-        const items = await invoke<{ id: string, content: string, EF: number, I: number, R: number, tags: string | null }[]>('db_get_review_items')
-        const hardMap = new Map<string, { EF: number; R: number }>()
+        const items = await invoke<ReviewItemRaw[]>('db_get_review_items')
+        const maxReviews = getMaxReviews()
+        const maxNewCards = getMaxNewCards()
+
+        const hardMap = new Map<string, { EF: number; R: number; isNew: boolean }>()
+        let newDifficultCount = 0
+        let totalDifficultCount = 0
+
         items.forEach(i => {
           // Words tagged 'hard' OR new/learning words (R < 3) need reinforcement
-          if (i.tags === 'hard' || i.R < 3) hardMap.set(i.content.toLowerCase(), { EF: i.EF, R: i.R })
+          if (i.tags === 'hard' || i.R < 3) {
+            const isNew = i.state === 'new' || !i.state
+            // Enforce max new cards limit on new difficult words
+            if (isNew && newDifficultCount >= maxNewCards) return
+            // Enforce max reviews limit on total difficult words
+            if (totalDifficultCount >= maxReviews) return
+            hardMap.set(i.content.toLowerCase(), { EF: i.EF, R: i.R, isNew })
+            if (isNew) newDifficultCount++
+            totalDifficultCount++
+          }
         })
         setDifficult(hardMap)
-        const knownWords = new Set(items.filter(i => i.R >= 3).map(i => i.content.toLowerCase()))
+
+        // Known words: R >= 3, also capped so total (difficult + known) doesn't exceed maxReviews
+        const knownWords = new Set<string>()
+        let knownCount = 0
+        items.filter(i => i.R >= 3).forEach(i => {
+          if (totalDifficultCount + knownCount >= maxReviews) return
+          knownWords.add(i.content.toLowerCase())
+          knownCount++
+        })
         setKnown(knownWords)
       } catch {}
     }
@@ -197,7 +238,7 @@ export default function Chat() {
   async function markWordDifficult(word: string) {
     const w = word.toLowerCase()
     const next = new Map(difficult)
-    next.set(w, { EF: 2.5, R: 0 })
+    next.set(w, { EF: 2.5, R: 0, isNew: true })
     setDifficult(next)
     try {
       await invoke('db_upsert_review_item', { content: w, tag: 'hard', language: lang || null })
