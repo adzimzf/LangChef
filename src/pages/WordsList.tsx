@@ -441,7 +441,7 @@ export default function WordsList() {
               </div>
               {selectedItem.next_review && (
                 <div className="text-xs text-gray-300 mt-1">
-                  Next review: {new Date(selectedItem.next_review * 1000).toLocaleDateString()}
+                  Next review: {new Date(selectedItem.next_review * 1000).toLocaleString()}
                 </div>
               )}
             </div>
@@ -803,6 +803,11 @@ export default function WordsList() {
                         EF {item.EF.toFixed(2)} &middot; R {item.R}
                         {item.lapse_count > 0 && ` \u00B7 ${item.lapse_count} lapse${item.lapse_count > 1 ? 's' : ''}`}
                       </span>
+                      {item.next_review && (
+                        <span className="text-[10px] text-gray-400 shrink-0">
+                          Next Review: {new Date(item.next_review * 1000).toLocaleString()}
+                        </span>
+                      )}
                     </div>
                   </div>
 

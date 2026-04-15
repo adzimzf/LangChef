@@ -168,6 +168,21 @@ export default function Review() {
     setLoading(false)
   }
 
+  async function loadDueItems(lang: string | null) {
+    try {
+      const remaining = Math.max(0, maxNewCards - getNewCardsToday())
+      const items = await invoke<ReviewItem[]>('db_get_due_review_items', {
+        language: lang,
+        limit: maxReviews,
+        newCardsRemaining: remaining,
+      })
+      // don't remove this line
+      console.log(items)
+      setSessionQueue(items)
+      setSessionCompleted(0)
+    } catch {}
+  }
+
   // Group items by language — skip items without a language
   const languageGroups = useMemo(() => {
     const groups: Record<string, ReviewItem[]> = {}
@@ -188,32 +203,10 @@ export default function Review() {
     }
   }, [languageGroups])
 
-  // Build session queue from DB. Only called on mount, language change, or manual refresh.
+  // Build session queue from backend. Only called on mount, language change, or manual refresh.
   const buildQueue = useCallback((lang: string | null) => {
-    if (!lang) {
-      setSessionQueue([])
-      return
-    }
-    const items: ReviewItem[] = languageGroups[lang] || []
-    const now = Date.now() / 1000
-    const newCardsSeen = getNewCardsToday()
-    // Cards are due if: no next_review, or next_review <= now
-    // Also include new/learning/relearning cards (they may have short-term next_review already passed)
-    // But limit the number of new (state='new') cards introduced today
-    let newCardsInQueue = 0
-    const due = items.filter((item: ReviewItem) => {
-      // Skip cards that aren't due yet
-      if (item.next_review && item.next_review > now) return false
-      // For new cards, enforce the daily new card limit
-      if (item.state === 'new' || !item.state) {
-        if (newCardsSeen + newCardsInQueue >= maxNewCards) return false
-        newCardsInQueue++
-      }
-      return true
-    })
-    setSessionQueue(due)
-    setSessionCompleted(0)
-  }, [languageGroups, maxNewCards])
+    loadDueItems(lang)
+  }, [maxNewCards, maxReviews])
 
   // Build queue on initial load
   useEffect(() => {
@@ -234,28 +227,26 @@ export default function Review() {
   }, [selectedLang, buildQueue])
 
   const currentCard = sessionQueue[0]
-  const dailyLimitReached = reviewedToday >= maxReviews
 
-  // Find the first immediately-due card from the queue.
-  // Cards in learning/relearning may have a short-term next_review that hasn't
-  // arrived yet — those should be skipped until their step timer elapses.
-  const nowSeconds = Date.now() / 1000
-  const dueQueueIndex = sessionQueue.findIndex(
-    item => !item.next_review || item.next_review <= nowSeconds
-  )
-  const visibleCard = dueQueueIndex >= 0 ? sessionQueue[dueQueueIndex] : null
+  // End of today (23:59:59 local) in seconds for consistent due-counting
+  const endOfDaySeconds = (() => {
+    const d = new Date()
+    d.setHours(23, 59, 59, 999)
+    return Math.floor(d.getTime() / 1000)
+  })()
 
-  // Count how many cards in the queue are immediately due right now
-  const immediatelyDueCount = sessionQueue.filter(
-    item => !item.next_review || item.next_review <= nowSeconds
-  ).length
+  // Backend already returns only items due by end of today.
+  // Just use the first item — no additional time-based filtering needed.
+  const visibleCard = sessionQueue[0] || null
+
+  // Count total items in queue (all are due by end of day)
+  const immediatelyDueCount = sessionQueue.length
 
   // Stats for the selected language
   const deckItems: ReviewItem[] = selectedLang ? (languageGroups[selectedLang] || []) : []
   const dueInDeck = (() => {
     if (!selectedLang) return 0
-    const now = Date.now() / 1000
-    return deckItems.filter((item: ReviewItem) => !item.next_review || item.next_review <= now).length
+    return deckItems.filter((item: ReviewItem) => !item.next_review || item.next_review <= endOfDaySeconds).length
   })()
 
   // Anki-style grade options with dynamic next-review preview
@@ -281,8 +272,11 @@ export default function Review() {
     // Update SRS in DB (fire and forget)
     invoke('db_update_srs', { id: visibleCard.id, grade }).catch(() => {})
 
-    incrementReviewedToday()
-    setReviewedToday(prev => prev + 1)
+    // Only count as reviewed if card's new next_review is tomorrow or later
+    if (updated.nextReview && updated.nextReview > endOfDaySeconds * 1000) {
+      incrementReviewedToday()
+      setReviewedToday(prev => prev + 1)
+    }
 
     // Track new cards introduced today
     if (card.state === 'new') {
@@ -297,7 +291,7 @@ export default function Review() {
 
     // Update session queue with locally computed new state
     setSessionQueue(prev => {
-      // Find the card in the queue (it might not be at [0] if we skipped waiting cards)
+      // Find the card in the queue
       const idx = prev.findIndex(item => item.id === visibleCard.id)
       if (idx < 0) return prev
 
@@ -321,13 +315,10 @@ export default function Review() {
         // Card graduated to Review: remove from session queue entirely.
         // It will reappear on a future day when its next_review arrives.
         newQueue = [...before, ...after]
-      } else if (lapsed) {
-        // Lapse: move updated card to the back of the queue (Anki behavior)
-        newQueue = [...before, ...after, updatedItem]
       } else {
-        // Still in learning/relearning: keep in queue with updated next_review.
-        // It will become visible again once the step timer elapses.
-        newQueue = [...before, updatedItem, ...after]
+        // All other cases (Again/Hard/Good on learning/relearning): move to back of queue.
+        // Even if next_review is still today, the card cycles to the end.
+        newQueue = [...before, ...after, updatedItem]
       }
 
       // If new card limit reached, remove remaining new cards from the queue
@@ -656,26 +647,6 @@ export default function Review() {
   // Language tabs
   const langKeys = Object.keys(languageGroups)
 
-  // Daily limit reached
-  if (dailyLimitReached) {
-    return (
-      <div className="flex flex-col items-center justify-center py-16 text-gray-400 gap-4">
-        <div className="text-5xl">🏆</div>
-        <h3 className="text-lg font-medium text-gray-600">Daily limit reached!</h3>
-        <p className="text-sm text-center max-w-xs">
-          You've reviewed {reviewedToday} cards today ({newCardsToday} new). Come back tomorrow to keep learning!
-        </p>
-        <p className="text-xs text-gray-300">Limit: {maxReviews} reviews/day · {maxNewCards} new cards/day</p>
-        <button
-          onClick={loadItems}
-          className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gray-100 text-gray-600 text-sm font-medium hover:bg-gray-200 transition-colors"
-        >
-          <SettingOutlined /> Change in Settings
-        </button>
-      </div>
-    )
-  }
-
   return (
     <div className="flex flex-col h-full -m-4 p-4 overflow-y-auto">
       {/* Header with language tabs */}
@@ -700,7 +671,7 @@ export default function Review() {
               const info = LANGUAGES[lang]
               const count = (languageGroups[lang] || []).length
               const dueCount = (languageGroups[lang] || []).filter(
-                (item: ReviewItem) => !item.next_review || item.next_review <= Date.now() / 1000
+                (item: ReviewItem) => !item.next_review || item.next_review <= endOfDaySeconds
               ).length
               return (
                 <button
@@ -730,7 +701,7 @@ export default function Review() {
               />
             </div>
             <span className="text-xs text-gray-400 shrink-0">
-              {immediatelyDueCount} due{sessionQueue.length - immediatelyDueCount > 0 ? ` (${sessionQueue.length - immediatelyDueCount} waiting)` : ''}
+              {immediatelyDueCount} due
             </span>
           </div>
         )}
@@ -739,23 +710,14 @@ export default function Review() {
       {/* No due cards for selected language */}
       {!visibleCard ? (
         <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-3">
-          {sessionQueue.length > 0 ? (
-            <>
-              <div className="text-4xl">⏳</div>
-              <p className="text-sm text-center">Cards in learning — step timer hasn't elapsed yet.</p>
-              <p className="text-xs text-gray-300">{sessionQueue.length} card{sessionQueue.length !== 1 ? 's' : ''} waiting for step interval</p>
-              <p className="text-xs text-gray-300">Auto-refreshing every 5 seconds</p>
-            </>
-          ) : (
-            <>
-              <div className="text-4xl">🎉</div>
-              <p className="text-sm text-center">All done for {LANGUAGES[selectedLang || '']?.label || selectedLang}!</p>
-              <p className="text-xs text-gray-300">{deckItems.length} cards in deck, {dueInDeck} due now</p>
-              {newCardsToday >= maxNewCards && (
-                <p className="text-xs text-amber-500">New card limit reached ({maxNewCards}/day) — remaining new cards will appear tomorrow</p>
-              )}
-            </>
-          )}
+          <>
+            <div className="text-4xl">🎉</div>
+            <p className="text-sm text-center">All done for {LANGUAGES[selectedLang || '']?.label || selectedLang}!</p>
+            <p className="text-xs text-gray-300">{deckItems.length} cards in deck, {dueInDeck} due now</p>
+            {newCardsToday >= maxNewCards && (
+              <p className="text-xs text-amber-500">New card limit reached ({maxNewCards}/day) — remaining new cards will appear tomorrow</p>
+            )}
+          </>
           <button
             onClick={refreshFromDB}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gray-100 text-gray-600 text-sm font-medium hover:bg-gray-200 transition-colors"
@@ -813,7 +775,7 @@ export default function Review() {
                     </div>
                     {visibleCard.next_review && (
                       <div className="text-xs text-gray-300 mt-1">
-                        Next review: {new Date(visibleCard.next_review * 1000).toLocaleDateString()}
+                        Next review: {new Date(visibleCard.next_review * 1000).toLocaleString()}
                       </div>
                     )}
                   </div>

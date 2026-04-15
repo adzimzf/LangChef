@@ -644,7 +644,10 @@ fn db_upsert_review_item(app: tauri::AppHandle, content: String, tag: Option<Str
 #[tauri::command]
 fn db_get_review_items(app: tauri::AppHandle) -> Result<Vec<ReviewItem>, String> {
     let conn = open_db(&app)?;
-    let mut stmt = conn.prepare("SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail FROM review_items").map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(
+        "SELECT
+            id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail
+        FROM review_items").map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], |row| {
         Ok(ReviewItem {
             id: row.get(0)?,
@@ -796,6 +799,92 @@ fn db_get_review_items_by_language(app: tauri::AppHandle, language: String) -> R
     for r in rows {
         items.push(r.map_err(|e| e.to_string())?);
     }
+    Ok(items)
+}
+
+#[tauri::command]
+fn db_get_due_review_items(
+    app: tauri::AppHandle,
+    language: Option<String>,
+    limit: Option<i64>,
+    new_cards_remaining: Option<i64>,
+) -> Result<Vec<ReviewItem>, String> {
+    let conn = open_db(&app)?;
+    // End of today (23:59:59 local time) — include all cards due by end of day
+    let end_of_day = {
+        let now_local = chrono::Local::now();
+        now_local
+            .date_naive()
+            .and_hms_opt(23, 59, 59)
+            .unwrap()
+            .and_local_timezone(chrono::Local)
+            .unwrap()
+            .with_timezone(&chrono::Utc)
+            .timestamp()
+    };
+    let limit_val = limit.unwrap_or(200);
+
+    let mut sql = String::from(
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail
+         FROM review_items
+         WHERE (next_review IS NULL OR next_review <= ?1)"
+    );
+
+    if language.is_some() {
+        sql.push_str(" AND language = ?2");
+    }
+
+    // Order: non-new cards first (review/learning/relearning), then new cards
+    sql.push_str(" ORDER BY CASE WHEN state='new' OR state='' OR state IS NULL THEN 1 ELSE 0 END, next_review ASC NULLS FIRST LIMIT ?");
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let mut items = Vec::new();
+
+    fn map_row(row: &rusqlite::Row) -> rusqlite::Result<ReviewItem> {
+        Ok(ReviewItem {
+            id: row.get(0)?,
+            content: row.get(1)?,
+            EF: row.get(2)?,
+            I: row.get(3)?,
+            R: row.get(4)?,
+            state: row.get(5)?,
+            step: row.get(6)?,
+            lapse_count: row.get(7)?,
+            next_review: row.get(8)?,
+            tags: row.get(9)?,
+            language: row.get(10)?,
+            detail: row.get(11)?,
+        })
+    }
+
+    let rows = if let Some(ref lang) = language {
+        stmt.query_map(params![end_of_day, lang, limit_val], map_row).map_err(|e| e.to_string())?
+    } else {
+        stmt.query_map(params![end_of_day, limit_val], map_row).map_err(|e| e.to_string())?
+    };
+
+    for r in rows {
+        items.push(r.map_err(|e| e.to_string())?);
+    }
+
+    // Apply new card cap on the Rust side
+    if let Some(new_cap) = new_cards_remaining {
+        if new_cap <= 0 {
+            items.retain(|item| item.state != "new" && item.state != "");
+        } else {
+            let mut new_count = 0i64;
+            items.retain(|item| {
+                if item.state == "new" || item.state.is_empty() {
+                    if new_count >= new_cap {
+                        return false;
+                    }
+                    new_count += 1;
+                }
+                true
+            });
+        }
+    }
+
     Ok(items)
 }
 
@@ -1161,6 +1250,7 @@ pub fn run() {
             db_delete_session,
             db_update_review_detail,
             db_get_review_items_by_language,
+            db_get_due_review_items,
             db_import_review_items,
             db_generate_detail,
             db_delete_review_item,
