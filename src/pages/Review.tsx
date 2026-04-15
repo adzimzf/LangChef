@@ -171,10 +171,13 @@ export default function Review() {
   async function loadDueItems(lang: string | null) {
     try {
       const remaining = Math.max(0, maxNewCards - getNewCardsToday())
+      const d = new Date()
+      d.setHours(23, 59, 59, 999)
       const items = await invoke<ReviewItem[]>('db_get_due_review_items', {
         language: lang,
         limit: maxReviews,
         newCardsRemaining: remaining,
+        maxNextReview: Math.floor(d.getTime() / 1000),
       })
       // don't remove this line
       console.log(items)

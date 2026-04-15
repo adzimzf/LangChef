@@ -35,6 +35,15 @@ function getMaxNewCards(): number {
   return val ? parseInt(val, 10) || MAX_NEW_CARDS_DEFAULT : MAX_NEW_CARDS_DEFAULT
 }
 
+function todayKey(): string {
+  return new Date().toISOString().slice(0, 10)
+}
+
+function getNewCardsToday(): number {
+  const stored = localStorage.getItem(`new_seen_${todayKey()}`)
+  return stored ? parseInt(stored, 10) : 0
+}
+
 type GrammarDBItem = { id: string; pattern: string; detail: string; language: string; level: string; is_default: number }
 
 type ReviewItemRaw = { id: string; content: string; EF: number; I: number; R: number; tags: string | null; state: string | null; next_review: number | null }
@@ -71,6 +80,7 @@ export default function Chat() {
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<Msg[]>([])
   const [difficult, setDifficult] = useState<Map<string, { EF: number; R: number; isNew: boolean }>>(new Map())
+  const [colorDifficult, setColorDifficult] = useState<Map<string, { EF: number; R: number; isNew: boolean }>>(new Map())
   const [known, setKnown] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
   const [showFurigana, setShowFurigana] = useState(false)
@@ -164,43 +174,66 @@ export default function Chat() {
     load()
   }, [sessionId])
 
-  // Load difficult words from review_items (with EF and R for color)
-  // Applies same max_new_cards and max_reviews limits as the review menu
+  // Load difficult words from review_items
+  // Two separate queries:
+  //   - LLM prompt words: due by tomorrow (focused reinforcement), with limits
+  //   - Color rendering: due by next week (broader visual feedback)
   useEffect(() => {
     async function load() {
       try {
-        const items = await invoke<ReviewItemRaw[]>('db_get_review_items')
         const maxReviews = getMaxReviews()
         const maxNewCards = getMaxNewCards()
+        const remaining = Math.max(0, maxNewCards - getNewCardsToday())
+
+        // ── Query 1: For LLM system prompt — due by tomorrow, limited ──
+        const dTomorrow = new Date()
+        dTomorrow.setDate(dTomorrow.getDate() + 1)
+        dTomorrow.setHours(23, 59, 59, 999)
+
+        const llmItems = await invoke<ReviewItemRaw[]>('db_get_due_review_items', {
+          language: null,
+          limit: maxReviews,
+          newCardsRemaining: remaining,
+          maxNextReview: Math.floor(dTomorrow.getTime() / 1000),
+        })
 
         const hardMap = new Map<string, { EF: number; R: number; isNew: boolean }>()
         let newDifficultCount = 0
-        let totalDifficultCount = 0
 
-        items.forEach(i => {
-          // Words tagged 'hard' OR new/learning words (R < 3) need reinforcement
+        llmItems.forEach(i => {
           if (i.tags === 'hard' || i.R < 3) {
             const isNew = i.state === 'new' || !i.state
-            // Enforce max new cards limit on new difficult words
-            if (isNew && newDifficultCount >= maxNewCards) return
-            // Enforce max reviews limit on total difficult words
-            if (totalDifficultCount >= maxReviews) return
             hardMap.set(i.content.toLowerCase(), { EF: i.EF, R: i.R, isNew })
             if (isNew) newDifficultCount++
-            totalDifficultCount++
           }
         })
         setDifficult(hardMap)
 
-        // Known words: R >= 3, also capped so total (difficult + known) doesn't exceed maxReviews
         const knownWords = new Set<string>()
-        let knownCount = 0
-        items.filter(i => i.R >= 3).forEach(i => {
-          if (totalDifficultCount + knownCount >= maxReviews) return
+        llmItems.filter(i => i.R >= 3).forEach(i => {
           knownWords.add(i.content.toLowerCase())
-          knownCount++
         })
         setKnown(knownWords)
+
+        // ── Query 2: For color rendering — due by next week, broader window ──
+        const dNextWeek = new Date()
+        dNextWeek.setDate(dNextWeek.getDate() + 7)
+        dNextWeek.setHours(23, 59, 59, 999)
+
+        const colorItems = await invoke<ReviewItemRaw[]>('db_get_due_review_items', {
+          language: null,
+          limit: 500,
+          newCardsRemaining: 50,
+          maxNextReview: Math.floor(dNextWeek.getTime() / 1000),
+        })
+
+        const colorMap = new Map<string, { EF: number; R: number; isNew: boolean }>()
+        colorItems.forEach(i => {
+          if (i.tags === 'hard' || i.R < 3) {
+            colorMap.set(i.content.toLowerCase(), { EF: i.EF, R: i.R, isNew: i.state === 'new' || !i.state })
+          }
+        })
+        setColorDifficult(colorMap)
       } catch {}
     }
     load()
@@ -240,6 +273,10 @@ export default function Chat() {
     const next = new Map(difficult)
     next.set(w, { EF: 2.5, R: 0, isNew: true })
     setDifficult(next)
+    // Also add to color map so it renders immediately
+    const colorNext = new Map(colorDifficult)
+    colorNext.set(w, { EF: 2.5, R: 0, isNew: true })
+    setColorDifficult(colorNext)
     try {
       await invoke('db_upsert_review_item', { content: w, tag: 'hard', language: lang || null })
     } catch (e) {
@@ -248,6 +285,9 @@ export default function Chat() {
       const reverted = new Map(difficult)
       reverted.delete(w)
       setDifficult(reverted)
+      const colorReverted = new Map(colorDifficult)
+      colorReverted.delete(w)
+      setColorDifficult(colorReverted)
     }
   }
 
@@ -499,7 +539,7 @@ export default function Chat() {
         }
 
         const w = part.toLowerCase()
-        const diffInfo = difficult.get(w)
+        const diffInfo = colorDifficult.get(w)
         const isHard = !!diffInfo
         const slice = sliceAnnotated(annotated, annotIdx, part.length)
         annotIdx += part.length
@@ -527,7 +567,7 @@ export default function Chat() {
     return parts.map((part, idx) => {
       if (!isWordSegment(part)) return <span key={idx}>{part}</span>
       const w = part.toLowerCase()
-      const diffInfo = difficult.get(w)
+      const diffInfo = colorDifficult.get(w)
       const isHard = !!diffInfo
 
       return (

@@ -808,19 +808,23 @@ fn db_get_due_review_items(
     language: Option<String>,
     limit: Option<i64>,
     new_cards_remaining: Option<i64>,
+    max_next_review: Option<i64>,
 ) -> Result<Vec<ReviewItem>, String> {
     let conn = open_db(&app)?;
-    // End of today (23:59:59 local time) — include all cards due by end of day
-    let end_of_day = {
-        let now_local = chrono::Local::now();
-        now_local
-            .date_naive()
-            .and_hms_opt(23, 59, 59)
-            .unwrap()
-            .and_local_timezone(chrono::Local)
-            .unwrap()
-            .with_timezone(&chrono::Utc)
-            .timestamp()
+    // Use provided cutoff, or default to end of today (23:59:59 local)
+    let end_of_day = match max_next_review {
+        Some(ts) => ts,
+        None => {
+            let now_local = chrono::Local::now();
+            now_local
+                .date_naive()
+                .and_hms_opt(23, 59, 59)
+                .unwrap()
+                .and_local_timezone(chrono::Local)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+                .timestamp()
+        }
     };
     let limit_val = limit.unwrap_or(200);
 
