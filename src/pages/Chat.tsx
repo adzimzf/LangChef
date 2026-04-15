@@ -101,8 +101,28 @@ export default function Chat() {
     return grammarItems.filter(g => selectedGrammar.has(g.id))
   }, [grammarItems, selectedGrammar])
 
-  // Clear grammar selection when JLPT level changes
+  // Load selected grammar from DB when session is available (Japanese only)
   useEffect(() => {
+    if (lang !== 'ja' || !sessionId) return
+    let cancelled = false
+    invoke<string[]>('db_get_selected_grammar', { sessionId })
+      .then(ids => { if (!cancelled) setSelectedGrammar(new Set(ids)) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [sessionId])
+
+  // Save selected grammar to DB whenever it changes (Japanese only)
+  useEffect(() => {
+    if (lang !== 'ja' || !sessionId) return
+    invoke('db_save_selected_grammar', {
+      sessionId,
+      grammarItemIds: Array.from(selectedGrammar),
+    }).catch(() => {})
+  }, [selectedGrammar, sessionId])
+
+  // Clear grammar selection when JLPT level changes (Japanese only)
+  useEffect(() => {
+    if (lang !== 'ja') return
     setSelectedGrammar(new Set())
   }, [jlptLevel])
 

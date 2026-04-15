@@ -205,6 +205,8 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN session_id TEXT", []);
     // best-effort: add language column if missing
     let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN language TEXT", []);
+    // best-effort: add selected_grammar column if missing (JSON array of grammar item IDs)
+    let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN selected_grammar TEXT", []);
     // best-effort: add language and detail columns to review_items if missing
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN language TEXT", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN detail TEXT", []);
@@ -1143,6 +1145,34 @@ fn db_import_grammar_csv(app: tauri::AppHandle, items: Vec<SeedGrammarItem>) -> 
     Ok(format!("Imported {} grammar items", imported))
 }
 
+// ─── Selected Grammar (persisted user selection) ───────────────────────────
+
+#[tauri::command]
+fn db_save_selected_grammar(app: tauri::AppHandle, session_id: String, grammar_item_ids: Vec<String>) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let json = serde_json::to_string(&grammar_item_ids).map_err(|e| e.to_string())?;
+    conn.execute("UPDATE chat_sessions SET selected_grammar=?1 WHERE id=?2", params![json, session_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn db_get_selected_grammar(app: tauri::AppHandle, session_id: String) -> Result<Vec<String>, String> {
+    let conn = open_db(&app)?;
+    let raw: Option<String> = conn.query_row(
+        "SELECT selected_grammar FROM chat_sessions WHERE id=?1",
+        params![session_id],
+        |row| row.get(0),
+    ).ok().flatten();
+    match raw {
+        Some(json) => {
+            let ids: Vec<String> = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            Ok(ids)
+        }
+        None => Ok(vec![]),
+    }
+}
+
 // ─── Grammar Analysis ────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
@@ -1267,7 +1297,9 @@ pub fn run() {
             db_get_grammar_levels,
             db_import_grammar_csv,
             db_get_grammar_analysis,
-            db_analyze_grammar
+            db_analyze_grammar,
+            db_save_selected_grammar,
+            db_get_selected_grammar
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
