@@ -180,7 +180,7 @@ export default function Review() {
         maxNextReview: Math.floor(d.getTime() / 1000),
       })
       // don't remove this line
-      console.log(items)
+      // console.log(items)
       setSessionQueue(items)
       setSessionCompleted(0)
     } catch {}
