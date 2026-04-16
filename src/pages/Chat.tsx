@@ -232,7 +232,7 @@ export default function Chat() {
         let newDifficultCount = 0
 
         llmItems.forEach(i => {
-          if (i.tags === 'hard' || i.R < 3) {
+          if ((i.tags === 'hard' || i.tags === 'medium') || i.R < 3) {
             const isNew = i.state === 'new' || !i.state
             hardMap.set(i.content.toLowerCase(), { EF: i.EF, R: i.R, isNew })
             if (isNew) newDifficultCount++
@@ -260,7 +260,7 @@ export default function Chat() {
 
         const colorMap = new Map<string, { EF: number; R: number; isNew: boolean }>()
         colorItems.forEach(i => {
-          if (i.tags === 'hard' || i.R < 3) {
+          if ((i.tags === 'hard' || i.tags === 'medium') || i.R < 3) {
             colorMap.set(i.content.toLowerCase(), { EF: i.EF, R: i.R, isNew: i.state === 'new' || !i.state })
           }
         })
@@ -309,7 +309,7 @@ export default function Chat() {
     colorNext.set(w, { EF: 2.5, R: 0, isNew: true })
     setColorDifficult(colorNext)
     try {
-      await invoke('db_upsert_review_item', { content: w, tag: 'hard', language: lang || null })
+      await invoke('db_upsert_review_item', { content: w, language: lang || null })
     } catch (e) {
       console.error('Failed to save difficult word to DB:', e)
       // Roll back local state if DB write fails

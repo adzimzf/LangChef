@@ -479,6 +479,23 @@ fn grace_bonus(next_review: Option<i64>, now: i64, multiplier: f64) -> f64 {
     }
 }
 
+/// Compute a difficulty tag from EF and R values.
+/// Mirrors the frontend easeScore formula:
+///   ease = 0.6 * efNorm + 0.4 * rNorm
+/// Returns: "hard" (ease < 0.3), "medium" (0.3 <= ease < 0.7), "easy" (ease >= 0.7)
+fn compute_tag_from_ef_r(ef: f64, r: i64) -> &'static str {
+    let ef_norm = ((ef - 1.3) / (3.0 - 1.3)).clamp(0.0, 1.0);
+    let r_norm = (r as f64 / 5.0).clamp(0.0, 1.0);
+    let ease = 0.6 * ef_norm + 0.4 * r_norm;
+    if ease < 0.3 {
+        "hard"
+    } else if ease < 0.7 {
+        "medium"
+    } else {
+        "easy"
+    }
+}
+
 /// Full SM-2 scheduling with Anki-style card lifecycle.
 /// Grade: "again" (q=1), "hard" (q=3), "good" (q=4), "easy" (q=5)
 fn schedule_card(
@@ -633,7 +650,7 @@ fn schedule_card(
 fn db_upsert_review_item(app: tauri::AppHandle, content: String, tag: Option<String>, language: Option<String>) -> Result<(), String> {
     let conn = open_db(&app)?;
     let id = uuid::Uuid::new_v4().to_string();
-    let tags = tag.unwrap_or_default();
+    let tags = tag.unwrap_or_else(|| compute_tag_from_ef_r(2.5, 0).to_string());
     conn.execute(
         "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language)
          VALUES (?1, ?2, 2.5, 1, 0, 'new', 0, 0, NULL, ?3, ?4)
@@ -685,9 +702,12 @@ fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRS
     let config = SRSConfig::default();
     let result = schedule_card(ef, i, r, &state, step, lapse_count, next_review, &grade, &config);
 
+    // Compute dynamic tag from newly scheduled EF/R values
+    let new_tag = compute_tag_from_ef_r(result.EF, result.R);
+
     conn.execute(
-        "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7 WHERE id=?8",
-        params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, id],
+        "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7, tags=?8 WHERE id=?9",
+        params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, new_tag, id],
     ).map_err(|e| e.to_string())?;
 
     Ok(result)
