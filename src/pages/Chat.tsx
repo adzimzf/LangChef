@@ -24,6 +24,8 @@ const MAX_REVIEWS_DEFAULT = 100
 const MAX_REVIEWS_KEY = 'max_reviews_per_day'
 const MAX_NEW_CARDS_DEFAULT = 20
 const MAX_NEW_CARDS_KEY = 'max_new_cards_per_day'
+const MAX_DIFFICULT_WORDS_KEY = 'max_difficult_words'
+const MAX_DIFFICULT_WORDS_DEFAULT = 10
 
 function getMaxReviews(): number {
   const val = localStorage.getItem(MAX_REVIEWS_KEY)
@@ -33,6 +35,15 @@ function getMaxReviews(): number {
 function getMaxNewCards(): number {
   const val = localStorage.getItem(MAX_NEW_CARDS_KEY)
   return val ? parseInt(val, 10) || MAX_NEW_CARDS_DEFAULT : MAX_NEW_CARDS_DEFAULT
+}
+
+function getMaxDifficultWords(): number {
+  const val = localStorage.getItem(MAX_DIFFICULT_WORDS_KEY)
+  return val ? parseInt(val, 10) || MAX_DIFFICULT_WORDS_DEFAULT : MAX_DIFFICULT_WORDS_DEFAULT
+}
+
+function getChatCustomPrompt(): string {
+  return localStorage.getItem('chat_custom_prompt') || ''
 }
 
 function todayKey(): string {
@@ -411,11 +422,10 @@ export default function Chat() {
     const difficultArr = Array.from(difficult.keys())
     const knownArr = Array.from(known).filter(w => !difficult.has(w))
 
-    // Split: 50% difficult words, 50% known/remembered words
-    const halfDiff = Math.ceil(difficultArr.length / 2)
-    const halfKnown = Math.ceil(knownArr.length / 2)
-    const selectedDifficult = difficultArr.slice(0, halfDiff)
-    const selectedKnown = knownArr.slice(0, halfKnown)
+    // Use configured max difficult words count
+    const maxWords = getMaxDifficultWords()
+    const selectedDifficult = difficultArr.slice(0, maxWords)
+    const selectedKnown = knownArr.slice(0, maxWords)
 
     const langName = langInfo?.label || 'the target language'
 
@@ -453,6 +463,13 @@ export default function Chat() {
     }
 
     prompt += `\n\nIf the user seems stuck, offer a hint or rephrase. Encourage them to keep trying in ${langName}.`
+
+    // Append user-configured custom prompt
+    const customPrompt = getChatCustomPrompt()
+    if (customPrompt.trim()) {
+      prompt += `\n\nUSER CONFIGURATION:\n${customPrompt.trim()}`
+    }
+
     return prompt
   }
 
