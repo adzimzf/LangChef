@@ -635,7 +635,7 @@ export default function WordsList() {
 
   // ─── Main list view ─────────────────────────────────────────
   return (
-    <div className="flex flex-col -m-4 h-full">
+    <div className="flex flex-col h-full -mx-4">
       {/* Header - sticky */}
       <div className="shrink-0 sticky top-0 z-10 bg-gray-50 px-4 pt-4 pb-2">
         <div className="flex items-center gap-3 mb-3">
