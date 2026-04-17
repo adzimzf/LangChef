@@ -187,7 +187,7 @@ export default function Chats() {
       {showLangPicker && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/30" onClick={() => setShowLangPicker(false)}>
           <div
-            className="w-full max-w-lg bg-white rounded-t-2xl p-5 safe-bottom"
+            className="w-full max-w-lg bg-white rounded-t-2xl p-5 pb-[72px] safe-bottom"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
@@ -219,7 +219,7 @@ export default function Chats() {
       {showJlptPicker && (
         <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/30" onClick={() => setShowJlptPicker(false)}>
           <div
-            className="w-full max-w-lg bg-white rounded-t-2xl p-5 safe-bottom"
+            className="w-full max-w-lg bg-white rounded-t-2xl p-5 pb-[72px] safe-bottom"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
