@@ -37,12 +37,46 @@ function getColor(id: string): string {
 }
 
 function timeAgo(ts: number): string {
-  const diff = Date.now() / 1000 - ts
-  if (diff < 60) return 'Just now'
-  if (diff < 3600) return `${Math.floor(diff / 60)}m ago`
-  if (diff < 86400) return `${Math.floor(diff / 86400)}d ago`
-  if (diff < 604800) return `${Math.floor(diff / 86400 / 7)}w ago`
-  return new Date(ts * 1000).toLocaleDateString()
+  const now = Date.now()
+  const target = ts * 1000
+  const diffMs = now - target
+  if (diffMs < 0) return 'Just now'
+  const absDiff = diffMs
+
+  const MINUTE = 60 * 1000
+  const HOUR = 60 * MINUTE
+  const DAY = 24 * HOUR
+  const WEEK = 7 * DAY
+  const MONTH = 30 * DAY
+  const YEAR = 365 * DAY
+
+  let value: number
+  let unit: string
+
+  if (absDiff < MINUTE) {
+    value = Math.floor(absDiff / 1000)
+    unit = 's'
+  } else if (absDiff < HOUR) {
+    value = Math.floor(absDiff / MINUTE)
+    unit = 'm'
+  } else if (absDiff < DAY) {
+    value = Math.floor(absDiff / HOUR)
+    unit = 'h'
+  } else if (absDiff < WEEK) {
+    value = Math.floor(absDiff / DAY)
+    unit = 'd'
+  } else if (absDiff < MONTH) {
+    value = Math.floor(absDiff / WEEK)
+    unit = 'w'
+  } else if (absDiff < YEAR) {
+    value = Math.floor(absDiff / MONTH)
+    unit = 'mo'
+  } else {
+    value = Math.floor(absDiff / YEAR)
+    unit = 'y+'
+  }
+
+  return `${value}${unit} ago`
 }
 
 function getLangLabel(code: string | null | undefined): string {
