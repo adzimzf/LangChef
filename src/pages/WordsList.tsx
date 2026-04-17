@@ -32,6 +32,49 @@ type ReviewItem = {
 
 const PAGE_SIZE = 20
 
+function formatNextReview(nextReviewSeconds: number): string {
+  const now = Date.now()
+  const target = nextReviewSeconds * 1000
+  const diffMs = target - now
+  const isPast = diffMs < 0
+  const absDiff = Math.abs(diffMs)
+
+  const MINUTE = 60 * 1000
+  const HOUR = 60 * MINUTE
+  const DAY = 24 * HOUR
+  const WEEK = 7 * DAY
+  const MONTH = 30 * DAY
+  const YEAR = 365 * DAY
+
+  let value: number
+  let unit: string
+
+  if (absDiff < MINUTE) {
+    value = Math.floor(absDiff / 1000)
+    unit = 's'
+  } else if (absDiff < HOUR) {
+    value = Math.floor(absDiff / MINUTE)
+    unit = 'm'
+  } else if (absDiff < DAY) {
+    value = Math.floor(absDiff / HOUR)
+    unit = 'h'
+  } else if (absDiff < WEEK) {
+    value = Math.floor(absDiff / DAY)
+    unit = 'd'
+  } else if (absDiff < MONTH) {
+    value = Math.floor(absDiff / WEEK)
+    unit = 'w'
+  } else if (absDiff < YEAR) {
+    value = Math.floor(absDiff / MONTH)
+    unit = 'mo'
+  } else {
+    value = Math.floor(absDiff / YEAR)
+    unit = 'y+'
+  }
+
+  return isPast ? 'overdue' : `in ${value}${unit}`
+}
+
 const LANGUAGES: Record<string, { label: string; flag: string }> = {
   ja: { label: 'Japanese', flag: '\u{1F1EF}\u{1F1F5}' },
   id: { label: 'Indonesian', flag: '\u{1F1EE}\u{1F1E9}' },
@@ -44,7 +87,7 @@ const STATES: { value: string; label: string; color: string }[] = [
   { value: 'relearning', label: 'Relearning', color: 'bg-orange-500' },
 ]
 
-type SortOrder = 'hardest' | 'easiest'
+type SortOrder = 'hardest' | 'easiest' | 'next_review'
 
 /** Compute an ease score (0 = hardest, 1 = easiest) for sorting */
 function easeScore(EF: number, R: number): number {
@@ -146,7 +189,13 @@ export default function WordsList() {
     }
 
     // Sort
-    if (sortOrder === 'hardest') {
+    if (sortOrder === 'next_review') {
+      items.sort((a, b) => {
+        const aVal = a.next_review ?? Infinity
+        const bVal = b.next_review ?? Infinity
+        return aVal - bVal
+      })
+    } else if (sortOrder === 'hardest') {
       items.sort((a, b) => easeScore(a.EF, a.R) - easeScore(b.EF, b.R))
     } else {
       items.sort((a, b) => easeScore(b.EF, b.R) - easeScore(a.EF, a.R))
@@ -441,7 +490,7 @@ export default function WordsList() {
               </div>
               {selectedItem.next_review && (
                 <div className="text-xs text-gray-300 mt-1">
-                  Next review: {new Date(selectedItem.next_review * 1000).toLocaleString()}
+                  Next review: {formatNextReview(selectedItem.next_review)}
                 </div>
               )}
             </div>
@@ -612,6 +661,17 @@ export default function WordsList() {
               <SortAscendingOutlined />
             )}
             {sortOrder === 'hardest' ? 'Hardest first' : 'Easiest first'}
+          </button>
+          <button
+            onClick={() => setSortOrder(sortOrder === 'next_review' ? 'hardest' : 'next_review')}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-sm font-medium transition-colors ${
+              sortOrder === 'next_review'
+                ? 'bg-blue-500 text-white'
+                : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+            }`}
+          >
+            <SortAscendingOutlined />
+            Next review
           </button>
           <button
             onClick={() => setShowFilters(!showFilters)}
@@ -805,7 +865,7 @@ export default function WordsList() {
                       </span>
                       {item.next_review && (
                         <span className="text-[10px] text-gray-400 shrink-0">
-                          Next Review: {new Date(item.next_review * 1000).toLocaleString()}
+                          Next Review: {formatNextReview(item.next_review)}
                         </span>
                       )}
                     </div>
