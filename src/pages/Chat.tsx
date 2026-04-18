@@ -24,6 +24,8 @@ const MAX_REVIEWS_DEFAULT = 100
 const MAX_REVIEWS_KEY = 'max_reviews_per_day'
 const MAX_NEW_CARDS_DEFAULT = 20
 const MAX_NEW_CARDS_KEY = 'max_new_cards_per_day'
+const MAX_DIFFICULT_WORDS_KEY = 'max_difficult_words'
+const MAX_DIFFICULT_WORDS_DEFAULT = 10
 
 function getMaxReviews(): number {
   const val = localStorage.getItem(MAX_REVIEWS_KEY)
@@ -33,6 +35,31 @@ function getMaxReviews(): number {
 function getMaxNewCards(): number {
   const val = localStorage.getItem(MAX_NEW_CARDS_KEY)
   return val ? parseInt(val, 10) || MAX_NEW_CARDS_DEFAULT : MAX_NEW_CARDS_DEFAULT
+}
+
+function getMaxDifficultWords(): number {
+  const val = localStorage.getItem(MAX_DIFFICULT_WORDS_KEY)
+  return val ? parseInt(val, 10) || MAX_DIFFICULT_WORDS_DEFAULT : MAX_DIFFICULT_WORDS_DEFAULT
+}
+
+function getChatCustomPrompt(): string {
+  return localStorage.getItem('chat_custom_prompt') || ''
+}
+
+function getLLMPendingKey(sid: string): string {
+  return `llm_pending_${sid}`
+}
+
+function isLLMPending(sid: string): boolean {
+  return localStorage.getItem(getLLMPendingKey(sid)) !== null
+}
+
+function setLLMPending(sid: string): void {
+  localStorage.setItem(getLLMPendingKey(sid), String(Date.now()))
+}
+
+function clearLLMPending(sid: string): void {
+  localStorage.removeItem(getLLMPendingKey(sid))
 }
 
 function todayKey(): string {
@@ -92,6 +119,10 @@ export default function Chat() {
   const [grammarAnalysisLoading, setGrammarAnalysisLoading] = useState<number | null>(null)
   const logRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<any>(null)
+  // FIFO queue index for rotating through difficult/known words per message
+  const wordQueueIndex = useRef<{ difficult: number; known: number }>({ difficult: 0, known: 0 })
+  // Track whether component is mounted — prevents stale state updates after navigation
+  const mounted = useRef(true)
   const [keyboardInset, setKeyboardInset] = useState(0)
 
   const langInfo = LANGUAGES[lang]
@@ -101,8 +132,28 @@ export default function Chat() {
     return grammarItems.filter(g => selectedGrammar.has(g.id))
   }, [grammarItems, selectedGrammar])
 
-  // Clear grammar selection when JLPT level changes
+  // Load selected grammar from DB when session is available (Japanese only)
   useEffect(() => {
+    if (lang !== 'ja' || !sessionId) return
+    let cancelled = false
+    invoke<string[]>('db_get_selected_grammar', { sessionId })
+      .then(ids => { if (!cancelled) setSelectedGrammar(new Set(ids)) })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [sessionId])
+
+  // Save selected grammar to DB whenever it changes (Japanese only)
+  useEffect(() => {
+    if (lang !== 'ja' || !sessionId) return
+    invoke('db_save_selected_grammar', {
+      sessionId,
+      grammarItemIds: Array.from(selectedGrammar),
+    }).catch(() => {})
+  }, [selectedGrammar, sessionId])
+
+  // Clear grammar selection when JLPT level changes (Japanese only)
+  useEffect(() => {
+    if (lang !== 'ja') return
     setSelectedGrammar(new Set())
   }, [jlptLevel])
 
@@ -117,6 +168,12 @@ export default function Chat() {
     document.addEventListener('click', handleClick)
     return () => document.removeEventListener('click', handleClick)
   }, [showGrammarPicker])
+
+  // Cleanup: mark component as unmounted to prevent stale state updates
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
 
   // Load settings
   useEffect(() => {
@@ -174,6 +231,28 @@ export default function Chat() {
     load()
   }, [sessionId])
 
+  // Restore typing state if LLM was pending when user navigated away
+  useEffect(() => {
+    if (!sessionId || !isLLMPending(sessionId)) return
+    setLoading(true)
+    // Baseline: current message count before the in-flight response arrives
+    const baseline = messages.length
+    // Poll for new assistant message until the in-flight LLM response is saved to DB
+    const interval = setInterval(async () => {
+      try {
+        const res = await invoke<{ id: number, role: string, content: string, created_at: number }[]>('db_list_session_messages', { sessionId })
+        // New message(s) appeared — the in-flight LLM response was saved to DB
+        if (res.length > baseline) {
+          clearInterval(interval)
+          clearLLMPending(sessionId)
+          setLoading(false)
+          setMessages(res.map(m => ({ id: m.id, role: m.role as Msg['role'], content: m.content })))
+        }
+      } catch {}
+    }, 1500)
+    return () => clearInterval(interval)
+  }, [sessionId])
+
   // Load difficult words from review_items
   // Two separate queries:
   //   - LLM prompt words: due by tomorrow (focused reinforcement), with limits
@@ -201,7 +280,7 @@ export default function Chat() {
         let newDifficultCount = 0
 
         llmItems.forEach(i => {
-          if (i.tags === 'hard' || i.R < 3) {
+          if ((i.tags === 'hard' || i.tags === 'medium') || i.R < 3) {
             const isNew = i.state === 'new' || !i.state
             hardMap.set(i.content.toLowerCase(), { EF: i.EF, R: i.R, isNew })
             if (isNew) newDifficultCount++
@@ -229,7 +308,7 @@ export default function Chat() {
 
         const colorMap = new Map<string, { EF: number; R: number; isNew: boolean }>()
         colorItems.forEach(i => {
-          if (i.tags === 'hard' || i.R < 3) {
+          if ((i.tags === 'hard' || i.tags === 'medium') || i.R < 3) {
             colorMap.set(i.content.toLowerCase(), { EF: i.EF, R: i.R, isNew: i.state === 'new' || !i.state })
           }
         })
@@ -278,7 +357,7 @@ export default function Chat() {
     colorNext.set(w, { EF: 2.5, R: 0, isNew: true })
     setColorDifficult(colorNext)
     try {
-      await invoke('db_upsert_review_item', { content: w, tag: 'hard', language: lang || null })
+      await invoke('db_upsert_review_item', { content: w, language: lang || null })
     } catch (e) {
       console.error('Failed to save difficult word to DB:', e)
       // Roll back local state if DB write fails
@@ -387,15 +466,33 @@ export default function Chat() {
     return ''
   }
 
+  /**
+   * Take up to `count` items from `arr` starting at `startIndex`, wrapping around.
+   * Returns [selectedItems, nextStartIndex].
+   */
+  function dequeueRotate<T>(arr: T[], startIndex: number, count: number): [T[], number] {
+    if (arr.length === 0) return [[], 0]
+    const safeStart = startIndex % arr.length
+    const take = Math.min(count, arr.length)
+    const selected: T[] = []
+    for (let i = 0; i < take; i++) {
+      selected.push(arr[(safeStart + i) % arr.length])
+    }
+    const nextIndex = (safeStart + take) % arr.length
+    return [selected, nextIndex]
+  }
+
   function buildSSRSystemPrompt(): string {
     const difficultArr = Array.from(difficult.keys())
     const knownArr = Array.from(known).filter(w => !difficult.has(w))
 
-    // Split: 50% difficult words, 50% known/remembered words
-    const halfDiff = Math.ceil(difficultArr.length / 2)
-    const halfKnown = Math.ceil(knownArr.length / 2)
-    const selectedDifficult = difficultArr.slice(0, halfDiff)
-    const selectedKnown = knownArr.slice(0, halfKnown)
+    // Use configured max difficult words count
+    const maxWords = getMaxDifficultWords()
+    // Rotate through words via FIFO queue instead of always taking first N
+    const [selectedDifficult, nextDifficultIdx] = dequeueRotate(difficultArr, wordQueueIndex.current.difficult, maxWords)
+    const [selectedKnown, nextKnownIdx] = dequeueRotate(knownArr, wordQueueIndex.current.known, maxWords)
+    // Advance queue positions for next message
+    wordQueueIndex.current = { difficult: nextDifficultIdx, known: nextKnownIdx }
 
     const langName = langInfo?.label || 'the target language'
 
@@ -433,18 +530,26 @@ export default function Chat() {
     }
 
     prompt += `\n\nIf the user seems stuck, offer a hint or rephrase. Encourage them to keep trying in ${langName}.`
+
+    // Append user-configured custom prompt
+    const customPrompt = getChatCustomPrompt()
+    if (customPrompt.trim()) {
+      prompt += `\n\nUSER CONFIGURATION:\n${customPrompt.trim()}`
+    }
+
     return prompt
   }
 
-  async function send() {
-    if (!input.trim()) return
+  async function send(message?: string) {
+    const msg = message?.trim() || input.trim()
+    if (!msg) return
     if (!sessionId) {
       try {
         const id = await invoke<string>('db_new_session', { title: null, language: lang || null })
         setSessionId(id)
       } catch {}
     }
-    const user: Msg = { id: null, role: 'user', content: input }
+    const user: Msg = { id: null, role: 'user', content: msg }
     const nextMessages = [...messages, user]
     setMessages(nextMessages)
     const userId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'user', content: user.content }).catch(() => -1)
@@ -459,6 +564,8 @@ export default function Chat() {
 
     if (apiHost && apiKey) {
       setLoading(true)
+      // Mark LLM as pending so typing indicator persists across navigation
+      if (sessionId) setLLMPending(sessionId)
       try {
         // Build SSR system prompt
         const systemPrompt = buildSSRSystemPrompt()
@@ -475,24 +582,38 @@ export default function Chat() {
           model,
           messages: llmMessages,
         })
-        const assistant: Msg = { id: null, role: 'assistant', content: res }
-        const targetIdx = nextMessages.length // index in nextMessages+1 array
-        setMessages(prev => [...prev, assistant])
+
+        // Always save assistant response to DB so it persists across navigation
         const assistantId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: res }).catch(() => -1)
-        if (assistantId >= 0) {
-          setMessages(prev => prev.map((m, idx) => idx === targetIdx ? { ...m, id: assistantId } : m))
+
+        // Only update React state if component is still mounted
+        if (mounted.current) {
+          const assistant: Msg = { id: null, role: 'assistant', content: res }
+          const targetIdx = nextMessages.length
+          setMessages(prev => [...prev, assistant])
+          if (assistantId >= 0) {
+            setMessages(prev => prev.map((m, idx) => idx === targetIdx ? { ...m, id: assistantId } : m))
+          }
         }
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e)
-        const errorMsg: Msg = { id: null, role: 'assistant', content: `[Error] ${errMsg}` }
-        const errorIdx = nextMessages.length
-        setMessages(prev => [...prev, errorMsg])
-        const errorId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: `[Error] ${errMsg}` }).catch(() => -1)
-        if (errorId >= 0) {
-          setMessages(prev => prev.map((m, idx) => idx === errorIdx ? { ...m, id: errorId } : m))
+
+        // Always save error to DB for persistence
+        const errorContent = `[Error] ${errMsg}`
+        const errorId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: errorContent }).catch(() => -1)
+
+        // Only update React state if component is still mounted
+        if (mounted.current) {
+          const errorMsg: Msg = { id: null, role: 'assistant', content: errorContent }
+          const errorIdx = nextMessages.length
+          setMessages(prev => [...prev, errorMsg])
+          if (errorId >= 0) {
+            setMessages(prev => prev.map((m, idx) => idx === errorIdx ? { ...m, id: errorId } : m))
+          }
         }
       } finally {
-        setLoading(false)
+        if (sessionId) clearLLMPending(sessionId)
+        if (mounted.current) setLoading(false)
       }
     } else {
       const fallback = `Let's talk about it. Which parts feel tricky for you? Try rephrasing in the target language.`
@@ -628,21 +749,6 @@ export default function Chat() {
             {showFurigana ? 'ふりがな ON' : 'ふりがな OFF'}
           </button>
         )}
-      </div>
-
-      {/* Topic pills */}
-      <div className="shrink-0 bg-white border-b px-3 py-2">
-        <div className="flex gap-2 overflow-x-auto no-scrollbar">
-          {SUGGESTIONS.map(s => (
-            <button
-              key={s}
-              onClick={() => setInput(`Talk about ${s.toLowerCase()}.`)}
-              className="shrink-0 whitespace-nowrap px-3 py-1.5 rounded-full text-sm bg-gray-100 text-gray-700 hover:bg-blue-50 hover:text-blue-600 active:bg-blue-100 transition-colors"
-            >
-              {s}
-            </button>
-          ))}
-        </div>
       </div>
 
       {/* Grammar selection row */}
@@ -783,10 +889,22 @@ export default function Chat() {
       {/* Messages area */}
       <div ref={logRef} className="flex-1 overflow-y-auto px-3 py-3">
         {messages.length === 0 && !loading && (
-          <div className="flex flex-col items-center justify-center h-full text-gray-400 gap-3">
+          <div className="flex flex-col items-center justify-end h-full text-gray-400 gap-3 pb-2">
             <div className="text-4xl">💬</div>
             <p className="text-sm text-center">Start a conversation in {langInfo?.label || 'your target language'}</p>
             <p className="text-xs text-center text-blue-400">Tap words in replies to mark them difficult</p>
+            <div className="flex flex-wrap justify-center gap-2 mt-1">
+              {SUGGESTIONS.map((s, i) => (
+                <button
+                  key={s}
+                  onClick={() => send(`Talk about ${s.toLowerCase()}.`)}
+                  className="shrink-0 whitespace-nowrap px-4 py-2 rounded-full text-sm bg-white border border-gray-200 text-gray-600 shadow-sm hover:bg-blue-50 hover:border-blue-200 hover:text-blue-600 active:bg-blue-100 transition-all duration-200 animate-fade-in-up"
+                  style={{ animationDelay: `${i * 80}ms` }}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
           </div>
         )}
         {messages.map((m, i) => (
@@ -840,7 +958,7 @@ export default function Chat() {
             disabled={loading}
           />
           <button
-            onClick={send}
+            onClick={() => send()}
             disabled={!input.trim() || loading}
             className={`
               flex items-center justify-center w-10 h-10 rounded-full shrink-0 transition-colors

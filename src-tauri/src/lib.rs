@@ -205,6 +205,8 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN session_id TEXT", []);
     // best-effort: add language column if missing
     let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN language TEXT", []);
+    // best-effort: add selected_grammar column if missing (JSON array of grammar item IDs)
+    let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN selected_grammar TEXT", []);
     // best-effort: add language and detail columns to review_items if missing
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN language TEXT", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN detail TEXT", []);
@@ -477,6 +479,23 @@ fn grace_bonus(next_review: Option<i64>, now: i64, multiplier: f64) -> f64 {
     }
 }
 
+/// Compute a difficulty tag from EF and R values.
+/// Mirrors the frontend easeScore formula:
+///   ease = 0.6 * efNorm + 0.4 * rNorm
+/// Returns: "hard" (ease < 0.3), "medium" (0.3 <= ease < 0.7), "easy" (ease >= 0.7)
+fn compute_tag_from_ef_r(ef: f64, r: i64) -> &'static str {
+    let ef_norm = ((ef - 1.3) / (3.0 - 1.3)).clamp(0.0, 1.0);
+    let r_norm = (r as f64 / 5.0).clamp(0.0, 1.0);
+    let ease = 0.6 * ef_norm + 0.4 * r_norm;
+    if ease < 0.3 {
+        "hard"
+    } else if ease < 0.7 {
+        "medium"
+    } else {
+        "easy"
+    }
+}
+
 /// Full SM-2 scheduling with Anki-style card lifecycle.
 /// Grade: "again" (q=1), "hard" (q=3), "good" (q=4), "easy" (q=5)
 fn schedule_card(
@@ -631,7 +650,7 @@ fn schedule_card(
 fn db_upsert_review_item(app: tauri::AppHandle, content: String, tag: Option<String>, language: Option<String>) -> Result<(), String> {
     let conn = open_db(&app)?;
     let id = uuid::Uuid::new_v4().to_string();
-    let tags = tag.unwrap_or_default();
+    let tags = tag.unwrap_or_else(|| compute_tag_from_ef_r(2.5, 0).to_string());
     conn.execute(
         "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language)
          VALUES (?1, ?2, 2.5, 1, 0, 'new', 0, 0, NULL, ?3, ?4)
@@ -683,9 +702,12 @@ fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRS
     let config = SRSConfig::default();
     let result = schedule_card(ef, i, r, &state, step, lapse_count, next_review, &grade, &config);
 
+    // Compute dynamic tag from newly scheduled EF/R values
+    let new_tag = compute_tag_from_ef_r(result.EF, result.R);
+
     conn.execute(
-        "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7 WHERE id=?8",
-        params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, id],
+        "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7, tags=?8 WHERE id=?9",
+        params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, new_tag, id],
     ).map_err(|e| e.to_string())?;
 
     Ok(result)
@@ -1143,6 +1165,34 @@ fn db_import_grammar_csv(app: tauri::AppHandle, items: Vec<SeedGrammarItem>) -> 
     Ok(format!("Imported {} grammar items", imported))
 }
 
+// ─── Selected Grammar (persisted user selection) ───────────────────────────
+
+#[tauri::command]
+fn db_save_selected_grammar(app: tauri::AppHandle, session_id: String, grammar_item_ids: Vec<String>) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let json = serde_json::to_string(&grammar_item_ids).map_err(|e| e.to_string())?;
+    conn.execute("UPDATE chat_sessions SET selected_grammar=?1 WHERE id=?2", params![json, session_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn db_get_selected_grammar(app: tauri::AppHandle, session_id: String) -> Result<Vec<String>, String> {
+    let conn = open_db(&app)?;
+    let raw: Option<String> = conn.query_row(
+        "SELECT selected_grammar FROM chat_sessions WHERE id=?1",
+        params![session_id],
+        |row| row.get(0),
+    ).ok().flatten();
+    match raw {
+        Some(json) => {
+            let ids: Vec<String> = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+            Ok(ids)
+        }
+        None => Ok(vec![]),
+    }
+}
+
 // ─── Grammar Analysis ────────────────────────────────────────────────────────
 
 #[derive(Serialize, Deserialize)]
@@ -1267,7 +1317,9 @@ pub fn run() {
             db_get_grammar_levels,
             db_import_grammar_csv,
             db_get_grammar_analysis,
-            db_analyze_grammar
+            db_analyze_grammar,
+            db_save_selected_grammar,
+            db_get_selected_grammar
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
