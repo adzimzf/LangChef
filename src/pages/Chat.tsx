@@ -545,7 +545,7 @@ export default function Chat() {
     if (!msg) return
     if (!sessionId) {
       try {
-        const id = await invoke<string>('db_new_session', { title: null, language: lang || null })
+        const id = await invoke<string>('db_new_session', { title: null, language: lang || null, level: lang === 'ja' ? jlptLevel : null })
         setSessionId(id)
       } catch {}
     }

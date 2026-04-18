@@ -18,6 +18,7 @@ struct ChatSession {
     id: String,
     title: Option<String>,
     language: Option<String>,
+    level: Option<String>,
     created_at: i64,
     last_activity: i64,
 }
@@ -207,6 +208,8 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN language TEXT", []);
     // best-effort: add selected_grammar column if missing (JSON array of grammar item IDs)
     let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN selected_grammar TEXT", []);
+    // best-effort: add level column if missing (JLPT/CEFR level for the session)
+    let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN level TEXT", []);
     // best-effort: add language and detail columns to review_items if missing
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN language TEXT", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN detail TEXT", []);
@@ -324,13 +327,13 @@ fn db_add_message(app: tauri::AppHandle, role: String, content: String) -> Resul
 }
 
 #[tauri::command]
-fn db_new_session(app: tauri::AppHandle, title: Option<String>, language: Option<String>) -> Result<String, String> {
+fn db_new_session(app: tauri::AppHandle, title: Option<String>, language: Option<String>, level: Option<String>) -> Result<String, String> {
     let conn = open_db(&app)?;
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
     conn.execute(
-        "INSERT INTO chat_sessions(id, title, language, created_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id, title, language, now, now],
+        "INSERT INTO chat_sessions(id, title, language, level, created_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, title, language, level, now, now],
     ).map_err(|e| e.to_string())?;
     Ok(id)
 }
@@ -338,15 +341,16 @@ fn db_new_session(app: tauri::AppHandle, title: Option<String>, language: Option
 #[tauri::command]
 fn db_list_sessions(app: tauri::AppHandle) -> Result<Vec<ChatSession>, String> {
     let conn = open_db(&app)?;
-    let mut stmt = conn.prepare("SELECT id, title, language, created_at, last_activity FROM chat_sessions ORDER BY last_activity DESC")
+    let mut stmt = conn.prepare("SELECT id, title, language, level, created_at, last_activity FROM chat_sessions ORDER BY last_activity DESC")
         .map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], |row| {
         Ok(ChatSession {
             id: row.get(0)?,
             title: row.get(1)?,
             language: row.get(2)?,
-            created_at: row.get(3)?,
-            last_activity: row.get(4)?,
+            level: row.get(3)?,
+            created_at: row.get(4)?,
+            last_activity: row.get(5)?,
         })
     }).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
