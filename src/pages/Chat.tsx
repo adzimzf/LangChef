@@ -46,6 +46,22 @@ function getChatCustomPrompt(): string {
   return localStorage.getItem('chat_custom_prompt') || ''
 }
 
+function getLLMPendingKey(sid: string): string {
+  return `llm_pending_${sid}`
+}
+
+function isLLMPending(sid: string): boolean {
+  return localStorage.getItem(getLLMPendingKey(sid)) !== null
+}
+
+function setLLMPending(sid: string): void {
+  localStorage.setItem(getLLMPendingKey(sid), String(Date.now()))
+}
+
+function clearLLMPending(sid: string): void {
+  localStorage.removeItem(getLLMPendingKey(sid))
+}
+
 function todayKey(): string {
   return new Date().toISOString().slice(0, 10)
 }
@@ -105,6 +121,8 @@ export default function Chat() {
   const inputRef = useRef<any>(null)
   // FIFO queue index for rotating through difficult/known words per message
   const wordQueueIndex = useRef<{ difficult: number; known: number }>({ difficult: 0, known: 0 })
+  // Track whether component is mounted — prevents stale state updates after navigation
+  const mounted = useRef(true)
   const [keyboardInset, setKeyboardInset] = useState(0)
 
   const langInfo = LANGUAGES[lang]
@@ -150,6 +168,12 @@ export default function Chat() {
     document.addEventListener('click', handleClick)
     return () => document.removeEventListener('click', handleClick)
   }, [showGrammarPicker])
+
+  // Cleanup: mark component as unmounted to prevent stale state updates
+  useEffect(() => {
+    mounted.current = true
+    return () => { mounted.current = false }
+  }, [])
 
   // Load settings
   useEffect(() => {
@@ -205,6 +229,28 @@ export default function Chat() {
       } catch {}
     }
     load()
+  }, [sessionId])
+
+  // Restore typing state if LLM was pending when user navigated away
+  useEffect(() => {
+    if (!sessionId || !isLLMPending(sessionId)) return
+    setLoading(true)
+    // Baseline: current message count before the in-flight response arrives
+    const baseline = messages.length
+    // Poll for new assistant message until the in-flight LLM response is saved to DB
+    const interval = setInterval(async () => {
+      try {
+        const res = await invoke<{ id: number, role: string, content: string, created_at: number }[]>('db_list_session_messages', { sessionId })
+        // New message(s) appeared — the in-flight LLM response was saved to DB
+        if (res.length > baseline) {
+          clearInterval(interval)
+          clearLLMPending(sessionId)
+          setLoading(false)
+          setMessages(res.map(m => ({ id: m.id, role: m.role as Msg['role'], content: m.content })))
+        }
+      } catch {}
+    }, 1500)
+    return () => clearInterval(interval)
   }, [sessionId])
 
   // Load difficult words from review_items
@@ -518,6 +564,8 @@ export default function Chat() {
 
     if (apiHost && apiKey) {
       setLoading(true)
+      // Mark LLM as pending so typing indicator persists across navigation
+      if (sessionId) setLLMPending(sessionId)
       try {
         // Build SSR system prompt
         const systemPrompt = buildSSRSystemPrompt()
@@ -534,24 +582,38 @@ export default function Chat() {
           model,
           messages: llmMessages,
         })
-        const assistant: Msg = { id: null, role: 'assistant', content: res }
-        const targetIdx = nextMessages.length // index in nextMessages+1 array
-        setMessages(prev => [...prev, assistant])
+
+        // Always save assistant response to DB so it persists across navigation
         const assistantId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: res }).catch(() => -1)
-        if (assistantId >= 0) {
-          setMessages(prev => prev.map((m, idx) => idx === targetIdx ? { ...m, id: assistantId } : m))
+
+        // Only update React state if component is still mounted
+        if (mounted.current) {
+          const assistant: Msg = { id: null, role: 'assistant', content: res }
+          const targetIdx = nextMessages.length
+          setMessages(prev => [...prev, assistant])
+          if (assistantId >= 0) {
+            setMessages(prev => prev.map((m, idx) => idx === targetIdx ? { ...m, id: assistantId } : m))
+          }
         }
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : String(e)
-        const errorMsg: Msg = { id: null, role: 'assistant', content: `[Error] ${errMsg}` }
-        const errorIdx = nextMessages.length
-        setMessages(prev => [...prev, errorMsg])
-        const errorId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: `[Error] ${errMsg}` }).catch(() => -1)
-        if (errorId >= 0) {
-          setMessages(prev => prev.map((m, idx) => idx === errorIdx ? { ...m, id: errorId } : m))
+
+        // Always save error to DB for persistence
+        const errorContent = `[Error] ${errMsg}`
+        const errorId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: errorContent }).catch(() => -1)
+
+        // Only update React state if component is still mounted
+        if (mounted.current) {
+          const errorMsg: Msg = { id: null, role: 'assistant', content: errorContent }
+          const errorIdx = nextMessages.length
+          setMessages(prev => [...prev, errorMsg])
+          if (errorId >= 0) {
+            setMessages(prev => prev.map((m, idx) => idx === errorIdx ? { ...m, id: errorId } : m))
+          }
         }
       } finally {
-        setLoading(false)
+        if (sessionId) clearLLMPending(sessionId)
+        if (mounted.current) setLoading(false)
       }
     } else {
       const fallback = `Let's talk about it. Which parts feel tricky for you? Try rephrasing in the target language.`
