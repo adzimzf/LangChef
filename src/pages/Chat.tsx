@@ -103,6 +103,8 @@ export default function Chat() {
   const [grammarAnalysisLoading, setGrammarAnalysisLoading] = useState<number | null>(null)
   const logRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<any>(null)
+  // FIFO queue index for rotating through difficult/known words per message
+  const wordQueueIndex = useRef<{ difficult: number; known: number }>({ difficult: 0, known: 0 })
   const [keyboardInset, setKeyboardInset] = useState(0)
 
   const langInfo = LANGUAGES[lang]
@@ -418,14 +420,33 @@ export default function Chat() {
     return ''
   }
 
+  /**
+   * Take up to `count` items from `arr` starting at `startIndex`, wrapping around.
+   * Returns [selectedItems, nextStartIndex].
+   */
+  function dequeueRotate<T>(arr: T[], startIndex: number, count: number): [T[], number] {
+    if (arr.length === 0) return [[], 0]
+    const safeStart = startIndex % arr.length
+    const take = Math.min(count, arr.length)
+    const selected: T[] = []
+    for (let i = 0; i < take; i++) {
+      selected.push(arr[(safeStart + i) % arr.length])
+    }
+    const nextIndex = (safeStart + take) % arr.length
+    return [selected, nextIndex]
+  }
+
   function buildSSRSystemPrompt(): string {
     const difficultArr = Array.from(difficult.keys())
     const knownArr = Array.from(known).filter(w => !difficult.has(w))
 
     // Use configured max difficult words count
     const maxWords = getMaxDifficultWords()
-    const selectedDifficult = difficultArr.slice(0, maxWords)
-    const selectedKnown = knownArr.slice(0, maxWords)
+    // Rotate through words via FIFO queue instead of always taking first N
+    const [selectedDifficult, nextDifficultIdx] = dequeueRotate(difficultArr, wordQueueIndex.current.difficult, maxWords)
+    const [selectedKnown, nextKnownIdx] = dequeueRotate(knownArr, wordQueueIndex.current.known, maxWords)
+    // Advance queue positions for next message
+    wordQueueIndex.current = { difficult: nextDifficultIdx, known: nextKnownIdx }
 
     const langName = langInfo?.label || 'the target language'
 
