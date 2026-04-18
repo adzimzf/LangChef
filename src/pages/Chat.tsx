@@ -494,15 +494,16 @@ export default function Chat() {
     return prompt
   }
 
-  async function send() {
-    if (!input.trim()) return
+  async function send(message?: string) {
+    const msg = message?.trim() || input.trim()
+    if (!msg) return
     if (!sessionId) {
       try {
         const id = await invoke<string>('db_new_session', { title: null, language: lang || null })
         setSessionId(id)
       } catch {}
     }
-    const user: Msg = { id: null, role: 'user', content: input }
+    const user: Msg = { id: null, role: 'user', content: msg }
     const nextMessages = [...messages, user]
     setMessages(nextMessages)
     const userId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'user', content: user.content }).catch(() => -1)
@@ -688,21 +689,6 @@ export default function Chat() {
         )}
       </div>
 
-      {/* Topic pills */}
-      <div className="shrink-0 bg-white border-b px-3 py-2">
-        <div className="flex gap-2 overflow-x-auto no-scrollbar">
-          {SUGGESTIONS.map(s => (
-            <button
-              key={s}
-              onClick={() => setInput(`Talk about ${s.toLowerCase()}.`)}
-              className="shrink-0 whitespace-nowrap px-3 py-1.5 rounded-full text-sm bg-gray-100 text-gray-700 hover:bg-blue-50 hover:text-blue-600 active:bg-blue-100 transition-colors"
-            >
-              {s}
-            </button>
-          ))}
-        </div>
-      </div>
-
       {/* Grammar selection row */}
       {lang === 'ja' && (
         <div className="shrink-0 bg-white border-b px-3 py-2 relative">
@@ -841,10 +827,22 @@ export default function Chat() {
       {/* Messages area */}
       <div ref={logRef} className="flex-1 overflow-y-auto px-3 py-3">
         {messages.length === 0 && !loading && (
-          <div className="flex flex-col items-center justify-center h-full text-gray-400 gap-3">
+          <div className="flex flex-col items-center justify-end h-full text-gray-400 gap-3 pb-2">
             <div className="text-4xl">💬</div>
             <p className="text-sm text-center">Start a conversation in {langInfo?.label || 'your target language'}</p>
             <p className="text-xs text-center text-blue-400">Tap words in replies to mark them difficult</p>
+            <div className="flex flex-wrap justify-center gap-2 mt-1">
+              {SUGGESTIONS.map((s, i) => (
+                <button
+                  key={s}
+                  onClick={() => send(`Talk about ${s.toLowerCase()}.`)}
+                  className="shrink-0 whitespace-nowrap px-4 py-2 rounded-full text-sm bg-white border border-gray-200 text-gray-600 shadow-sm hover:bg-blue-50 hover:border-blue-200 hover:text-blue-600 active:bg-blue-100 transition-all duration-200 animate-fade-in-up"
+                  style={{ animationDelay: `${i * 80}ms` }}
+                >
+                  {s}
+                </button>
+              ))}
+            </div>
           </div>
         )}
         {messages.map((m, i) => (
@@ -898,7 +896,7 @@ export default function Chat() {
             disabled={loading}
           />
           <button
-            onClick={send}
+            onClick={() => send()}
             disabled={!input.trim() || loading}
             className={`
               flex items-center justify-center w-10 h-10 rounded-full shrink-0 transition-colors

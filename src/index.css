@@ -34,6 +34,21 @@
     40% { transform: scale(1); opacity: 1; }
   }
 
+  /* Topic suggestion pills staggered entrance */
+  .animate-fade-in-up {
+    animation: fadeInUp 0.4s ease-out both;
+  }
+  @keyframes fadeInUp {
+    from {
+      opacity: 0;
+      transform: translateY(12px);
+    }
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
+  }
+
   /* Furigana (ruby) toggle styles */
   ruby.furigana-show rt {
     font-size: 0.55em;
