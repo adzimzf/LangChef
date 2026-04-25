@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use rusqlite::{Connection, params};
 use tauri::Manager;
 
+mod google_auth;
+mod google_drive;
+
 #[derive(Serialize, Deserialize)]
 struct Message {
     id: i64,
@@ -1560,7 +1563,18 @@ pub fn run() {
             db_get_selected_grammar,
             db_get_user_feedback,
             db_list_all_feedback,
-            db_evaluate_user_message
+            db_evaluate_user_message,
+            // Google Auth
+            google_auth::google_sign_in,
+            google_auth::google_sign_out,
+            google_auth::google_get_auth_status,
+            // Google Drive Backup & Sync
+            google_drive::google_backup_db,
+            google_drive::google_restore_db,
+            google_drive::google_get_backup_status,
+            google_drive::google_set_auto_sync,
+            google_drive::google_get_auto_sync,
+            google_drive::google_trigger_sync,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
