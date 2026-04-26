@@ -18,6 +18,7 @@ struct ChatSession {
     id: String,
     title: Option<String>,
     language: Option<String>,
+    level: Option<String>,
     created_at: i64,
     last_activity: i64,
 }
@@ -196,8 +197,13 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
           is_default INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS message_grammar_analysis(
-          message_id INTEGER PRIMARY KEY,
-          analysis TEXT NOT NULL
+            message_id INTEGER PRIMARY KEY,
+            analysis TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS user_message_feedback(
+            message_id INTEGER PRIMARY KEY,
+            score INTEGER NOT NULL,
+            feedback TEXT NOT NULL
         );
         "
     ).map_err(|e| e.to_string())?;
@@ -207,6 +213,8 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN language TEXT", []);
     // best-effort: add selected_grammar column if missing (JSON array of grammar item IDs)
     let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN selected_grammar TEXT", []);
+    // best-effort: add level column if missing (JLPT/CEFR level for the session)
+    let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN level TEXT", []);
     // best-effort: add language and detail columns to review_items if missing
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN language TEXT", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN detail TEXT", []);
@@ -324,13 +332,13 @@ fn db_add_message(app: tauri::AppHandle, role: String, content: String) -> Resul
 }
 
 #[tauri::command]
-fn db_new_session(app: tauri::AppHandle, title: Option<String>, language: Option<String>) -> Result<String, String> {
+fn db_new_session(app: tauri::AppHandle, title: Option<String>, language: Option<String>, level: Option<String>) -> Result<String, String> {
     let conn = open_db(&app)?;
     let id = uuid::Uuid::new_v4().to_string();
     let now = chrono::Utc::now().timestamp();
     conn.execute(
-        "INSERT INTO chat_sessions(id, title, language, created_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![id, title, language, now, now],
+        "INSERT INTO chat_sessions(id, title, language, level, created_at, last_activity) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+        params![id, title, language, level, now, now],
     ).map_err(|e| e.to_string())?;
     Ok(id)
 }
@@ -338,15 +346,16 @@ fn db_new_session(app: tauri::AppHandle, title: Option<String>, language: Option
 #[tauri::command]
 fn db_list_sessions(app: tauri::AppHandle) -> Result<Vec<ChatSession>, String> {
     let conn = open_db(&app)?;
-    let mut stmt = conn.prepare("SELECT id, title, language, created_at, last_activity FROM chat_sessions ORDER BY last_activity DESC")
+    let mut stmt = conn.prepare("SELECT id, title, language, level, created_at, last_activity FROM chat_sessions ORDER BY last_activity DESC")
         .map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], |row| {
         Ok(ChatSession {
             id: row.get(0)?,
             title: row.get(1)?,
             language: row.get(2)?,
-            created_at: row.get(3)?,
-            last_activity: row.get(4)?,
+            level: row.get(3)?,
+            created_at: row.get(4)?,
+            last_activity: row.get(5)?,
         })
     }).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
@@ -1280,6 +1289,196 @@ async fn db_analyze_grammar(
     Ok(analysis)
 }
 
+// ─── User Message Feedback ───────────────────────────────────────────────────
+
+#[derive(Serialize, Deserialize)]
+struct UserMessageFeedback {
+    message_id: i64,
+    score: i64,
+    feedback: String,
+}
+
+#[tauri::command]
+fn db_get_user_feedback(app: tauri::AppHandle, message_id: i64) -> Result<Option<UserMessageFeedback>, String> {
+    let conn = open_db(&app)?;
+    let result = conn.query_row(
+        "SELECT message_id, score, feedback FROM user_message_feedback WHERE message_id=?1",
+        params![message_id],
+        |row| Ok(UserMessageFeedback {
+            message_id: row.get(0)?,
+            score: row.get(1)?,
+            feedback: row.get(2)?,
+        }),
+    );
+    match result {
+        Ok(fb) => Ok(Some(fb)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+async fn db_evaluate_user_message(
+    app: tauri::AppHandle,
+    api_host: String,
+    api_key: String,
+    model: String,
+    message_id: i64,
+    message_content: String,
+    language: String,
+    level: String,
+    context_messages: Vec<ChatMessage>,
+) -> Result<UserMessageFeedback, String> {
+    // Check cache first
+    let conn = open_db(&app)?;
+    if let Ok(cached) = conn.query_row(
+        "SELECT message_id, score, feedback FROM user_message_feedback WHERE message_id=?1",
+        params![message_id],
+        |row| Ok(UserMessageFeedback {
+            message_id: row.get(0)?,
+            score: row.get(1)?,
+            feedback: row.get(2)?,
+        }),
+    ) {
+        return Ok(cached);
+    }
+
+    let lang_name = match language.as_str() {
+        "ja" => "Japanese",
+        "id" => "Indonesian",
+        _ => &language,
+    };
+    let level_context = if level.is_empty() {
+        String::new()
+    } else {
+        format!("\nJLPT/Level context: {}", level)
+    };
+
+    let mut context_block = String::new();
+    if !context_messages.is_empty() {
+        context_block = "\n\n## Conversation Context\nHere is the recent conversation for reference:\n".to_string();
+        for cm in &context_messages {
+            let role_label = if cm.role == "user" { "Learner" } else { "Partner" };
+            context_block.push_str(&format!("- **{}**: {}\n", role_label, cm.content));
+        }
+        context_block.push_str("\nEvaluate the learner's latest message above in the context of this conversation.\n");
+    }
+
+    let prompt = format!(
+        "You are a language learning evaluator. Evaluate the following {} learner's message.{}\n\
+         {}\n\
+         Rate the message on a scale of 1-5:\n\
+         - 1 = Many errors, hard to understand\n\
+         - 2 = Frequent errors but meaning is clear\n\
+         - 3 = Some errors, generally understandable\n\
+         - 4 = Minor issues, mostly correct\n\
+         - 5 = Natural, no errors\n\n\
+         Provide your evaluation in Markdown with these sections:\n\
+         ## Score: X/5\n\
+         ## Vocabulary\n\
+         - List words that are appropriate/good ✓\n\
+         - List words that should be replaced or removed ✗ (with better alternatives)\n\
+         ## Grammar\n\
+         - List any grammar mistakes with corrections\n\
+         - Note good grammar usage\n\n\
+         Be concise and encouraging. If the message is perfect, say so!\n\n\
+         Message to evaluate:\n\"{}\"\n\n\n
+         BELOW is the EXPECTED RESPONSE:
+
+         **Overall Score**
+         [ `★☆☆☆☆` ] **1 / 5**
+
+         > ⚠️ Response is incomplete and does not appropriately address the partner's comment about health.
+
+         ---
+
+         ### 🔤 Vocabulary Analysis
+
+         | Status | Word | Reading / Meaning | Diagnosis & Suggestion |
+         |:---:|:---|:---|:---|
+         | ❌ | **何** | *nani* / \"what\" | Fragment used incorrectly. A single question word does not constitute a proper response to a statement of concern. |
+
+         ---
+
+         ### 📝 Grammar Correction
+
+         **Issue:** Incomplete Sentence / Fragment
+         The message `何` is not a grammatically complete response to the previous statement.
+
+         **Recommended Alternatives:**
+
+         > ✅ **はい、気をつけます。**
+         > *(Hai, ki o tsukemasu.)* — \"Yes, I will be careful.\"
+
+         > ✅ **わかりました。**
+         > *(Wakarimashita.)* — \"I understand.\"
+
+         > ✅ **ありがとうございます。**
+         > *(Arigatou gozaimasu.)* — \"Thank you.\"
+
+         ---
+
+         ### 🛠️ Styling Guide for Markdown
+         To achieve clean visual hierarchy, apply the following rules when rendering this feedback:
+
+         - **Headings:** Use `#` and `##` with emoji prefixes for immediate context recognition.
+         - **Tables:** Use tables for error logging (Status, Word, Meaning, Fix) for quick scanning.
+         - **Callouts:** Use blockquotes (`>`) for the score banner and warnings.
+         - **Positive Examples:** Use green check emoji (`✅`) in a distinct block to clearly separate the **Error** from the **Fix**.",
+        lang_name, level_context, context_block, message_content
+    );
+
+    let url = build_url(&api_host, "chat/completions");
+    let client = Client::new();
+    let req = ChatRequest {
+        model: &model,
+        messages: &vec![ChatMessage { role: "user".to_string(), content: prompt }],
+    };
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("API error: {} — {}", status, body.trim()));
+    }
+    let parsed: ChatResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
+    let feedback = parsed.choices.get(0).map(|c| c.message.content.clone()).unwrap_or_default();
+
+    // Extract score from the response (look for "Score: X/5" pattern)
+    let score = extract_score_from_feedback(&feedback);
+
+    // Save to DB
+    conn.execute(
+        "INSERT OR REPLACE INTO user_message_feedback(message_id, score, feedback) VALUES (?1, ?2, ?3)",
+        params![message_id, score, feedback],
+    ).map_err(|e| e.to_string())?;
+
+    Ok(UserMessageFeedback { message_id, score, feedback })
+}
+
+/// Extract a score (1-5) from the LLM's markdown feedback by looking for patterns like "Score: X/5"
+fn extract_score_from_feedback(feedback: &str) -> i64 {
+    // Try common patterns
+    for pattern in &["Score: ", "score: ", "**Score:** ", "# Score: "] {
+        if let Some(idx) = feedback.find(pattern) {
+            let after = &feedback[idx + pattern.len()..];
+            // Take up to 3 chars and parse as number before "/"
+            let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(n) = num_str.parse::<i64>() {
+                if (1..=5).contains(&n) {
+                    return n;
+                }
+            }
+        }
+    }
+    3 // Default fallback
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1319,7 +1518,9 @@ pub fn run() {
             db_get_grammar_analysis,
             db_analyze_grammar,
             db_save_selected_grammar,
-            db_get_selected_grammar
+            db_get_selected_grammar,
+            db_get_user_feedback,
+            db_evaluate_user_message
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

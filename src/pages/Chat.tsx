@@ -5,6 +5,7 @@ import { renderFurigana, hasFuriganaAnnotations, stripFurigana } from '../lib/fu
 import { difficultyColor } from '../lib/srs'
 import { JLPT_LEVELS, DEFAULT_JLPT_LEVEL, JLPT_LEVEL_STORAGE_KEY } from '../lib/jlpt'
 import type { JLPTLevel } from '../lib/jlpt'
+import UserMessageFeedback, { type UserFeedback } from '../components/UserMessageFeedback'
 import { Input } from 'antd'
 const { TextArea } = Input
 import { ArrowLeftOutlined, SendOutlined, InfoCircleOutlined, CloseOutlined, PlusOutlined } from '@ant-design/icons'
@@ -117,6 +118,7 @@ export default function Chat() {
   const [grammarInfoItem, setGrammarInfoItem] = useState<GrammarDBItem | null>(null)
   const [grammarAnalysis, setGrammarAnalysis] = useState<string | null>(null)
   const [grammarAnalysisLoading, setGrammarAnalysisLoading] = useState<number | null>(null)
+  const [feedbackMap, setFeedbackMap] = useState<Map<number, UserFeedback>>(new Map())
   const logRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<any>(null)
   // FIFO queue index for rotating through difficult/known words per message
@@ -226,6 +228,14 @@ export default function Chat() {
       try {
         const res = await invoke<{ id: number, role: string, content: string, created_at: number }[]>('db_list_session_messages', { sessionId })
         setMessages(res.map(m => ({ id: m.id, role: m.role as Msg['role'], content: m.content })))
+        // Restore cached feedback for user messages
+        for (const m of res) {
+          if (m.role === 'user' && m.id) {
+            invoke<UserFeedback | null>('db_get_user_feedback', { messageId: m.id })
+              .then(fb => { if (fb) setFeedbackMap(prev => new Map(prev).set(m.id!, fb)) })
+              .catch(() => {})
+          }
+        }
       } catch {}
     }
     load()
@@ -545,7 +555,7 @@ export default function Chat() {
     if (!msg) return
     if (!sessionId) {
       try {
-        const id = await invoke<string>('db_new_session', { title: null, language: lang || null })
+        const id = await invoke<string>('db_new_session', { title: null, language: lang || null, level: lang === 'ja' ? jlptLevel : null })
         setSessionId(id)
       } catch {}
     }
@@ -555,6 +565,25 @@ export default function Chat() {
     const userId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'user', content: user.content }).catch(() => -1)
     if (userId >= 0) {
       setMessages(prev => prev.map((m, idx) => idx === nextMessages.length - 1 ? { ...m, id: userId } : m))
+    }
+    // Spawn feedback evaluation in parallel (non-blocking, runs alongside main LLM chat)
+    // Skip auto-sent topic suggestions (e.g., "Talk about food.")
+    if (userId >= 0 && apiHost && apiKey && !/^talk about /i.test(msg)) {
+      setFeedbackMap(prev => new Map(prev).set(userId, { messageId: userId, score: 0, feedback: '', loading: true }))
+      // Build context from previous messages (exclude the current one being evaluated)
+      const contextMsgs = nextMessages.slice(0, -1).map(m => ({ role: m.role as string, content: m.content }))
+      invoke<UserFeedback>('db_evaluate_user_message', {
+        apiHost, apiKey, model,
+        messageId: userId,
+        messageContent: msg,
+        language: lang || '',
+        level: lang === 'ja' ? jlptLevel : '',
+        contextMessages: contextMsgs,
+      }).then(fb => {
+        setFeedbackMap(prev => { const next = new Map(prev); next.set(userId, { ...fb, messageId: userId, loading: false }); return next })
+      }).catch(() => {
+        setFeedbackMap(prev => { const next = new Map(prev); const existing = next.get(userId); if (existing?.loading) next.delete(userId); return next })
+      })
     }
     setInput('')
     await invoke('db_increment_session_today').catch(() => {})
@@ -908,10 +937,7 @@ export default function Chat() {
           </div>
         )}
         {messages.map((m, i) => (
-          <div
-            key={i}
-            className={`flex mb-2 ${m.role === 'user' ? 'justify-end' : 'justify-start'}`}
-          >
+          <div key={i} className={`flex mb-2 ${m.role === 'user' ? 'justify-end flex-col items-end' : 'justify-start'}`}>
             <div
               className={`
                 max-w-[80%] px-3 py-2 text-[15px] leading-relaxed
@@ -936,6 +962,9 @@ export default function Chat() {
                 </div>
               ) : m.content}
             </div>
+
+            {/* Feedback badge for user messages */}
+            {m.role === 'user' && <UserMessageFeedback feedback={m.id ? feedbackMap.get(m.id) : undefined} />}
           </div>
         ))}
         {loading && <TypingIndicator />}

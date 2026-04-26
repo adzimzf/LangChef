@@ -11,6 +11,7 @@ type ChatSession = {
   id: string
   title?: string | null
   language?: string | null
+  level?: string | null
   created_at: number
   last_activity: number
 }
@@ -132,7 +133,7 @@ export default function Chats() {
       return
     }
     try {
-      const id = await invoke<string>('db_new_session', { title: null, language })
+      const id = await invoke<string>('db_new_session', { title: null, language, level: null })
       setShowLangPicker(false)
       navigate(`/chat?sid=${id}&lang=${language}`)
     } catch {}
@@ -143,7 +144,7 @@ export default function Chats() {
     localStorage.setItem(JLPT_LEVEL_STORAGE_KEY, level)
     setJlptLevel(level)
     try {
-      const id = await invoke<string>('db_new_session', { title: null, language: selectedLang })
+      const id = await invoke<string>('db_new_session', { title: null, language: selectedLang, level })
       setShowJlptPicker(false)
       navigate(`/chat?sid=${id}&lang=${selectedLang}&jlpt=${level}`)
     } catch {}
@@ -302,7 +303,7 @@ export default function Chats() {
             >
               <div
                 className={`w-11 h-11 rounded-full ${getColor(s.id)} flex items-center justify-center text-white font-semibold text-base shrink-0 cursor-pointer`}
-                onClick={() => navigate(`/chat?sid=${s.id}&lang=${s.language || ''}`)}
+                onClick={() => navigate(`/chat?sid=${s.id}&lang=${s.language || ''}${s.level ? `&jlpt=${s.level}` : ''}`)}
               >
                 {getInitial(s.title)}
               </div>
@@ -327,9 +328,16 @@ export default function Chats() {
               ) : (
                 <div
                   className="flex-1 min-w-0 cursor-pointer"
-                  onClick={() => navigate(`/chat?sid=${s.id}&lang=${s.language || ''}`)}
+                  onClick={() => navigate(`/chat?sid=${s.id}&lang=${s.language || ''}${s.level ? `&jlpt=${s.level}` : ''}`)}
                 >
-                  <div className="font-medium text-[15px] truncate">{s.title || getLangLabel(s.language) || 'Untitled'}</div>
+                  <div className="font-medium text-[15px] truncate flex items-center gap-1.5">
+                    {s.title || getLangLabel(s.language) || 'Untitled'}
+                    {s.level && s.language === 'ja' && (
+                      <span className="text-[11px] font-medium px-1 py-0.5 rounded bg-indigo-50 text-indigo-600 shrink-0">
+                        {s.level}
+                      </span>
+                    )}
+                  </div>
                   <div className="text-xs text-gray-400 truncate">
                     {s.language && <span className="mr-1">{getLangLabel(s.language)}</span>}
                     Last: {timeAgo(s.last_activity)}
