@@ -3,4 +3,7 @@
     <style name="Theme.langchef" parent="Theme.MaterialComponents.DayNight.NoActionBar">
         <!-- Customize your theme here. -->
     </style>
+
+    <!-- NoDisplay theme for invisible activities (e.g. native sign-in redirect). -->
+    <style name="Theme.langchef.NoDisplay" parent="android:Theme.NoDisplay" />
 </resources>

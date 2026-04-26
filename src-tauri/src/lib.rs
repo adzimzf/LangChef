@@ -1523,7 +1523,24 @@ fn extract_score_from_feedback(feedback: &str) -> i64 {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut app = tauri::Builder::default();
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        app = app.plugin(
+            tauri::plugin::Builder::new("google-auth")
+                .setup(|app, api: tauri::plugin::PluginApi<tauri::Wry, serde_json::Value>| {
+                    let handle = google_auth::mobile::init(&api)
+                        .expect("Failed to initialize Google Auth plugin");
+                    app.manage(handle);
+                    Ok(())
+                })
+                .build(),
+        );
+    }
+
+    app
+        .setup(|_app| { Ok(()) })
         .invoke_handler(tauri::generate_handler![
             greet,
             test_provider,

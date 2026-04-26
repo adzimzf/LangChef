@@ -1,110 +1,106 @@
 package com.langchef
 
-import android.app.Activity
+import android.app.PendingIntent
 import android.content.Intent
 import android.os.Bundle
-import android.util.Log
+import androidx.activity.ComponentActivity
+import androidx.activity.result.ActivityResultLauncher
+import androidx.activity.result.IntentSenderRequest
+import androidx.activity.result.contract.ActivityResultContracts
 import com.google.android.gms.auth.api.identity.AuthorizationClient
-import com.google.android.gms.auth.api.identity.AuthorizationRequest
 import com.google.android.gms.auth.api.identity.Identity
 
-class NativeSignInActivity : Activity() {
-    private lateinit var authorizationClient: AuthorizationClient
+/**
+ * Activity that handles authorization resolution when user consent is required.
+ * This activity receives a PendingIntent from AuthorizationClient and launches it
+ * to get user consent, then returns the authorization result.
+ */
+class NativeSignInActivity : ComponentActivity() {
 
     companion object {
-        const val TAG = "NativeSignInActivity"
-        private var pendingInvoke: tauri.Invoke? = null
-        private var pendingIdToken: String? = null
+        const val EXTRA_PENDING_INTENT = "pendingIntent"
 
-        fun setPendingData(invoke: tauri.Invoke, idToken: String) {
-            pendingInvoke = invoke
-            pendingIdToken = idToken
-        }
+        const val RESULT_ACCESS_TOKEN = "accessToken"
+        const val RESULT_GRANTED_SCOPES = "grantedScopes"
+        const val RESULT_ERROR = "error"
     }
+
+    private lateinit var authorizationClient: AuthorizationClient
+    private lateinit var authorizationLauncher: ActivityResultLauncher<IntentSenderRequest>
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        authorizationClient = Identity.getAuthorizationClient(applicationContext)
+        authorizationClient = Identity.getAuthorizationClient(this)
 
-        val authRequest = intent.getParcelableExtra<AuthorizationRequest>("authorizationRequest")
-            ?: run {
-                Log.e(TAG, "No authorization request provided")
-                finishWithFailure("Missing authorization request")
-                return
-            }
+        authorizationLauncher = registerForActivityResult(
+            ActivityResultContracts.StartIntentSenderForResult()
+        ) { result ->
+            handleAuthorizationResult(result.resultCode, result.data)
+        }
 
-        authorizationClient.authorize(authRequest)
-            .addOnSuccessListener { result ->
-                if (result.hasResolution()) {
-                    // Still needs resolution (shouldn't happen in this activity but handle it)
-                    result.resolution?.startIntentSenderForResult(this, 1001, null, 0, 0, 0)
-                } else {
-                    val accessToken = result.accessToken
-                    val grantedScopes = result.grantedScopes?.map { it.scope } ?: emptyList()
-                    finishWithSuccess(accessToken, grantedScopes)
-                }
-            }
-            .addOnFailureListener { e ->
-                Log.e(TAG, "Authorization failed", e)
-                finishWithFailure(e.message ?: "Authorization failed")
-            }
+        val pendingIntent = if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            intent.getParcelableExtra(EXTRA_PENDING_INTENT, PendingIntent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent.getParcelableExtra(EXTRA_PENDING_INTENT)
+        }
+
+        if (pendingIntent == null) {
+            finishWithError("No pending intent provided")
+            return
+        }
+
+        try {
+            val intentSenderRequest = IntentSenderRequest.Builder(
+                pendingIntent.intentSender
+            ).build()
+            authorizationLauncher.launch(intentSenderRequest)
+        } catch (e: Exception) {
+            finishWithError("Failed to launch authorization: ${e.message}")
+        }
     }
 
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
+    private fun handleAuthorizationResult(resultCode: Int, data: Intent?) {
+        if (resultCode == RESULT_CANCELED) {
+            finishWithError("Authorization cancelled by user")
+            return
+        }
 
-        if (requestCode == 1001) {
-            // Handle resolution result
+        if (resultCode != RESULT_OK || data == null) {
+            finishWithError("Authorization failed with result code: $resultCode")
+            return
+        }
+
+        try {
             val authResult = authorizationClient.getAuthorizationResultFromIntent(data)
-            if (authResult != null) {
-                val accessToken = authResult.accessToken
-                val grantedScopes = authResult.grantedScopes?.map { it.scope } ?: emptyList()
+            val accessToken = authResult.accessToken
+
+            if (accessToken != null) {
+                val grantedScopes = authResult.grantedScopes.map { it.toString() }.toTypedArray()
                 finishWithSuccess(accessToken, grantedScopes)
             } else {
-                finishWithFailure("Authorization cancelled")
+                finishWithError("Failed to get access token from authorization result")
             }
-        } else {
-            finishWithFailure("Unexpected result")
+        } catch (e: Exception) {
+            finishWithError("Auth result error [${e.javaClass.simpleName}]: ${e.message}")
         }
     }
 
-    private fun finishWithSuccess(accessToken: String?, grantedScopes: List<String>) {
-        val invoke = pendingInvoke
-        val idToken = pendingIdToken
-
-        if (invoke != null && idToken != null) {
-            try {
-                val response = org.json.JSONObject().apply {
-                    put("idToken", idToken)
-                    put("accessToken", accessToken ?: "")
-                    put("refreshToken", "")
-                    put("scopes", org.json.JSONArray(grantedScopes))
-                    put("expiresAt", 0)
-                }
-                invoke.resolve(response)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to resolve invoke", e)
-            }
+    private fun finishWithSuccess(accessToken: String, grantedScopes: Array<String>) {
+        val intent = Intent().apply {
+            putExtra(RESULT_ACCESS_TOKEN, accessToken)
+            putExtra(RESULT_GRANTED_SCOPES, grantedScopes)
         }
-
-        pendingInvoke = null
-        pendingIdToken = null
+        setResult(RESULT_OK, intent)
         finish()
     }
 
-    private fun finishWithFailure(error: String) {
-        val invoke = pendingInvoke
-        if (invoke != null) {
-            try {
-                invoke.reject(error)
-            } catch (e: Exception) {
-                Log.e(TAG, "Failed to reject invoke", e)
-            }
+    private fun finishWithError(errorMessage: String) {
+        val intent = Intent().apply {
+            putExtra(RESULT_ERROR, errorMessage)
         }
-
-        pendingInvoke = null
-        pendingIdToken = null
+        setResult(RESULT_CANCELED, intent)
         finish()
     }
 }
