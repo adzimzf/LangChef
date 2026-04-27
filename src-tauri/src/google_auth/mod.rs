@@ -93,14 +93,29 @@ pub async fn get_access_token(app: &AppHandle) -> Result<String, String> {
             let handle = app
                 .try_state::<mobile::GoogleAuthHandle<tauri::Wry>>()
                 .ok_or("Google auth plugin not initialized")?;
+            let old_id_token = tokens.id_token.clone();
             tokens = mobile::refresh_token(handle.inner(), "")?;
+            // Preserve existing id_token if refresh didn't return a new one
+            if tokens.id_token.as_deref().is_some_and(|s| s.is_empty()) {
+                tokens.id_token = old_id_token;
+            }
             save_tokens(app, &tokens)?;
         }
     }
     Ok(tokens.access_token)
 }
 
-async fn get_user_email(access_token: &str) -> Result<String, String> {
+async fn get_user_email(access_token: &str, id_token: Option<&str>) -> Result<String, String> {
+    // Primary: extract email from ID token JWT payload (no network needed)
+    if let Some(jwt) = id_token {
+        if !jwt.is_empty() {
+            if let Some(email) = extract_email_from_jwt(jwt) {
+                return Ok(email);
+            }
+        }
+    }
+
+    // Fallback: call userinfo endpoint (requires userinfo scope on access_token)
     let client = reqwest::Client::new();
     let resp = client
         .get("https://www.googleapis.com/oauth2/v2/userinfo")
@@ -113,6 +128,43 @@ async fn get_user_email(access_token: &str) -> Result<String, String> {
     }
     let info: serde_json::Value = resp.json().await.map_err(|e| e.to_string())?;
     Ok(info["email"].as_str().unwrap_or("Unknown").to_string())
+}
+
+/// Decode the payload of a Google ID token JWT and extract the email claim.
+fn extract_email_from_jwt(jwt: &str) -> Option<String> {
+    let payload = jwt.split('.').nth(1)?;
+    let decoded = base64_url_decode(payload).ok()?;
+    let json: serde_json::Value = serde_json::from_slice(&decoded).ok()?;
+    json["email"].as_str().map(String::from)
+}
+
+/// Decode a base64url-encoded string (no padding) into bytes.
+fn base64_url_decode(input: &str) -> Result<Vec<u8>, String> {
+    let mut decoded = Vec::with_capacity(input.len() * 3 / 4);
+    let mut buf: u32 = 0;
+    let mut bits = 0u32;
+
+    for ch in input.bytes() {
+        let val = match ch {
+            b'A'..=b'Z' => ch - b'A',
+            b'a'..=b'z' => ch - b'a' + 26,
+            b'0'..=b'9' => ch - b'0' + 52,
+            b'-' => 62,
+            b'_' => 63,
+            _ => continue, // skip padding or invalid chars
+        };
+        buf = (buf << 6) | (val as u32);
+        bits += 6;
+        if bits >= 8 {
+            bits -= 8;
+            decoded.push(((buf >> bits) & 0xFF) as u8);
+        }
+    }
+
+    if decoded.is_empty() {
+        return Err("Empty base64url input".to_string());
+    }
+    Ok(decoded)
 }
 
 // ─── Tauri Commands ────────────────────────────────────────────────────────
@@ -135,22 +187,20 @@ pub async fn google_sign_in(app: AppHandle) -> Result<serde_json::Value, String>
     .map_err(|e| format!("Sign-in task failed: {e}"))??;
 
     save_tokens(&app, &tokens)?;
-    let email = get_user_email(&tokens.access_token).await.unwrap_or_else(|_| "Unknown".to_string());
+    let email = get_user_email(&tokens.access_token, tokens.id_token.as_deref()).await.unwrap_or_else(|_| "Unknown".to_string());
     Ok(serde_json::json!({ "email": email }))
 }
 
 #[tauri::command]
 pub async fn google_sign_out(app: AppHandle) -> Result<(), String> {
-    let tokens = match load_tokens(&app)? {
-        Some(t) => t,
-        None => return Ok(()),
-    };
-    #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    { let _ = desktop::revoke_token(tokens.access_token); }
-    #[cfg(any(target_os = "android", target_os = "ios"))]
-    {
-        if let Some(handle) = app.try_state::<mobile::GoogleAuthHandle<tauri::Wry>>() {
-            let _ = mobile::revoke_token(handle.inner(), tokens.access_token);
+    if let Some(tokens) = load_tokens(&app)? {
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
+        { let _ = desktop::revoke_token(tokens.access_token); }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        {
+            if let Some(handle) = app.try_state::<mobile::GoogleAuthHandle<tauri::Wry>>() {
+                let _ = mobile::revoke_token(handle.inner(), tokens.access_token);
+            }
         }
     }
     delete_tokens(&app)
@@ -160,8 +210,12 @@ pub async fn google_sign_out(app: AppHandle) -> Result<(), String> {
 pub async fn google_get_auth_status(app: AppHandle) -> Result<serde_json::Value, String> {
     let signed_in = get_auth_status(&app)?;
     let email = if signed_in {
+        // Load tokens to get id_token (for JWT-based email extraction)
+        let id_token = load_tokens(&app)?
+            .and_then(|t| t.id_token)
+            .filter(|s| !s.is_empty());
         match get_access_token(&app).await {
-            Ok(token) => get_user_email(&token).await.ok(),
+            Ok(token) => get_user_email(&token, id_token.as_deref()).await.ok(),
             Err(_) => None,
         }
     } else {

@@ -346,6 +346,25 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private suspend fun refreshNative(invoke: Invoke, args: RefreshTokenArgs) {
+        // Step 1: Get fresh ID token via CredentialManager (contains email in JWT payload)
+        val idToken = try {
+            val googleIdOption = GetGoogleIdOption.Builder()
+                .setServerClientId(args.clientId)
+                .setFilterByAuthorizedAccounts(true)
+                .build()
+            val request = GetCredentialRequest.Builder()
+                .addCredentialOption(googleIdOption)
+                .build()
+            val result = credentialManager.getCredential(activity, request)
+            val credential = result.credential
+            val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
+            googleIdTokenCredential.idToken
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get ID token during refresh, continuing without it: ${e.message}")
+            ""
+        }
+
+        // Step 2: Get access token via AuthorizationClient for Drive scope
         val authRequest = AuthorizationRequest.builder()
             .setRequestedScopes(args.scopes!!.map { Scope(it) })
             .build()
@@ -359,7 +378,7 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
         }
 
         val tokenObject = JSObject().apply {
-            put("idToken", "" as Any)
+            put("idToken", idToken as Any)
             put("accessToken", accessToken as Any)
             put("refreshToken", "" as Any)
             put("expiresAt", 0 as Any)
