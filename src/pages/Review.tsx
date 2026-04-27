@@ -145,6 +145,10 @@ export default function Review() {
   // Track if this is the initial load (to build queue from DB)
   const initialLoadDone = useRef(false)
 
+  // Guard against double-tapping grade buttons before React re-renders.
+  // Using a ref (not state) so the check is synchronous — no stale closure risk.
+  const isGrading = useRef(false)
+
   // Tick counter to force re-evaluation of which cards are due.
   // Learning/relearning cards have short step intervals (e.g. 1m, 10m) and
   // become due when their next_review timestamp passes. Without ticking,
@@ -267,13 +271,19 @@ export default function Review() {
 
   async function handleGrade(grade: Grade) {
     if (!visibleCard) return
+    // Prevent double-tap: discard rapid clicks before React re-renders
+    if (isGrading.current) return
+    isGrading.current = true
+
+    // Capture card ID upfront so the setSessionQueue closure never uses a stale visibleCard
+    const cardId = visibleCard.id
 
     // Compute new SRS state locally for immediate UI update
     const card = itemToCard(visibleCard)
     const { card: updated, lapsed } = scheduleCard(card, grade, DEFAULT_SRS_CONFIG)
 
     // Update SRS in DB (fire and forget)
-    invoke('db_update_srs', { id: visibleCard.id, grade }).catch(() => {})
+    invoke('db_update_srs', { id: cardId, grade }).catch(() => {})
 
     // Only count as reviewed if card's new next_review is tomorrow or later
     if (updated.nextReview && updated.nextReview > endOfDaySeconds * 1000) {
@@ -292,10 +302,10 @@ export default function Review() {
     // Determine if the card graduated (left learning/relearning into review)
     const graduated = (updated.state === 'review') && (card.state === 'new' || card.state === 'learning' || card.state === 'relearning')
 
-    // Update session queue with locally computed new state
+    // Update session queue with locally computed new state.
+    // Uses captured cardId instead of visibleCard from outer scope to avoid stale closures.
     setSessionQueue(prev => {
-      // Find the card in the queue
-      const idx = prev.findIndex(item => item.id === visibleCard.id)
+      const idx = prev.findIndex(item => item.id === cardId)
       if (idx < 0) return prev
 
       const before = prev.slice(0, idx)
@@ -336,6 +346,11 @@ export default function Review() {
     if (graduated && !lapsed) {
       setSessionCompleted(prev => prev + 1)
     }
+
+    // Release the guard after state updates are scheduled (next tick).
+    // React batches these setState calls so they'll apply in one render;
+    // by then visibleCard has changed and a new click would be valid.
+    setTimeout(() => { isGrading.current = false }, 0)
   }
 
   async function generateDetail() {
@@ -795,7 +810,8 @@ export default function Review() {
                   <button
                     key={g.grade}
                     onClick={() => handleGrade(g.grade)}
-                    className={`flex flex-col items-center justify-center gap-1 py-3 rounded-2xl text-white font-medium ${g.color} hover:opacity-90 active:opacity-80 transition-opacity shadow-sm`}
+                    disabled={isGrading.current}
+                    className={`flex flex-col items-center justify-center gap-1 py-3 rounded-2xl text-white font-medium ${g.color} hover:opacity-90 active:opacity-80 transition-opacity shadow-sm disabled:opacity-50`}
                   >
                     <span className="font-semibold text-sm leading-none">{g.label}</span>
                     <span className="text-[10px] opacity-75 leading-none">{g.nextLabel}</span>
