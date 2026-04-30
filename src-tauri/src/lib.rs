@@ -1296,18 +1296,23 @@ struct UserMessageFeedback {
     message_id: i64,
     score: i64,
     feedback: String,
+    created_at: i64,
 }
 
 #[tauri::command]
 fn db_get_user_feedback(app: tauri::AppHandle, message_id: i64) -> Result<Option<UserMessageFeedback>, String> {
     let conn = open_db(&app)?;
     let result = conn.query_row(
-        "SELECT message_id, score, feedback FROM user_message_feedback WHERE message_id=?1",
+        "SELECT f.message_id, f.score, f.feedback, COALESCE(m.created_at, 0)
+         FROM user_message_feedback f
+         LEFT JOIN messages m ON m.id = f.message_id
+         WHERE f.message_id=?1",
         params![message_id],
         |row| Ok(UserMessageFeedback {
             message_id: row.get(0)?,
             score: row.get(1)?,
             feedback: row.get(2)?,
+            created_at: row.get(3)?,
         }),
     );
     match result {
@@ -1315,6 +1320,30 @@ fn db_get_user_feedback(app: tauri::AppHandle, message_id: i64) -> Result<Option
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
+}
+
+#[tauri::command]
+fn db_list_all_feedback(app: tauri::AppHandle) -> Result<Vec<UserMessageFeedback>, String> {
+    let conn = open_db(&app)?;
+    let mut stmt = conn.prepare(
+        "SELECT f.message_id, f.score, f.feedback, m.created_at
+         FROM user_message_feedback f
+         INNER JOIN messages m ON m.id = f.message_id
+         ORDER BY m.created_at ASC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| {
+        Ok(UserMessageFeedback {
+            message_id: row.get(0)?,
+            score: row.get(1)?,
+            feedback: row.get(2)?,
+            created_at: row.get(3)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
 }
 
 #[tauri::command]
@@ -1332,12 +1361,16 @@ async fn db_evaluate_user_message(
     // Check cache first
     let conn = open_db(&app)?;
     if let Ok(cached) = conn.query_row(
-        "SELECT message_id, score, feedback FROM user_message_feedback WHERE message_id=?1",
+        "SELECT f.message_id, f.score, f.feedback, COALESCE(m.created_at, 0)
+         FROM user_message_feedback f
+         LEFT JOIN messages m ON m.id = f.message_id
+         WHERE f.message_id=?1",
         params![message_id],
         |row| Ok(UserMessageFeedback {
             message_id: row.get(0)?,
             score: row.get(1)?,
             feedback: row.get(2)?,
+            created_at: row.get(3)?,
         }),
     ) {
         return Ok(cached);
@@ -1458,7 +1491,13 @@ async fn db_evaluate_user_message(
         params![message_id, score, feedback],
     ).map_err(|e| e.to_string())?;
 
-    Ok(UserMessageFeedback { message_id, score, feedback })
+    let msg_created_at: i64 = conn.query_row(
+        "SELECT COALESCE(created_at, 0) FROM messages WHERE id=?1",
+        params![message_id],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    Ok(UserMessageFeedback { message_id, score, feedback, created_at: msg_created_at })
 }
 
 /// Extract a score (1-5) from the LLM's markdown feedback by looking for patterns like "Score: X/5"
@@ -1520,6 +1559,7 @@ pub fn run() {
             db_save_selected_grammar,
             db_get_selected_grammar,
             db_get_user_feedback,
+            db_list_all_feedback,
             db_evaluate_user_message
         ])
         .run(tauri::generate_context!())
