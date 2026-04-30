@@ -76,6 +76,13 @@ type GrammarDBItem = { id: string; pattern: string; detail: string; language: st
 
 type ReviewItemRaw = { id: string; content: string; EF: number; I: number; R: number; tags: string | null; state: string | null; next_review: number | null }
 
+/** Compute an ease score (0 = hardest, 1 = easiest) — same as WordList */
+function easeScore(EF: number, R: number): number {
+  const efNorm = Math.min(1, Math.max(0, (EF - 1.3) / (3.0 - 1.3)))
+  const rNorm = Math.min(1, Math.max(0, R / 5))
+  return 0.6 * efNorm + 0.4 * rNorm
+}
+
 
 function TypingIndicator() {
   return (
@@ -265,32 +272,24 @@ export default function Chat() {
 
   // Load difficult words from review_items
   // Two separate queries:
-  //   - LLM prompt words: due by tomorrow (focused reinforcement), with limits
+  //   - LLM prompt words: all items, classified by easeScore (same as Word List default)
   //   - Color rendering: due by next week (broader visual feedback)
   useEffect(() => {
     async function load() {
       try {
-        const maxReviews = getMaxReviews()
-        const maxNewCards = getMaxNewCards()
-        const remaining = Math.max(0, maxNewCards - getNewCardsToday())
+        // ── Query 1: For LLM system prompt — all items, sorted hardest-first (same as Word List) ──
+        const allItems = await invoke<ReviewItemRaw[]>('db_get_review_items')
 
-        // ── Query 1: For LLM system prompt — due by tomorrow, limited ──
-        const dTomorrow = new Date()
-        dTomorrow.setDate(dTomorrow.getDate() + 1)
-        dTomorrow.setHours(23, 59, 59, 999)
-
-        const llmItems = await invoke<ReviewItemRaw[]>('db_get_due_review_items', {
-          language: null,
-          limit: maxReviews,
-          newCardsRemaining: remaining,
-          maxNextReview: Math.floor(dTomorrow.getTime() / 1000),
-        })
+        // Sort by ease score (hardest first) — same as WordList default sortOrder
+        allItems.sort((a, b) => easeScore(a.EF, a.R) - easeScore(b.EF, b.R))
 
         const hardMap = new Map<string, { EF: number; R: number; isNew: boolean }>()
         let newDifficultCount = 0
 
-        llmItems.forEach(i => {
-          if ((i.tags === 'hard' || i.tags === 'medium') || i.R < 3) {
+        // Classify using easeScore — hard (< 0.3) or medium (0.3–0.7) are difficult
+        allItems.forEach(i => {
+          const ease = easeScore(i.EF, i.R)
+          if (ease < 0.7) {
             const isNew = i.state === 'new' || !i.state
             hardMap.set(i.content.toLowerCase(), { EF: i.EF, R: i.R, isNew })
             if (isNew) newDifficultCount++
@@ -298,8 +297,9 @@ export default function Chat() {
         })
         setDifficult(hardMap)
 
+        // Known words: easy items (ease >= 0.7) — same metric as WordList
         const knownWords = new Set<string>()
-        llmItems.filter(i => i.R >= 3).forEach(i => {
+        allItems.filter(i => easeScore(i.EF, i.R) >= 0.7).forEach(i => {
           knownWords.add(i.content.toLowerCase())
         })
         setKnown(knownWords)
