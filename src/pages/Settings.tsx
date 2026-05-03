@@ -13,6 +13,7 @@ import {
   MessageOutlined,
   CloseOutlined,
 } from '@ant-design/icons'
+import GoogleDriveBackup from '../components/GoogleDriveBackup'
 
 const MAX_REVIEWS_DEFAULT = 100
 const MAX_REVIEWS_KEY = 'max_reviews_per_day'
@@ -149,6 +150,9 @@ export default function Settings() {
       <div className="sticky top-0 z-10 pt-4 pb-2 bg-gray-50">
         <h2 className="text-lg font-semibold">Settings</h2>
       </div>
+
+      {/* Backup & Sync (top priority) */}
+      <GoogleDriveBackup />
 
       {/* Provider section */}
       <div className="space-y-3">

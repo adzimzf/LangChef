@@ -5,6 +5,9 @@ use std::path::PathBuf;
 use rusqlite::{Connection, params};
 use tauri::Manager;
 
+mod google_auth;
+mod google_drive;
+
 #[derive(Serialize, Deserialize)]
 struct Message {
     id: i64,
@@ -1520,7 +1523,24 @@ fn extract_score_from_feedback(feedback: &str) -> i64 {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let mut app = tauri::Builder::default();
+
+    #[cfg(any(target_os = "android", target_os = "ios"))]
+    {
+        app = app.plugin(
+            tauri::plugin::Builder::new("google-auth")
+                .setup(|app, api: tauri::plugin::PluginApi<tauri::Wry, serde_json::Value>| {
+                    let handle = google_auth::mobile::init(&api)
+                        .expect("Failed to initialize Google Auth plugin");
+                    app.manage(handle);
+                    Ok(())
+                })
+                .build(),
+        );
+    }
+
+    app
+        .setup(|_app| { Ok(()) })
         .invoke_handler(tauri::generate_handler![
             greet,
             test_provider,
@@ -1560,7 +1580,18 @@ pub fn run() {
             db_get_selected_grammar,
             db_get_user_feedback,
             db_list_all_feedback,
-            db_evaluate_user_message
+            db_evaluate_user_message,
+            // Google Auth
+            google_auth::google_sign_in,
+            google_auth::google_sign_out,
+            google_auth::google_get_auth_status,
+            // Google Drive Backup & Sync
+            google_drive::google_backup_db,
+            google_drive::google_restore_db,
+            google_drive::google_get_backup_status,
+            google_drive::google_set_auto_sync,
+            google_drive::google_get_auto_sync,
+            google_drive::google_trigger_sync,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

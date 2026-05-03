@@ -19,7 +19,26 @@ const LANGUAGES: Record<string, { label: string, flag: string }> = {
   id: { label: 'Indonesian', flag: '🇮🇩' },
 }
 
-const SUGGESTIONS = ['Travel', 'Food', 'Work', 'Daily routine', 'Hobbies']
+const SUGGESTIONS = [
+  'Random Topic',
+  'Travel',
+  'Food',
+  'Work',
+  'Daily routine',
+  'Hobbies',
+  'Entertainment',
+  'Technology',
+  'Health & Wellness',
+  'Learning & Education',
+  'Relationships',
+  'Current Events',
+  'Nature & Environment',
+  'Art & Culture',
+  'Personal Finance',
+  'Home & Living',
+  'Sports & Recreation',
+  'Future & Aspirations'
+];
 
 const MAX_REVIEWS_DEFAULT = 100
 const MAX_REVIEWS_KEY = 'max_reviews_per_day'
@@ -922,7 +941,8 @@ export default function Chat() {
             <div className="text-4xl">💬</div>
             <p className="text-sm text-center">Start a conversation in {langInfo?.label || 'your target language'}</p>
             <p className="text-xs text-center text-blue-400">Tap words in replies to mark them difficult</p>
-            <div className="flex flex-wrap justify-center gap-2 mt-1">
+            <div className="w-full mt-1 overflow-x-auto">
+              <div className="grid gap-2" style={{ gridTemplateRows: 'repeat(3, auto)', gridAutoFlow: 'column' }}>
               {SUGGESTIONS.map((s, i) => (
                 <button
                   key={s}
@@ -933,6 +953,7 @@ export default function Chat() {
                   {s}
                 </button>
               ))}
+              </div>
             </div>
           </div>
         )}
