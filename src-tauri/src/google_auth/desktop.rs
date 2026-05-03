@@ -36,11 +36,16 @@ pub fn sign_in() -> Result<TokenData, String> {
         .set_redirect_uri(redirect_uri);
 
     // Build authorization URL
-    let (authorize_url, _csrf_state) = _client
+    let (mut authorize_url, _csrf_state) = _client
         .authorize_url(CsrfToken::new_random)
         .add_scope(Scope::new(DRIVE_SCOPE.to_string()))
+        .add_scope(Scope::new("openid".to_string()))
+        .add_scope(Scope::new("email".to_string()))
         .set_pkce_challenge(pkce_code_challenge)
         .url();
+    authorize_url
+        .query_pairs_mut()
+        .append_pair("access_type", "offline");
 
     // Open system browser
     open::that_detached(authorize_url.to_string())

@@ -81,7 +81,15 @@ pub async fn get_access_token(app: &AppHandle) -> Result<String, String> {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             if let Some(refresh) = &tokens.refresh_token {
-                tokens = desktop::refresh_token(refresh)?;
+                let refresh = refresh.clone();
+                let old_id_token = tokens.id_token.clone();
+                tokens = tokio::task::spawn_blocking(move || desktop::refresh_token(&refresh))
+                    .await
+                    .map_err(|e| format!("Refresh token task failed: {e}"))??;
+                // Preserve existing id_token if refresh didn't return a new one
+                if tokens.id_token.is_none() {
+                    tokens.id_token = old_id_token;
+                }
                 save_tokens(app, &tokens)?;
             } else {
                 return Err("No refresh token available. Please sign in again.".to_string());
@@ -195,7 +203,10 @@ pub async fn google_sign_in(app: AppHandle) -> Result<serde_json::Value, String>
 pub async fn google_sign_out(app: AppHandle) -> Result<(), String> {
     if let Some(tokens) = load_tokens(&app)? {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
-        { let _ = desktop::revoke_token(tokens.access_token); }
+        {
+            let access_token = tokens.access_token;
+            let _ = tokio::task::spawn_blocking(move || desktop::revoke_token(access_token)).await;
+        }
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
             if let Some(handle) = app.try_state::<mobile::GoogleAuthHandle<tauri::Wry>>() {
