@@ -90,7 +90,11 @@ pub fn sign_in<R: Runtime>(handle: &GoogleAuthHandle<R>) -> Result<TokenData, St
         SignInRequest {
             client_id: GOOGLE_CLIENT_ID.to_string(),
             client_secret: Some(GOOGLE_CLIENT_SECRET.to_string()),
-            scopes: Some(vec![DRIVE_SCOPE.to_string()]),
+            scopes: Some(vec![
+                DRIVE_SCOPE.to_string(),
+                "openid".to_string(),
+                "email".to_string(),
+            ]),
             flow_type: Some("native".to_string()),
         },
     )?;
@@ -103,17 +107,28 @@ pub fn refresh_token<R: Runtime>(
     handle: &GoogleAuthHandle<R>,
     refresh_token: &str,
 ) -> Result<TokenData, String> {
+    eprintln!("[mobile] refresh_token called: refresh_token_len={}, is_empty={}",
+        refresh_token.len(), refresh_token.is_empty());
     let response = handle.run(
         "refreshToken",
         RefreshTokenRequest {
             refresh_token: Some(refresh_token.to_string()),
             client_id: GOOGLE_CLIENT_ID.to_string(),
             client_secret: Some(GOOGLE_CLIENT_SECRET.to_string()),
-            scopes: Some(vec![DRIVE_SCOPE.to_string()]),
+            scopes: Some(vec![
+                DRIVE_SCOPE.to_string(),
+                "openid".to_string(),
+                "email".to_string(),
+            ]),
             flow_type: Some("native".to_string()),
         },
     )?;
-
+    eprintln!("[mobile] refresh_token response: access_token_len={}, id_token_len={}, refresh_token_len={}, expires_at={:?}",
+        response.access_token.len(),
+        response.id_token.as_ref().map_or(0, |t| t.len()),
+        response.refresh_token.as_ref().map_or(0, |t| t.len()),
+        response.expires_at,
+    );
     Ok(token_response_to_data(response))
 }
 

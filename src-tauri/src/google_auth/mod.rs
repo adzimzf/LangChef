@@ -77,7 +77,13 @@ pub async fn get_access_token(app: &AppHandle) -> Result<String, String> {
         None => return Err("Not signed in to Google".to_string()),
     };
     let now = chrono::Utc::now().timestamp() as u64;
+    eprintln!("[google_auth] get_access_token: now={}, expires_at={}, has_refresh={}, access_token_len={}",
+        now, tokens.expires_at,
+        tokens.refresh_token.as_ref().map_or(false, |r| !r.is_empty()),
+        tokens.access_token.len(),
+    );
     if now >= tokens.expires_at.saturating_sub(300) {
+        eprintln!("[google_auth] Token expired, refreshing...");
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         {
             if let Some(refresh) = &tokens.refresh_token {
@@ -97,19 +103,30 @@ pub async fn get_access_token(app: &AppHandle) -> Result<String, String> {
         }
         #[cfg(any(target_os = "android", target_os = "ios"))]
         {
-            // Mobile: re-authorize via AuthorizationClient (silent if previously granted)
+            // Mobile: use refresh token if available (same as desktop), otherwise re-authorize
             let handle = app
                 .try_state::<mobile::GoogleAuthHandle<tauri::Wry>>()
                 .ok_or("Google auth plugin not initialized")?;
             let old_id_token = tokens.id_token.clone();
-            tokens = mobile::refresh_token(handle.inner(), "")?;
+            let refresh_str = tokens.refresh_token.as_deref().unwrap_or("").to_string();
+            eprintln!("[google_auth] Mobile refresh: sending refresh_token_len={}", refresh_str.len());
+            tokens = mobile::refresh_token(handle.inner(), &refresh_str)?;
+            eprintln!("[google_auth] Mobile refresh result: access_token_len={}, id_token_len={}, refresh_token_len={}, expires_at={}",
+                tokens.access_token.len(),
+                tokens.id_token.as_ref().map_or(0, |t| t.len()),
+                tokens.refresh_token.as_ref().map_or(0, |t| t.len()),
+                tokens.expires_at,
+            );
             // Preserve existing id_token if refresh didn't return a new one
             if tokens.id_token.as_deref().is_some_and(|s| s.is_empty()) {
                 tokens.id_token = old_id_token;
             }
             save_tokens(app, &tokens)?;
         }
+    } else {
+        eprintln!("[google_auth] Token still valid, using cached");
     }
+    eprintln!("[google_auth] Returning access_token_len={}", tokens.access_token.len());
     Ok(tokens.access_token)
 }
 
@@ -179,6 +196,12 @@ fn base64_url_decode(input: &str) -> Result<Vec<u8>, String> {
 
 #[tauri::command]
 pub async fn google_sign_in(app: AppHandle) -> Result<serde_json::Value, String> {
+    // Preserve existing refresh_token before sign-in overwrites it
+    // (Google only returns refresh_token on the first auth code exchange)
+    let old_refresh = load_tokens(&app)?
+        .and_then(|t| t.refresh_token)
+        .filter(|r| !r.is_empty());
+
     let app_clone = app.clone();
     let tokens = tokio::task::spawn_blocking(move || {
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -195,6 +218,16 @@ pub async fn google_sign_in(app: AppHandle) -> Result<serde_json::Value, String>
     .map_err(|e| format!("Sign-in task failed: {e}"))??;
 
     save_tokens(&app, &tokens)?;
+
+    // Restore refresh_token if re-login didn't return a new one
+    if tokens.refresh_token.as_deref().is_some_and(|s| s.is_empty()) {
+        if let Some(refresh) = old_refresh {
+            let mut restored = tokens.clone();
+            restored.refresh_token = Some(refresh);
+            save_tokens(&app, &restored)?;
+        }
+    }
+
     let email = get_user_email(&tokens.access_token, tokens.id_token.as_deref()).await.unwrap_or_else(|_| "Unknown".to_string());
     Ok(serde_json::json!({ "email": email }))
 }

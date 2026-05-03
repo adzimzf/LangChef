@@ -27,6 +27,8 @@ class NativeSignInActivity : ComponentActivity() {
 
     private lateinit var authorizationClient: AuthorizationClient
     private lateinit var authorizationLauncher: ActivityResultLauncher<IntentSenderRequest>
+    @Volatile
+    private var finished = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -61,6 +63,15 @@ class NativeSignInActivity : ComponentActivity() {
         }
     }
 
+    override fun onResume() {
+        super.onResume()
+        // Guard against "did not call finish() prior to onResume() completing"
+        // which crashes when the IntentSender resolves before resume completes.
+        if (finished) {
+            finish()
+        }
+    }
+
     private fun handleAuthorizationResult(resultCode: Int, data: Intent?) {
         if (resultCode == RESULT_CANCELED) {
             finishWithError("Authorization cancelled by user")
@@ -88,6 +99,7 @@ class NativeSignInActivity : ComponentActivity() {
     }
 
     private fun finishWithSuccess(accessToken: String, grantedScopes: Array<String>) {
+        finished = true
         val intent = Intent().apply {
             putExtra(RESULT_ACCESS_TOKEN, accessToken)
             putExtra(RESULT_GRANTED_SCOPES, grantedScopes)
@@ -97,6 +109,7 @@ class NativeSignInActivity : ComponentActivity() {
     }
 
     private fun finishWithError(errorMessage: String) {
+        finished = true
         val intent = Intent().apply {
             putExtra(RESULT_ERROR, errorMessage)
         }

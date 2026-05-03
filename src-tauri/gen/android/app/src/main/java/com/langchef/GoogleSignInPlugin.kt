@@ -126,7 +126,7 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
     private fun signInNative(invoke: Invoke, args: SignInArgs) {
         scope.launch {
             try {
-                // Step 1: Get ID token via CredentialManager (system account picker)
+                // Step 1: Get ID token + server auth code via CredentialManager (system account picker)
                 val googleIdOption = GetGoogleIdOption.Builder()
                     .setServerClientId(args.clientId)
                     .setFilterByAuthorizedAccounts(false)
@@ -140,9 +140,24 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
                 val credential = result.credential
                 val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
                 val idToken = googleIdTokenCredential.idToken
+                Log.d(TAG, "signInNative: got idToken_len=${idToken.length}, clientSecret=${if (args.clientSecret != null) "present" else "null"}")
+
+                // Step 1b: Extract server auth code and exchange for tokens (access_token, refresh_token, id_token)
+                val serverAuthCode = extractServerAuthCode(credential.data)
+                val exchangedTokens = if (serverAuthCode != null && args.clientSecret != null) {
+                    try {
+                        exchangeAuthCodeForTokens(serverAuthCode, args.clientId, args.clientSecret, "")
+                    } catch (e: Exception) {
+                        Log.w(TAG, "Server auth code exchange failed, continuing with native flow: ${e.message}")
+                        null
+                    }
+                } else {
+                    null
+                }
+                Log.d(TAG, "args:${ args}")
 
                 // Step 2: Get access token via AuthorizationClient for Drive scope
-                startNativeAuthorization(invoke, idToken, args.scopes ?: emptyList())
+                startNativeAuthorization(invoke, idToken, args.scopes ?: emptyList(), exchangedTokens)
 
             } catch (e: GetCredentialCancellationException) {
                 invoke.reject("Sign-in cancelled: ${e.message}")
@@ -156,6 +171,15 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
         }
     }
 
+    /**
+     * Extract the server auth code from credential extra data.
+     * The Google ID library bundles it under the key "serverAuthCode".
+     */
+    private fun extractServerAuthCode(data: android.os.Bundle?): String? {
+        if (data == null) return null
+        return data.getString("serverAuthCode")
+    }
+
     private fun signInWeb(invoke: Invoke, args: SignInArgs) {
         // On Android, web flow falls back to native (CredentialManager + AuthorizationClient)
         Log.w(TAG, "Web flow requested on Android, falling back to native sign-in")
@@ -164,8 +188,9 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
 
     private var pendingNativeInvoke: Invoke? = null
     private var pendingIdToken: String? = null
+    private var pendingExchangedTokens: Map<String, Any?>? = null
 
-    private fun startNativeAuthorization(invoke: Invoke, idToken: String, scopes: List<String>) {
+    private fun startNativeAuthorization(invoke: Invoke, idToken: String, scopes: List<String>, exchangedTokens: Map<String, Any?>? = null) {
         val authRequest = AuthorizationRequest.builder()
             .setRequestedScopes(scopes.map { Scope(it) })
             .build()
@@ -178,6 +203,7 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
                         // Need to launch activity for user consent
                         pendingNativeInvoke = invoke
                         pendingIdToken = idToken
+                        pendingExchangedTokens = exchangedTokens
                         val intent = Intent(activity, NativeSignInActivity::class.java).apply {
                             putExtra(NativeSignInActivity.EXTRA_PENDING_INTENT, pendingIntent)
                         }
@@ -190,7 +216,7 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
                     val accessToken = authResult.accessToken
                     if (accessToken != null) {
                         val grantedScopes = authResult.grantedScopes.map { it.toString() }.toTypedArray()
-                        resolveNativeSignIn(invoke, idToken, accessToken, grantedScopes)
+                        resolveNativeSignIn(invoke, idToken, accessToken, grantedScopes, exchangedTokens)
                     } else {
                         invoke.reject("Failed to get access token")
                     }
@@ -198,17 +224,25 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
             }
             .addOnFailureListener { e ->
                 Log.e(TAG, "Authorization failed", e)
-                // Fallback: return just id token without drive scope
-                resolveNativeSignIn(invoke, idToken, "", emptyArray())
+                invoke.reject("Drive authorization failed: ${e.message}. Please try signing in again.")
             }
     }
 
-    private fun resolveNativeSignIn(invoke: Invoke, idToken: String?, accessToken: String, grantedScopes: Array<String>) {
+    private fun resolveNativeSignIn(invoke: Invoke, idToken: String?, accessToken: String, grantedScopes: Array<String>, exchangedTokens: Map<String, Any?>? = null) {
+        // Use exchanged tokens (from server auth code) for refresh_token and id_token if available,
+        // otherwise fall back to the native values.
+        val finalIdToken = exchangedTokens?.get("id_token") as? String ?: idToken ?: ""
+        val refreshToken = exchangedTokens?.get("refresh_token") as? String ?: ""
+        val expiresIn = (exchangedTokens?.get("expires_in") as? Number)?.toLong() ?: 3600L
+        val expiresAt = System.currentTimeMillis() + (expiresIn * 1000)
+        // Prefer the AuthorizationClient access token (has Drive scope) over the exchanged one
+        val finalAccessToken = if (accessToken.isNotEmpty()) accessToken else (exchangedTokens?.get("access_token") as? String ?: "")
+
         val tokenObject = JSObject().apply {
-            put("idToken", idToken ?: "" as Any)
-            put("accessToken", accessToken as Any)
-            put("refreshToken", "" as Any)
-            put("expiresAt", 0 as Any)
+            put("idToken", finalIdToken as Any)
+            put("accessToken", finalAccessToken as Any)
+            put("refreshToken", refreshToken as Any)
+            put("expiresAt", expiresAt as Any)
             put("scopes", JSArray().apply {
                 grantedScopes.forEach { scope -> put(scope as Any) }
             })
@@ -219,8 +253,10 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
     @ActivityCallback
     private fun nativeAuthorizationResult(invoke: Invoke, result: ActivityResult) {
         val idToken = pendingIdToken
+        val exchangedTokens = pendingExchangedTokens
         pendingNativeInvoke = null
         pendingIdToken = null
+        pendingExchangedTokens = null
 
         if (result.resultCode == Activity.RESULT_CANCELED) {
             val error = result.data?.getStringExtra(NativeSignInActivity.RESULT_ERROR)
@@ -242,7 +278,7 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
             return
         }
 
-        resolveNativeSignIn(invoke, idToken, accessToken, grantedScopes ?: emptyArray())
+        resolveNativeSignIn(invoke, idToken, accessToken, grantedScopes ?: emptyArray(), exchangedTokens)
     }
 
     @Command
@@ -346,6 +382,82 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
     }
 
     private suspend fun refreshNative(invoke: Invoke, args: RefreshTokenArgs) {
+        Log.d(TAG, "refreshNative: refreshToken_len=${args.refreshToken?.length ?: 0}, scopes=${args.scopes}")
+
+        // If we have a refresh token, use it (same as desktop refresh flow)
+        if (!args.refreshToken.isNullOrEmpty()) {
+            Log.d(TAG, "refreshNative: using refresh_token flow")
+            val tokenResponse = refreshAccessToken(args.refreshToken!!, args.clientId, args.clientSecret)
+            Log.d(TAG, "refreshNative: refreshAccessToken returned: accessToken_len=${(tokenResponse["access_token"] as? String)?.length ?: 0}, hasRefresh=${tokenResponse["refresh_token"] != null}, expiresIn=${tokenResponse["expires_in"]}")
+            val tokenObject = createTokenResponse(tokenResponse)
+            // The refreshed access_token only has OpenID scopes (openid, email).
+            // We still need a Drive-scoped access token from AuthorizationClient.
+            try {
+                val authRequest = AuthorizationRequest.builder()
+                    .setRequestedScopes(args.scopes!!.map { Scope(it) })
+                    .build()
+                Log.d(TAG, "refreshNative: calling AuthorizationClient.authorize for Drive scope...")
+                val authResult = authorizationClient.authorize(authRequest).await()
+                val driveAccessToken = authResult.accessToken
+                Log.d(TAG, "refreshNative: AuthorizationClient succeeded, driveAccessToken_len=${driveAccessToken?.length ?: 0}")
+                if (!driveAccessToken.isNullOrEmpty()) {
+                    tokenObject.put("accessToken", driveAccessToken as Any)
+                } else {
+                    invoke.reject("Failed to obtain Drive access token during refresh. Please sign in again.")
+                    return
+                }
+            } catch (e: Exception) {
+                invoke.reject("Drive authorization failed during refresh: ${e.message}. Please sign in again.")
+                return
+            }
+            Log.d(TAG, "refreshNative: resolving with accessToken_len=${(tokenObject["accessToken"] as? String)?.length ?: 0}, refreshToken_len=${(tokenObject["refreshToken"] as? String)?.length ?: 0}, expiresAt=${tokenObject["expiresAt"]}")
+            invoke.resolve(tokenObject)
+            return
+        }
+
+        Log.d(TAG, "refreshNative: no refresh_token, falling back to native re-auth flow")
+
+        // Fallback: re-authorize via native APIs (no refresh token available)
+        // Step 1: Get fresh ID token via CredentialManager (contains email in JWT payload)
+        val idToken = try {
+            val googleIdOption = GetGoogleIdOption.Builder()
+                .setServerClientId(args.clientId)
+                .setFilterByAuthorizedAccounts(true)
+                .build()
+            val request = GetCredentialRequest.Builder()
+                .addCredentialOption(googleIdOption)
+                .build()
+            val result = credentialManager.getCredential(activity, request)
+            val credential = result.credential
+            val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
+
+            // Try to exchange server auth code for a refresh token
+            val serverAuthCode = extractServerAuthCode(credential.data)
+            if (serverAuthCode != null && args.clientSecret != null) {
+                try {
+                    val exchanged = exchangeAuthCodeForTokens(serverAuthCode, args.clientId, args.clientSecret, "")
+                    val tokenObject = createTokenResponse(exchanged)
+                    // Still need Drive scope access token from AuthorizationClient
+                    val authRequest = AuthorizationRequest.builder()
+                        .setRequestedScopes(args.scopes!!.map { Scope(it) })
+                        .build()
+                    val authResult = authorizationClient.authorize(authRequest).await()
+                    val driveAccessToken = authResult.accessToken ?: ""
+                    tokenObject.put("accessToken", driveAccessToken as Any)
+                    invoke.resolve(tokenObject)
+                    return
+                } catch (e: Exception) {
+                    Log.w(TAG, "Server auth code exchange during refresh failed: ${e.message}")
+                }
+            }
+
+            googleIdTokenCredential.idToken
+        } catch (e: Exception) {
+            Log.w(TAG, "Failed to get ID token during refresh, continuing without it: ${e.message}")
+            ""
+        }
+
+        // Step 2: Get access token via AuthorizationClient for Drive scope
         val authRequest = AuthorizationRequest.builder()
             .setRequestedScopes(args.scopes!!.map { Scope(it) })
             .build()
@@ -359,10 +471,10 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
         }
 
         val tokenObject = JSObject().apply {
-            put("idToken", "" as Any)
+            put("idToken", idToken as Any)
             put("accessToken", accessToken as Any)
             put("refreshToken", "" as Any)
-            put("expiresAt", 0 as Any)
+            put("expiresAt", (System.currentTimeMillis() + 3600_000L )as Any)
             put("scopes", JSArray().apply {
                 authResult.grantedScopes.forEach { scope -> put(scope.toString() as Any) }
             })

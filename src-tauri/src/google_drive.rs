@@ -109,9 +109,11 @@ async fn find_backup_file(access_token: &str) -> Result<Option<DriveFile>, Strin
         .map_err(|e| format!("Network error searching Drive: {}", e))?;
 
     if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
         return Err(format!(
-            "Failed to search Drive files ({})",
-            resp.status()
+            "Failed to search Drive files ({}): {}",
+            status, body
         ));
     }
 
