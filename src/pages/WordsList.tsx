@@ -11,6 +11,7 @@ import {
   SortAscendingOutlined,
   SortDescendingOutlined,
   RobotOutlined,
+  SearchOutlined,
 } from '@ant-design/icons'
 import { difficultyColor, difficultyBgClass, stateLabel } from '../lib/srs'
 import type { CardState } from '../lib/srs'
@@ -114,6 +115,9 @@ export default function WordsList() {
   const [allItems, setAllItems] = useState<ReviewItem[]>([])
   const [loading, setLoading] = useState(true)
 
+  // Search
+  const [searchQuery, setSearchQuery] = useState('')
+
   // Filters
   const [filterLang, setFilterLang] = useState<string | null>(null)
   const [filterState, setFilterState] = useState<string | null>(null)
@@ -167,6 +171,12 @@ export default function WordsList() {
   const filteredItems = useMemo(() => {
     let items = [...allItems]
 
+    // Search by content (word key)
+    if (searchQuery.trim()) {
+      const q = searchQuery.trim().toLowerCase()
+      items = items.filter((i) => i.content.toLowerCase().includes(q))
+    }
+
     // Filter by language
     if (filterLang) {
       items = items.filter((i) => i.language === filterLang)
@@ -202,7 +212,7 @@ export default function WordsList() {
     }
 
     return items
-  }, [allItems, filterLang, filterState, filterDifficulty, sortOrder])
+  }, [allItems, searchQuery, filterLang, filterState, filterDifficulty, sortOrder])
 
   // Visible items for current page
   const visibleItems = useMemo(() => {
@@ -214,7 +224,7 @@ export default function WordsList() {
   // Reset page when filters/sort change
   useEffect(() => {
     setPage(1)
-  }, [filterLang, filterState, filterDifficulty, sortOrder])
+  }, [searchQuery, filterLang, filterState, filterDifficulty, sortOrder])
 
   // Infinite scroll: load more when scrolling near the bottom
   const handleScroll = useCallback(() => {
@@ -647,6 +657,26 @@ export default function WordsList() {
           </button>
           <h2 className="text-lg font-semibold flex-1">Words List</h2>
           <span className="text-xs text-gray-400">{filteredItems.length} words</span>
+        </div>
+
+        {/* Search */}
+        <div className="relative mb-2">
+          <SearchOutlined className="absolute left-3 top-1/2 -translate-y-1/2 text-gray-400" />
+          <input
+            type="text"
+            value={searchQuery}
+            onChange={(e) => setSearchQuery(e.target.value)}
+            placeholder="Search by word..."
+            className="w-full pl-9 pr-3 py-1.5 rounded-xl text-sm bg-gray-100 border-none outline-none focus:ring-2 focus:ring-blue-300 placeholder-gray-400"
+          />
+          {searchQuery && (
+            <button
+              onClick={() => setSearchQuery('')}
+              className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
+            >
+              <CloseOutlined style={{ fontSize: 12 }} />
+            </button>
+          )}
         </div>
 
         {/* Sort & Filter toggle */}
