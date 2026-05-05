@@ -2,11 +2,13 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use rusqlite::{Connection, params};
 use tauri::Manager;
 
 mod google_auth;
 mod google_drive;
+mod furigana;
 
 #[derive(Serialize, Deserialize)]
 struct Message {
@@ -29,6 +31,25 @@ struct ChatSession {
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+#[tauri::command]
+fn add_furigana(
+    state: tauri::State<'_, Option<Mutex<furigana::FuriganaAnnotator>>>,
+    text: String,
+    language: String,
+) -> String {
+    if language != "ja" {
+        return text;
+    }
+    let annotator = match state.inner() {
+        Some(mutex) => mutex,
+        None => return text,
+    };
+    match annotator.lock() {
+        Ok(mut annotator) => annotator.annotate(&text),
+        Err(_) => text,
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -1540,9 +1561,22 @@ pub fn run() {
     }
 
     app
-        .setup(|_app| { Ok(()) })
+        .setup(|app| {
+            match furigana::FuriganaAnnotator::new() {
+                Ok(annotator) => {
+                    app.manage(Some(Mutex::new(annotator)));
+                    eprintln!("[furigana] Lindera tokenizer initialized");
+                }
+                Err(e) => {
+                    eprintln!("[furigana] WARNING: Failed to initialize Lindera tokenizer: {}. Furigana will be unavailable.", e);
+                    app.manage::<Option<Mutex<furigana::FuriganaAnnotator>>>(None);
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
+            add_furigana,
             test_provider,
             list_models,
             llm_chat,

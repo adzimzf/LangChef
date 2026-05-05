@@ -529,8 +529,6 @@ export default function Chat() {
     prompt += `Keep the conversation natural and engaging. `
 
     if (lang === 'ja') {
-      prompt += `\n\nFURIGANA RULE: For every word containing kanji in your response, you MUST annotate it with its reading using this format: {kanji|reading}. Examples: {日本|にほん}, {食べ|た}べ{物|もの}, {先生|せんせい}, {行|い}きます. Annotate EACH kanji or kanji compound with its correct reading in context. Do NOT annotate hiragana, katakana, or non-kanji text. Place the annotation around the kanji portion only. Example: "{食|た}べた{後|あと}で{散歩|さんぽ}しました"`
-
       // JLPT level constraints
       const jlptInfo = JLPT_LEVELS[jlptLevel]
       if (jlptInfo) {
@@ -631,12 +629,17 @@ export default function Chat() {
           messages: llmMessages,
         })
 
+        // Add furigana annotations using lindera (only for Japanese)
+        const annotatedRes = lang === 'ja'
+          ? await invoke<string>('add_furigana', { text: res, language: lang })
+          : res
+
         // Always save assistant response to DB so it persists across navigation
-        const assistantId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: res }).catch(() => -1)
+        const assistantId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: annotatedRes }).catch(() => -1)
 
         // Only update React state if component is still mounted
         if (mounted.current) {
-          const assistant: Msg = { id: null, role: 'assistant', content: res }
+          const assistant: Msg = { id: null, role: 'assistant', content: annotatedRes }
           const targetIdx = nextMessages.length
           setMessages(prev => [...prev, assistant])
           if (assistantId >= 0) {
