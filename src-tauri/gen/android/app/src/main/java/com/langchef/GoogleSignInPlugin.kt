@@ -26,6 +26,7 @@ import com.google.android.gms.auth.api.identity.Identity
 import com.google.android.gms.auth.api.identity.SignInClient
 import com.google.android.gms.common.api.Scope
 import com.google.android.libraries.identity.googleid.GetGoogleIdOption
+import com.google.android.libraries.identity.googleid.GetSignInWithGoogleOption
 import com.google.android.libraries.identity.googleid.GoogleIdTokenCredential
 import com.google.gson.Gson
 import kotlinx.coroutines.CoroutineScope
@@ -126,10 +127,8 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
     private fun signInNative(invoke: Invoke, args: SignInArgs) {
         scope.launch {
             try {
-                // Step 1: Get ID token + server auth code via CredentialManager (system account picker)
-                val googleIdOption = GetGoogleIdOption.Builder()
-                    .setServerClientId(args.clientId)
-                    .setFilterByAuthorizedAccounts(false)
+                // Step 1: Get ID token + server auth code via CredentialManager (system account picker
+                val googleIdOption = GetSignInWithGoogleOption.Builder(args.clientId)
                     .build()
 
                 val request = GetCredentialRequest.Builder()
@@ -420,9 +419,7 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
         // Fallback: re-authorize via native APIs (no refresh token available)
         // Step 1: Get fresh ID token via CredentialManager (contains email in JWT payload)
         val idToken = try {
-            val googleIdOption = GetGoogleIdOption.Builder()
-                .setServerClientId(args.clientId)
-                .setFilterByAuthorizedAccounts(true)
+            val googleIdOption = GetSignInWithGoogleOption.Builder(args.clientId)
                 .build()
             val request = GetCredentialRequest.Builder()
                 .addCredentialOption(googleIdOption)
