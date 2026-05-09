@@ -2,11 +2,13 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Mutex;
 use rusqlite::{Connection, params};
 use tauri::Manager;
 
 mod google_auth;
 mod google_drive;
+mod furigana;
 
 #[derive(Serialize, Deserialize)]
 struct Message {
@@ -29,6 +31,52 @@ struct ChatSession {
 #[tauri::command]
 fn greet(name: &str) -> String {
     format!("Hello, {}! You've been greeted from Rust!", name)
+}
+
+#[tauri::command]
+fn add_furigana(
+    state: tauri::State<'_, Option<Mutex<furigana::FuriganaAnnotator>>>,
+    text: String,
+    language: String,
+) -> String {
+    if language != "ja" {
+        return text;
+    }
+    let annotator = match state.inner() {
+        Some(mutex) => mutex,
+        None => return text,
+    };
+    match annotator.lock() {
+        Ok(mut annotator) => annotator.annotate(&text),
+        Err(_) => text,
+    }
+}
+
+/// Tokenize Japanese text and return tokens with base forms (dictionary forms).
+/// For verbs and adjectives, returns the base form. For other words, returns the surface form.
+#[derive(Serialize)]
+struct TokenWithBase {
+    surface: String,
+    base_form: String,
+}
+
+#[tauri::command]
+fn tokenize_japanese(
+    state: tauri::State<'_, Option<Mutex<furigana::FuriganaAnnotator>>>,
+    text: String,
+) -> Result<Vec<TokenWithBase>, String> {
+    let annotator = match state.inner() {
+        Some(mutex) => mutex,
+        None => return Err("Tokenizer not initialized".to_string()),
+    };
+
+    let mut annotator = annotator.lock().map_err(|e| e.to_string())?;
+    let tokens = annotator.tokenize(&text);
+
+    Ok(tokens
+        .into_iter()
+        .map(|(surface, base_form)| TokenWithBase { surface, base_form })
+        .collect())
 }
 
 #[derive(Debug, Deserialize)]
@@ -695,6 +743,46 @@ fn db_get_review_items(app: tauri::AppHandle) -> Result<Vec<ReviewItem>, String>
             detail: row.get(11)?,
         })
     }).map_err(|e| e.to_string())?;
+    let mut items = Vec::new();
+    for r in rows {
+        items.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(items)
+}
+
+#[tauri::command]
+fn db_get_review_items_by_words(app: tauri::AppHandle, words: Vec<String>) -> Result<Vec<ReviewItem>, String> {
+    if words.is_empty() {
+        return Ok(vec![]);
+    }
+
+    let conn = open_db(&app)?;
+    let placeholders: Vec<String> = words.iter().map(|_| "?".to_string()).collect();
+    let sql = format!(
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail FROM review_items WHERE content IN ({})",
+        placeholders.join(", ")
+    );
+
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let params: Vec<&dyn rusqlite::ToSql> = words.iter().map(|w| w as &dyn rusqlite::ToSql).collect();
+
+    let rows = stmt.query_map(params.as_slice(), |row| {
+        Ok(ReviewItem {
+            id: row.get(0)?,
+            content: row.get(1)?,
+            EF: row.get(2)?,
+            I: row.get(3)?,
+            R: row.get(4)?,
+            state: row.get(5)?,
+            step: row.get(6)?,
+            lapse_count: row.get(7)?,
+            next_review: row.get(8)?,
+            tags: row.get(9)?,
+            language: row.get(10)?,
+            detail: row.get(11)?,
+        })
+    }).map_err(|e| e.to_string())?;
+
     let mut items = Vec::new();
     for r in rows {
         items.push(r.map_err(|e| e.to_string())?);
@@ -1540,9 +1628,23 @@ pub fn run() {
     }
 
     app
-        .setup(|_app| { Ok(()) })
+        .setup(|app| {
+            match furigana::FuriganaAnnotator::new() {
+                Ok(annotator) => {
+                    app.manage(Some(Mutex::new(annotator)));
+                    eprintln!("[furigana] Lindera tokenizer initialized");
+                }
+                Err(e) => {
+                    eprintln!("[furigana] WARNING: Failed to initialize Lindera tokenizer: {}. Furigana will be unavailable.", e);
+                    app.manage::<Option<Mutex<furigana::FuriganaAnnotator>>>(None);
+                }
+            }
+            Ok(())
+        })
         .invoke_handler(tauri::generate_handler![
             greet,
+            add_furigana,
+            tokenize_japanese,
             test_provider,
             list_models,
             llm_chat,
@@ -1553,6 +1655,7 @@ pub fn run() {
             db_list_session_messages,
             db_upsert_review_item,
             db_get_review_items,
+            db_get_review_items_by_words,
             db_update_srs,
             db_increment_session_today,
             db_get_telemetry_days,
