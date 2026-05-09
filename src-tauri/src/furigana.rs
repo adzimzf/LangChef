@@ -55,6 +55,27 @@ impl FuriganaAnnotator {
 
         result
     }
+
+    /// Tokenize text and return token data (surface and base form).
+    /// Returns owned strings to avoid lifetime issues.
+    pub fn tokenize(&mut self, text: &str) -> Vec<(String, String)> {
+        let plain = strip_existing_furigana(text);
+        match self.tokenizer.tokenize(&plain) {
+            Ok(tokens) => tokens
+                .into_iter()
+                .map(|mut token| {
+                    let surface = token.surface.to_string();
+                    let base_form = token
+                        .get("base_form")
+                        .filter(|b| *b != "*" && !b.is_empty())
+                        .unwrap_or(&surface)
+                        .to_string();
+                    (surface, base_form)
+                })
+                .collect(),
+            Err(_) => vec![],
+        }
+    }
 }
 
 /// Annotate only the kanji portions of a surface form, preserving okurigana.

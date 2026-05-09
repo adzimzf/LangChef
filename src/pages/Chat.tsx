@@ -134,7 +134,6 @@ export default function Chat() {
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<Msg[]>([])
   const [difficult, setDifficult] = useState<Map<string, { EF: number; R: number; isNew: boolean }>>(new Map())
-  const [colorDifficult, setColorDifficult] = useState<Map<string, { EF: number; R: number; isNew: boolean }>>(new Map())
   const [known, setKnown] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
   const [showFurigana, setShowFurigana] = useState(false)
@@ -145,6 +144,7 @@ export default function Chat() {
   const [grammarAnalysis, setGrammarAnalysis] = useState<string | null>(null)
   const [grammarAnalysisLoading, setGrammarAnalysisLoading] = useState<number | null>(null)
   const [feedbackMap, setFeedbackMap] = useState<Map<number, UserFeedback>>(new Map())
+  const [wordColorsByMessage, setWordColorsByMessage] = useState<Map<number, { tokens: Array<{surface: string, base_form: string}>, colors: Map<string, { EF: number; R: number; isNew: boolean }> }>>(new Map())
   const logRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<any>(null)
   // FIFO queue index for rotating through difficult/known words per message
@@ -289,21 +289,17 @@ export default function Chat() {
     return () => clearInterval(interval)
   }, [sessionId])
 
-  // Load difficult words from review_items
-  // Two separate queries:
-  //   - LLM prompt words: all items, classified by easeScore (same as Word List default)
-  //   - Color rendering: due by next week (broader visual feedback)
+  // Load difficult words from review_items for LLM system prompt
   useEffect(() => {
     async function load() {
       try {
-        // ── Query 1: For LLM system prompt — all items, sorted hardest-first (same as Word List) ──
+        // Query: For LLM system prompt — all items, sorted hardest-first (same as Word List)
         const allItems = await invoke<ReviewItemRaw[]>('db_get_review_items')
 
         // Sort by ease score (hardest first) — same as WordList default sortOrder
         allItems.sort((a, b) => easeScore(a.EF, a.R) - easeScore(b.EF, b.R))
 
         const hardMap = new Map<string, { EF: number; R: number; isNew: boolean }>()
-        let newDifficultCount = 0
 
         // Classify using easeScore — hard (< 0.3) or medium (0.3–0.7) are difficult
         allItems.forEach(i => {
@@ -311,7 +307,6 @@ export default function Chat() {
           if (ease < 0.7) {
             const isNew = i.state === 'new' || !i.state
             hardMap.set(i.content.toLowerCase(), { EF: i.EF, R: i.R, isNew })
-            if (isNew) newDifficultCount++
           }
         })
         setDifficult(hardMap)
@@ -322,26 +317,6 @@ export default function Chat() {
           knownWords.add(i.content.toLowerCase())
         })
         setKnown(knownWords)
-
-        // ── Query 2: For color rendering — due by next week, broader window ──
-        const dNextWeek = new Date()
-        dNextWeek.setDate(dNextWeek.getDate() + 7)
-        dNextWeek.setHours(23, 59, 59, 999)
-
-        const colorItems = await invoke<ReviewItemRaw[]>('db_get_due_review_items', {
-          language: null,
-          limit: 500,
-          newCardsRemaining: 50,
-          maxNextReview: Math.floor(dNextWeek.getTime() / 1000),
-        })
-
-        const colorMap = new Map<string, { EF: number; R: number; isNew: boolean }>()
-        colorItems.forEach(i => {
-          if ((i.tags === 'hard' || i.tags === 'medium') || i.R < 3) {
-            colorMap.set(i.content.toLowerCase(), { EF: i.EF, R: i.R, isNew: i.state === 'new' || !i.state })
-          }
-        })
-        setColorDifficult(colorMap)
       } catch {}
     }
     load()
@@ -362,6 +337,32 @@ export default function Chat() {
     load()
   }, [])
 
+  // Fetch word colors for assistant messages using Lindera tokenization
+  useEffect(() => {
+    if (lang !== 'ja') return
+
+    async function fetchColors() {
+      const assistantMessages = messages.filter(m => m.role === 'assistant' && m.id && !wordColorsByMessage.has(m.id))
+      if (assistantMessages.length === 0) return
+
+      for (const msg of assistantMessages) {
+        if (!msg.id) continue
+
+        // Strip furigana for tokenization
+        const plainText = stripFurigana(msg.content)
+        const { tokens, colors } = await getWordColors(plainText)
+
+        setWordColorsByMessage(prev => {
+          const next = new Map(prev)
+          next.set(msg.id!, { tokens, colors })
+          return next
+        })
+      }
+    }
+
+    fetchColors()
+  }, [messages, lang])
+
   // Auto-scroll
   useEffect(() => {
     if (logRef.current) {
@@ -381,10 +382,6 @@ export default function Chat() {
     const next = new Map(difficult)
     next.set(w, { EF: 2.5, R: 0, isNew: true })
     setDifficult(next)
-    // Also add to color map so it renders immediately
-    const colorNext = new Map(colorDifficult)
-    colorNext.set(w, { EF: 2.5, R: 0, isNew: true })
-    setColorDifficult(colorNext)
     try {
       await invoke('db_upsert_review_item', { content: w, language: lang || null })
     } catch (e) {
@@ -393,9 +390,59 @@ export default function Chat() {
       const reverted = new Map(difficult)
       reverted.delete(w)
       setDifficult(reverted)
-      const colorReverted = new Map(colorDifficult)
-      colorReverted.delete(w)
-      setColorDifficult(colorReverted)
+    }
+  }
+
+  // Cache for word colors to avoid repeated DB queries
+  const wordColorCache = useRef<Map<string, { EF: number; R: number; isNew: boolean }>>(new Map())
+
+  /**
+   * Tokenize text using Lindera and query DB for word colors.
+   * For verbs/adjectives, uses dictionary form (base form) for DB lookup.
+   * Returns both tokens and color map for consistent rendering.
+   */
+  async function getWordColors(text: string): Promise<{ tokens: Array<{surface: string, base_form: string}>, colors: Map<string, { EF: number; R: number; isNew: boolean }> }> {
+    if (lang !== 'ja') {
+      return { tokens: [], colors: new Map() }
+    }
+
+    try {
+      // Tokenize using Lindera
+      type TokenWithBase = { surface: string; base_form: string }
+      const tokens = await invoke<TokenWithBase[]>('tokenize_japanese', { text })
+
+      // Extract unique base forms (for verbs/adjectives, this is the dictionary form)
+      const baseForms = [...new Set(tokens.map(t => t.base_form.toLowerCase()))]
+
+      // Check cache first
+      const cached = new Map<string, { EF: number; R: number; isNew: boolean }>()
+      const uncached: string[] = []
+
+      for (const base of baseForms) {
+        if (wordColorCache.current.has(base)) {
+          cached.set(base, wordColorCache.current.get(base)!)
+        } else {
+          uncached.push(base)
+        }
+      }
+
+      // Query DB for uncached words
+      if (uncached.length > 0) {
+        const items = await invoke<ReviewItemRaw[]>('db_get_review_items_by_words', { words: uncached })
+        const foundWords = new Set<string>()
+
+        for (const item of items) {
+          const info = { EF: item.EF, R: item.R, isNew: item.state === 'new' || !item.state }
+          wordColorCache.current.set(item.content.toLowerCase(), info)
+          cached.set(item.content.toLowerCase(), info)
+          foundWords.add(item.content.toLowerCase())
+        }
+      }
+
+      return { tokens, colors: cached }
+    } catch (e) {
+      console.error('Failed to get word colors:', e)
+      return { tokens: [], colors: new Map() }
     }
   }
 
@@ -678,40 +725,85 @@ export default function Chat() {
     }
   }
 
-  function renderAssistantContent(content: string) {
+  function renderAssistantContent(content: string, messageId: number | null) {
     if (content.startsWith('[Error]')) {
       return <span className="text-red-500 text-sm">{content}</span>
     }
-    return renderTextSegment(content)
+    return renderTextSegment(content, messageId)
   }
 
-  function renderTextSegment(content: string) {
+  function renderTextSegment(content: string, messageId: number | null) {
     const locale = lang === 'id' ? 'id' : 'ja'
     const isJapanese = lang === 'ja'
 
-    // For Japanese, the LLM returns {kanji|reading} annotations.
-    // We strip annotations to get plain text for word segmentation,
-    // then render each segment with <ruby> tags from the annotated content.
+    // Get word colors and tokens for this message (fetched via Lindera tokenization)
+    const messageData = messageId ? wordColorsByMessage.get(messageId) : undefined
+
+    // For Japanese, use Lindera tokenization for consistency
+    if (isJapanese && hasFuriganaAnnotations(content) && messageData) {
+      const plain = stripFurigana(content)
+      const { tokens, colors } = messageData
+
+      // Walk through the annotated content alongside the Lindera tokens
+      let annotIdx = 0
+      const annotated = content
+
+      return tokens.map((token, idx) => {
+        const surface = token.surface
+        const surfaceLower = surface.toLowerCase()
+        const baseLower = token.base_form.toLowerCase()
+
+        // Get color info using base form (dictionary form for verbs)
+        const diffInfo = colors.get(baseLower)
+        const isHard = !!diffInfo
+
+        // Extract the annotated slice for this token
+        const slice = sliceAnnotated(annotated, annotIdx, surface.length)
+        annotIdx += surface.length
+
+        // Check if this is a word (not punctuation/whitespace)
+        const isWord = surface.trim().length > 0 && !/^[.,!?;:()"'""\[\]{}。、！？「」『』（）・\s]+$/.test(surface)
+
+        if (!isWord) {
+          return <span key={idx}>{renderFurigana(slice, showFurigana)}</span>
+        }
+
+        return (
+          <span
+            key={idx}
+            onClick={() => markWordDifficult(surface)}
+            className={`cursor-pointer rounded px-0.5 transition-colors ${
+              isHard
+                ? ''
+                : 'hover:bg-blue-50 active:bg-yellow-50'
+            }`}
+            style={isHard ? { backgroundColor: difficultyColor(diffInfo.EF, diffInfo.R), color: '#fff' } : undefined}
+            title={isHard ? 'Marked difficult' : 'Tap to mark difficult'}
+          >
+            {renderFurigana(slice, showFurigana)}
+          </span>
+        )
+      })
+    }
+
+    // Fallback: Non-Japanese or no Lindera tokens available
+    // Use splitTappable for rendering
     if (isJapanese && hasFuriganaAnnotations(content)) {
       const plain = stripFurigana(content)
       const parts = splitTappable(plain, 'ja')
 
-      // Walk through the annotated content alongside the plain text segments
-      // to produce per-segment annotated slices
       let annotIdx = 0
       const annotated = content
 
       return parts.map((part, idx) => {
         if (!isWordSegment(part)) {
-          // Non-word segment: advance through annotated text by matching
-          // plain characters (skipping {reading|} parts)
           const slice = sliceAnnotated(annotated, annotIdx, part.length)
-          annotIdx += part.length // advance by plain-text length
+          annotIdx += part.length
           return <span key={idx}>{renderFurigana(slice, showFurigana)}</span>
         }
 
         const w = part.toLowerCase()
-        const diffInfo = colorDifficult.get(w)
+        const diffInfo = messageData?.colors.get(w)
         const isHard = !!diffInfo
         const slice = sliceAnnotated(annotated, annotIdx, part.length)
         annotIdx += part.length
@@ -739,7 +831,7 @@ export default function Chat() {
     return parts.map((part, idx) => {
       if (!isWordSegment(part)) return <span key={idx}>{part}</span>
       const w = part.toLowerCase()
-      const diffInfo = colorDifficult.get(w)
+      const diffInfo = messageData?.colors.get(w)
       const isHard = !!diffInfo
 
       return (
@@ -973,7 +1065,7 @@ export default function Chat() {
             >
               {m.role === 'assistant' ? (
                 <div>
-                  {renderAssistantContent(m.content)}
+                  {renderAssistantContent(m.content, m.id)}
                   <button
                     onClick={() => handleGrammarAnalysis(m.id, m.content)}
                     disabled={m.id === null || grammarAnalysisLoading === m.id}
