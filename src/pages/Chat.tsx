@@ -568,6 +568,11 @@ export default function Chat() {
   function buildSSRSystemPrompt(): string {
     const difficultArr = Array.from(difficult.keys())
     const knownArr = Array.from(known).filter(w => !difficult.has(w))
+    // Shuffle known words so each rotation batch is random
+    for (let i = knownArr.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1))
+      ;[knownArr[i], knownArr[j]] = [knownArr[j], knownArr[i]]
+    }
 
     // Use configured max difficult words count
     const maxWords = getMaxDifficultWords()
