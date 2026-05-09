@@ -21,6 +21,8 @@ const MAX_NEW_CARDS_DEFAULT = 20
 const MAX_NEW_CARDS_KEY = 'max_new_cards_per_day'
 const MAX_DIFFICULT_WORDS_DEFAULT = 10
 const MAX_DIFFICULT_WORDS_KEY = 'max_difficult_words'
+const MAX_KNOWN_WORDS_DEFAULT = 20
+const MAX_KNOWN_WORDS_KEY = 'max_known_words'
 const CHAT_CUSTOM_PROMPT_KEY = 'chat_custom_prompt'
 
 export default function Settings() {
@@ -32,11 +34,12 @@ export default function Settings() {
   const [maxReviews, setMaxReviews] = useState(String(MAX_REVIEWS_DEFAULT))
   const [maxNewCards, setMaxNewCards] = useState(String(MAX_NEW_CARDS_DEFAULT))
   const [maxDifficultWords, setMaxDifficultWords] = useState(String(MAX_DIFFICULT_WORDS_DEFAULT))
+  const [maxKnownWords, setMaxKnownWords] = useState(String(MAX_KNOWN_WORDS_DEFAULT))
   const [chatCustomPrompt, setChatCustomPrompt] = useState('')
   const [dirty, setDirty] = useState(false)
 
   // Track the last-saved values to detect changes and enable cancel
-  const savedValues = useRef({ apiHost: '', apiKey: '', model: '', maxReviews: String(MAX_REVIEWS_DEFAULT), maxNewCards: String(MAX_NEW_CARDS_DEFAULT), maxDifficultWords: String(MAX_DIFFICULT_WORDS_DEFAULT), chatCustomPrompt: '' })
+  const savedValues = useRef({ apiHost: '', apiKey: '', model: '', maxReviews: String(MAX_REVIEWS_DEFAULT), maxNewCards: String(MAX_NEW_CARDS_DEFAULT), maxDifficultWords: String(MAX_DIFFICULT_WORDS_DEFAULT), maxKnownWords: String(MAX_KNOWN_WORDS_DEFAULT), chatCustomPrompt: '' })
 
   useEffect(() => {
     const host = localStorage.getItem('api_host') || ''
@@ -45,39 +48,46 @@ export default function Settings() {
     const savedMax = localStorage.getItem(MAX_REVIEWS_KEY)
     const savedNewCards = localStorage.getItem(MAX_NEW_CARDS_KEY)
     const savedDiffWords = localStorage.getItem(MAX_DIFFICULT_WORDS_KEY)
+    const savedKnownWords = localStorage.getItem(MAX_KNOWN_WORDS_KEY)
     const savedPrompt = localStorage.getItem(CHAT_CUSTOM_PROMPT_KEY) || ''
     const mr = savedMax || String(MAX_REVIEWS_DEFAULT)
     const mnc = savedNewCards || String(MAX_NEW_CARDS_DEFAULT)
     const mdw = savedDiffWords || String(MAX_DIFFICULT_WORDS_DEFAULT)
+    const mkw = savedKnownWords || String(MAX_KNOWN_WORDS_DEFAULT)
     setApiHost(host)
     setApiKey(key)
     setModel(savedModel)
     setMaxReviews(mr)
     setMaxNewCards(mnc)
     setMaxDifficultWords(mdw)
+    setMaxKnownWords(mkw)
     setChatCustomPrompt(savedPrompt)
-    savedValues.current = { apiHost: host, apiKey: key, model: savedModel, maxReviews: mr, maxNewCards: mnc, maxDifficultWords: mdw, chatCustomPrompt: savedPrompt }
+    savedValues.current = { apiHost: host, apiKey: key, model: savedModel, maxReviews: mr, maxNewCards: mnc, maxDifficultWords: mdw, maxKnownWords: mkw, chatCustomPrompt: savedPrompt }
   }, [])
 
   function save() {
     const parsedReviews = Math.max(1, parseInt(maxReviews, 10) || MAX_REVIEWS_DEFAULT)
     const parsedNewCards = Math.max(0, parseInt(maxNewCards, 10) || MAX_NEW_CARDS_DEFAULT)
     const parsedDiffWords = Math.max(1, parseInt(maxDifficultWords, 10) || MAX_DIFFICULT_WORDS_DEFAULT)
+    const parsedKnownWords = Math.max(0, parseInt(maxKnownWords, 10) || MAX_KNOWN_WORDS_DEFAULT)
     localStorage.setItem('api_host', apiHost.trim())
     localStorage.setItem('api_key', apiKey.trim())
     localStorage.setItem('api_model', model.trim())
     localStorage.setItem(MAX_REVIEWS_KEY, String(parsedReviews))
     localStorage.setItem(MAX_NEW_CARDS_KEY, String(parsedNewCards))
     localStorage.setItem(MAX_DIFFICULT_WORDS_KEY, String(parsedDiffWords))
+    localStorage.setItem(MAX_KNOWN_WORDS_KEY, String(parsedKnownWords))
     localStorage.setItem(CHAT_CUSTOM_PROMPT_KEY, chatCustomPrompt.trim())
     const mr = String(parsedReviews)
     const mnc = String(parsedNewCards)
     const mdw = String(parsedDiffWords)
+    const mkw = String(parsedKnownWords)
     setMaxReviews(mr)
     setMaxNewCards(mnc)
     setMaxDifficultWords(mdw)
+    setMaxKnownWords(mkw)
     setChatCustomPrompt(chatCustomPrompt.trim())
-    savedValues.current = { apiHost: apiHost.trim(), apiKey: apiKey.trim(), model: model.trim(), maxReviews: mr, maxNewCards: mnc, maxDifficultWords: mdw, chatCustomPrompt: chatCustomPrompt.trim() }
+    savedValues.current = { apiHost: apiHost.trim(), apiKey: apiKey.trim(), model: model.trim(), maxReviews: mr, maxNewCards: mnc, maxDifficultWords: mdw, maxKnownWords: mkw, chatCustomPrompt: chatCustomPrompt.trim() }
     setDirty(false)
     setStatus('saved')
     setTimeout(() => setStatus('idle'), 2000)
@@ -90,6 +100,7 @@ export default function Settings() {
     setMaxReviews(savedValues.current.maxReviews)
     setMaxNewCards(savedValues.current.maxNewCards)
     setMaxDifficultWords(savedValues.current.maxDifficultWords)
+    setMaxKnownWords(savedValues.current.maxKnownWords)
     setChatCustomPrompt(savedValues.current.chatCustomPrompt)
     setDirty(false)
   }
@@ -104,9 +115,10 @@ export default function Settings() {
       maxReviews !== sv.maxReviews ||
       maxNewCards !== sv.maxNewCards ||
       maxDifficultWords !== sv.maxDifficultWords ||
+      maxKnownWords !== sv.maxKnownWords ||
       chatCustomPrompt !== sv.chatCustomPrompt
     setDirty(isDirty)
-  }, [apiHost, apiKey, model, maxReviews, maxNewCards, maxDifficultWords, chatCustomPrompt])
+  }, [apiHost, apiKey, model, maxReviews, maxNewCards, maxDifficultWords, maxKnownWords, chatCustomPrompt])
 
   async function test() {
     setStatus('testing')
@@ -314,6 +326,23 @@ export default function Settings() {
             />
             <p className="text-xs text-gray-400 mt-1">
               Max number of difficult words to include in chat prompts. Default: {MAX_DIFFICULT_WORDS_DEFAULT}. Current: {Math.max(1, parseInt(maxDifficultWords, 10) || MAX_DIFFICULT_WORDS_DEFAULT)}
+            </p>
+          </div>
+          <div className="px-4 py-3 border-b border-gray-50">
+            <label className="flex items-center gap-2 text-sm text-gray-500 mb-1.5">
+              <MessageOutlined />
+              Max known words in chat
+            </label>
+            <input
+              type="number"
+              min={0}
+              max={999}
+              value={maxKnownWords}
+              onChange={(e) => setMaxKnownWords(e.target.value)}
+              className="w-full text-[15px] bg-transparent outline-none placeholder:text-gray-300"
+            />
+            <p className="text-xs text-gray-400 mt-1">
+              Max number of known words to include in chat prompts. Set to 0 to disable. Default: {MAX_KNOWN_WORDS_DEFAULT}. Current: {Math.max(0, parseInt(maxKnownWords, 10) || MAX_KNOWN_WORDS_DEFAULT)}
             </p>
           </div>
           <div className="px-4 py-3">

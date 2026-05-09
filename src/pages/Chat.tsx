@@ -46,6 +46,8 @@ const MAX_NEW_CARDS_DEFAULT = 20
 const MAX_NEW_CARDS_KEY = 'max_new_cards_per_day'
 const MAX_DIFFICULT_WORDS_KEY = 'max_difficult_words'
 const MAX_DIFFICULT_WORDS_DEFAULT = 10
+const MAX_KNOWN_WORDS_KEY = 'max_known_words'
+const MAX_KNOWN_WORDS_DEFAULT = 20
 
 function getMaxReviews(): number {
   const val = localStorage.getItem(MAX_REVIEWS_KEY)
@@ -60,6 +62,11 @@ function getMaxNewCards(): number {
 function getMaxDifficultWords(): number {
   const val = localStorage.getItem(MAX_DIFFICULT_WORDS_KEY)
   return val ? parseInt(val, 10) || MAX_DIFFICULT_WORDS_DEFAULT : MAX_DIFFICULT_WORDS_DEFAULT
+}
+
+function getMaxKnownWords(): number {
+  const val = localStorage.getItem(MAX_KNOWN_WORDS_KEY)
+  return val ? parseInt(val, 10) || MAX_KNOWN_WORDS_DEFAULT : MAX_KNOWN_WORDS_DEFAULT
 }
 
 function getChatCustomPrompt(): string {
@@ -564,9 +571,10 @@ export default function Chat() {
 
     // Use configured max difficult words count
     const maxWords = getMaxDifficultWords()
+    const maxKnown = getMaxKnownWords()
     // Rotate through words via FIFO queue instead of always taking first N
     const [selectedDifficult, nextDifficultIdx] = dequeueRotate(difficultArr, wordQueueIndex.current.difficult, maxWords)
-    const [selectedKnown, nextKnownIdx] = dequeueRotate(knownArr, wordQueueIndex.current.known, maxWords)
+    const [selectedKnown, nextKnownIdx] = dequeueRotate(knownArr, wordQueueIndex.current.known, maxKnown)
     // Advance queue positions for next message
     wordQueueIndex.current = { difficult: nextDifficultIdx, known: nextKnownIdx }
 
