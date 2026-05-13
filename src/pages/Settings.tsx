@@ -29,6 +29,7 @@ export default function Settings() {
   const [apiHost, setApiHost] = useState('')
   const [apiKey, setApiKey] = useState('')
   const [model, setModel] = useState('')
+  const [vocabModel, setVocabModel] = useState('')
   const [models, setModels] = useState<string[]>([])
   const [status, setStatus] = useState<'idle' | 'saving' | 'saved' | 'testing' | 'ok' | 'error'>('idle')
   const [maxReviews, setMaxReviews] = useState(String(MAX_REVIEWS_DEFAULT))
@@ -39,12 +40,13 @@ export default function Settings() {
   const [dirty, setDirty] = useState(false)
 
   // Track the last-saved values to detect changes and enable cancel
-  const savedValues = useRef({ apiHost: '', apiKey: '', model: '', maxReviews: String(MAX_REVIEWS_DEFAULT), maxNewCards: String(MAX_NEW_CARDS_DEFAULT), maxDifficultWords: String(MAX_DIFFICULT_WORDS_DEFAULT), maxKnownWords: String(MAX_KNOWN_WORDS_DEFAULT), chatCustomPrompt: '' })
+  const savedValues = useRef({ apiHost: '', apiKey: '', model: '', vocabModel: '', maxReviews: String(MAX_REVIEWS_DEFAULT), maxNewCards: String(MAX_NEW_CARDS_DEFAULT), maxDifficultWords: String(MAX_DIFFICULT_WORDS_DEFAULT), maxKnownWords: String(MAX_KNOWN_WORDS_DEFAULT), chatCustomPrompt: '' })
 
   useEffect(() => {
     const host = localStorage.getItem('api_host') || ''
     const key = localStorage.getItem('api_key') || ''
     const savedModel = localStorage.getItem('api_model') || ''
+    const savedVocabModel = localStorage.getItem('api_vocab_model') || ''
     const savedMax = localStorage.getItem(MAX_REVIEWS_KEY)
     const savedNewCards = localStorage.getItem(MAX_NEW_CARDS_KEY)
     const savedDiffWords = localStorage.getItem(MAX_DIFFICULT_WORDS_KEY)
@@ -57,12 +59,13 @@ export default function Settings() {
     setApiHost(host)
     setApiKey(key)
     setModel(savedModel)
+    setVocabModel(savedVocabModel)
     setMaxReviews(mr)
     setMaxNewCards(mnc)
     setMaxDifficultWords(mdw)
     setMaxKnownWords(mkw)
     setChatCustomPrompt(savedPrompt)
-    savedValues.current = { apiHost: host, apiKey: key, model: savedModel, maxReviews: mr, maxNewCards: mnc, maxDifficultWords: mdw, maxKnownWords: mkw, chatCustomPrompt: savedPrompt }
+    savedValues.current = { apiHost: host, apiKey: key, model: savedModel, vocabModel: savedVocabModel, maxReviews: mr, maxNewCards: mnc, maxDifficultWords: mdw, maxKnownWords: mkw, chatCustomPrompt: savedPrompt }
   }, [])
 
   function save() {
@@ -73,6 +76,7 @@ export default function Settings() {
     localStorage.setItem('api_host', apiHost.trim())
     localStorage.setItem('api_key', apiKey.trim())
     localStorage.setItem('api_model', model.trim())
+    localStorage.setItem('api_vocab_model', vocabModel.trim())
     localStorage.setItem(MAX_REVIEWS_KEY, String(parsedReviews))
     localStorage.setItem(MAX_NEW_CARDS_KEY, String(parsedNewCards))
     localStorage.setItem(MAX_DIFFICULT_WORDS_KEY, String(parsedDiffWords))
@@ -87,7 +91,7 @@ export default function Settings() {
     setMaxDifficultWords(mdw)
     setMaxKnownWords(mkw)
     setChatCustomPrompt(chatCustomPrompt.trim())
-    savedValues.current = { apiHost: apiHost.trim(), apiKey: apiKey.trim(), model: model.trim(), maxReviews: mr, maxNewCards: mnc, maxDifficultWords: mdw, maxKnownWords: mkw, chatCustomPrompt: chatCustomPrompt.trim() }
+    savedValues.current = { apiHost: apiHost.trim(), apiKey: apiKey.trim(), model: model.trim(), vocabModel: vocabModel.trim(), maxReviews: mr, maxNewCards: mnc, maxDifficultWords: mdw, maxKnownWords: mkw, chatCustomPrompt: chatCustomPrompt.trim() }
     setDirty(false)
     setStatus('saved')
     setTimeout(() => setStatus('idle'), 2000)
@@ -97,6 +101,7 @@ export default function Settings() {
     setApiHost(savedValues.current.apiHost)
     setApiKey(savedValues.current.apiKey)
     setModel(savedValues.current.model)
+    setVocabModel(savedValues.current.vocabModel)
     setMaxReviews(savedValues.current.maxReviews)
     setMaxNewCards(savedValues.current.maxNewCards)
     setMaxDifficultWords(savedValues.current.maxDifficultWords)
@@ -112,13 +117,14 @@ export default function Settings() {
       apiHost !== sv.apiHost ||
       apiKey !== sv.apiKey ||
       model !== sv.model ||
+      vocabModel !== sv.vocabModel ||
       maxReviews !== sv.maxReviews ||
       maxNewCards !== sv.maxNewCards ||
       maxDifficultWords !== sv.maxDifficultWords ||
       maxKnownWords !== sv.maxKnownWords ||
       chatCustomPrompt !== sv.chatCustomPrompt
     setDirty(isDirty)
-  }, [apiHost, apiKey, model, maxReviews, maxNewCards, maxDifficultWords, maxKnownWords, chatCustomPrompt])
+  }, [apiHost, apiKey, model, vocabModel, maxReviews, maxNewCards, maxDifficultWords, maxKnownWords, chatCustomPrompt])
 
   async function test() {
     setStatus('testing')
@@ -231,6 +237,37 @@ export default function Settings() {
             {models.length === 0 && (
               <p className="text-xs text-gray-400 mt-1">Test connection to load available models</p>
             )}
+          </div>
+
+          {/* Vocab Model selection */}
+          <div className="px-4 py-3 border-t border-gray-50">
+            <label className="flex items-center gap-2 text-sm text-gray-500 mb-1.5">
+              <BookOutlined />
+              Vocab Model
+            </label>
+            {models.length > 0 ? (
+              <select
+                value={vocabModel}
+                onChange={(e) => setVocabModel(e.target.value)}
+                className="w-full text-[15px] bg-transparent outline-none cursor-pointer"
+              >
+                <option value="">(use chat model)</option>
+                {models.map((m) => (
+                  <option key={m} value={m}>{m}</option>
+                ))}
+              </select>
+            ) : (
+              <div className="flex items-center gap-2">
+                <input
+                  type="text"
+                  placeholder="(use chat model)"
+                  value={vocabModel}
+                  onChange={(e) => setVocabModel(e.target.value)}
+                  className="w-full text-[15px] bg-transparent outline-none placeholder:text-gray-300"
+                />
+              </div>
+            )}
+            <p className="text-xs text-gray-400 mt-1">Model for generating vocabulary details and mnemonics. Leave empty to use the chat model.</p>
           </div>
         </div>
 

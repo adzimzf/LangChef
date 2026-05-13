@@ -273,6 +273,8 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN state TEXT DEFAULT 'new'", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN step INTEGER DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN lapse_count INTEGER DEFAULT 0", []);
+    // best-effort: add mnemonic column if missing
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN mnemonic TEXT", []);
     // Migrate existing cards that have NULL state to 'review' if they have R > 0
     let _ = conn.execute("UPDATE review_items SET state = 'review' WHERE state IS NULL OR state = ''", []);
     let _ = conn.execute("UPDATE review_items SET state = 'new' WHERE state IS NULL OR state = ''", []);
@@ -463,6 +465,7 @@ struct ReviewItem {
     tags: Option<String>,
     language: Option<String>,
     detail: Option<String>,
+    mnemonic: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -725,7 +728,7 @@ fn db_get_review_items(app: tauri::AppHandle) -> Result<Vec<ReviewItem>, String>
     let conn = open_db(&app)?;
     let mut stmt = conn.prepare(
         "SELECT
-            id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail
+            id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic
         FROM review_items").map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], |row| {
         Ok(ReviewItem {
@@ -741,6 +744,7 @@ fn db_get_review_items(app: tauri::AppHandle) -> Result<Vec<ReviewItem>, String>
             tags: row.get(9)?,
             language: row.get(10)?,
             detail: row.get(11)?,
+            mnemonic: row.get(12)?,
         })
     }).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
@@ -759,7 +763,7 @@ fn db_get_review_items_by_words(app: tauri::AppHandle, words: Vec<String>) -> Re
     let conn = open_db(&app)?;
     let placeholders: Vec<String> = words.iter().map(|_| "?".to_string()).collect();
     let sql = format!(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail FROM review_items WHERE content IN ({})",
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic FROM review_items WHERE content IN ({})",
         placeholders.join(", ")
     );
 
@@ -780,6 +784,7 @@ fn db_get_review_items_by_words(app: tauri::AppHandle, words: Vec<String>) -> Re
             tags: row.get(9)?,
             language: row.get(10)?,
             detail: row.get(11)?,
+            mnemonic: row.get(12)?,
         })
     }).map_err(|e| e.to_string())?;
 
@@ -863,6 +868,279 @@ fn db_add_known_word(app: tauri::AppHandle, word: String) -> Result<(), String> 
     Ok(())
 }
 
+/// Compute ease score (0 = hardest, 1 = easiest) — mirrors frontend easeScore()
+fn ease_score(ef: f64, r: i64) -> f64 {
+    let ef_norm = ((ef - 1.3) / (3.0 - 1.3)).clamp(0.0, 1.0);
+    let r_norm = (r as f64 / 5.0).clamp(0.0, 1.0);
+    0.6 * ef_norm + 0.4 * r_norm
+}
+
+/// A known word with its reading and meaning
+struct KnownWord {
+    word: String,
+    reading: String,
+    meaning: String,
+}
+
+/// Find known words that have a REAL sound or kanji overlap with the target.
+/// Returns (matched_words, all_known_words_for_fallback)
+fn find_mnemonic_matches(
+    app: &tauri::AppHandle,
+    language: &str,
+    target_content: &str,
+    target_reading: &str,
+) -> Result<(Vec<KnownWord>, Vec<KnownWord>), String> {
+    let conn = open_db(app)?;
+
+    // Collect all known words with readings
+    let mut all_words: Vec<KnownWord> = Vec::new();
+
+    // Source: review_items with ease >= 0.7
+    let mut stmt = conn.prepare(
+        "SELECT content, EF, R, detail FROM review_items WHERE language=?1"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![language], |row| {
+        let content: String = row.get(0)?;
+        let ef: f64 = row.get(1)?;
+        let r_val: i64 = row.get(2)?;
+        let detail: Option<String> = row.get(3)?;
+        Ok((content, ef, r_val, detail))
+    }).map_err(|e| e.to_string())?;
+    for r in rows {
+        let (content, ef, r_val, detail) = r.map_err(|e| e.to_string())?;
+        if ease_score(ef, r_val) < 0.7 { continue; }
+        // Don't match the word with itself
+        if content == target_content { continue; }
+
+        let v = detail.as_ref().and_then(|d| serde_json::from_str::<serde_json::Value>(d).ok());
+        let reading = v.as_ref()
+            .and_then(|v| v.get("reading").and_then(|r| r.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let meaning = v.as_ref()
+            .and_then(|v| v.get("meaning").and_then(|m| m.as_str()))
+            .unwrap_or("")
+            .to_string();
+
+        all_words.push(KnownWord { word: content, reading, meaning });
+    }
+
+    // Find matches: shared kanji or shared reading syllables
+    let mut matched: Vec<KnownWord> = Vec::new();
+
+    for kw in &all_words {
+        let mut is_match = false;
+
+        // Check 1: shared kanji (any CJK character in common)
+        let target_chars: std::collections::HashSet<char> = target_content.chars()
+            .filter(|c| is_cjk(*c))
+            .collect();
+        let kw_chars: std::collections::HashSet<char> = kw.word.chars()
+            .filter(|c| is_cjk(*c))
+            .collect();
+        if !target_chars.is_disjoint(&kw_chars) {
+            is_match = true;
+        }
+
+        // Check 2: shared reading mora (at least 2 consecutive mora overlap)
+        if !target_reading.is_empty() && !kw.reading.is_empty() {
+            let t_mora = split_mora(&target_reading.to_lowercase());
+            let k_mora = split_mora(&kw.reading.to_lowercase());
+            // Check all 2-mora substrings of the shorter against the longer
+            let (shorter, longer) = if t_mora.len() <= k_mora.len() {
+                (&t_mora, &k_mora)
+            } else {
+                (&k_mora, &t_mora)
+            };
+            if shorter.len() >= 2 {
+                for i in 0..=shorter.len()-2 {
+                    let sub = &shorter[i..i+2];
+                    // Check if this 2-mora sequence appears in longer
+                    for j in 0..=longer.len().saturating_sub(2) {
+                        if longer[j] == sub[0] && longer[j+1] == sub[1] {
+                            is_match = true;
+                            break;
+                        }
+                    }
+                    if is_match { break; }
+                }
+            }
+        }
+
+        if is_match {
+            matched.push(KnownWord {
+                word: kw.word.clone(),
+                reading: kw.reading.clone(),
+                meaning: kw.meaning.clone(),
+            });
+        }
+    }
+
+    // Limit matches to top 10
+    matched.truncate(10);
+    // Limit all_words to 30 for fallback context
+    all_words.truncate(30);
+
+    Ok((matched, all_words))
+}
+
+/// Split a kana string into mora (syllable units).
+/// Each mora is one kana, except small kana (ゃゅょぁぃぅぇぉ) which combine with the previous.
+/// e.g. "しょくどう" → ["しょ", "く", "ど", "う"]
+/// e.g. "きゃった" → ["きゃ", "っ", "た"]
+fn split_mora(reading: &str) -> Vec<String> {
+    let chars: Vec<char> = reading.chars().collect();
+    let mut mora: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if is_small_kana(c) {
+            // Attach to previous mora if exists, otherwise standalone
+            if let Some(last) = mora.last_mut() {
+                last.push(c);
+            } else {
+                mora.push(c.to_string());
+            }
+        } else {
+            mora.push(c.to_string());
+        }
+        i += 1;
+    }
+    mora
+}
+
+fn is_small_kana(c: char) -> bool {
+    matches!(c, 'ゃ' | 'ゅ' | 'ょ' | 'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'ャ' | 'ュ' | 'ョ' | 'ァ' | 'ィ' | 'ゥ' | 'ェ' | 'ォ')
+}
+
+/// Check if a character is a CJK ideograph
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{4E00}'..='\u{9FFF}' |   // CJK Unified Ideographs
+        '\u{3400}'..='\u{4DBF}' |   // CJK Unified Ideographs Extension A
+        '\u{F900}'..='\u{FAFF}'     // CJK Compatibility Ideographs
+    )
+}
+
+#[tauri::command]
+async fn db_generate_mnemonic(
+    app: tauri::AppHandle,
+    api_host: String,
+    api_key: String,
+    model: String,
+    id: String,
+    content: String,
+    language: String,
+    detail: Option<String>,
+) -> Result<String, String> {
+    // 1. Extract target reading and meaning
+    let (target_reading, target_meaning) = detail.as_ref().map(|d| {
+        let v = serde_json::from_str::<serde_json::Value>(d).ok();
+        let reading = v.as_ref().and_then(|v| v.get("reading").and_then(|r| r.as_str())).unwrap_or("").to_string();
+        let meaning = v.as_ref().and_then(|v| v.get("meaning").and_then(|m| m.as_str())).unwrap_or("").to_string();
+        (reading, meaning)
+    }).unwrap_or_default();
+
+    let target_info = format!(
+        "{}{}{}",
+        content,
+        if target_reading.is_empty() { String::new() } else { format!(" (reading: {})", target_reading) },
+        if target_meaning.is_empty() { String::new() } else { format!(" — meaning: {}", target_meaning) },
+    );
+
+    // 2. Find known words with REAL overlaps
+    let (matched, _all_known) = find_mnemonic_matches(
+        &app, &language, &content, &target_reading
+    )?;
+
+    // 3. Build prompt based on whether we found matches
+    let lang_name = match language.as_str() {
+        "ja" => "Japanese",
+        "id" => "Indonesian",
+        _ => &language,
+    };
+
+    let prompt = if matched.is_empty() {
+        // No known word shares sounds or kanji — use sound-alike
+        format!(
+            "Create a mnemonic to help remember the {} word: \"{}\"\n\n\
+            No known words share sounds or kanji with this word.\n\
+            Use a sound-alike from English or another familiar word that sounds like the reading.\n\n\
+            Example: 公式 (こうしき, formula) — sounds like \"COZY-sheeki\" — imagine a COZY formula you can solve in bed.\n\n\
+            RULES:\n\
+            - Base the mnemonic on how the reading SOUNDS — find an English word or phrase that sounds similar\n\
+            - Always show the target word's reading in the mnemonic\n\
+            - Keep it to 1-2 short sentences — natural and easy to recall\n\
+            - Write in English\n\
+            - Return ONLY the mnemonic text. No JSON, no labels, no quotes, no explanation.",
+            lang_name, target_info
+        )
+    } else {
+        // We found real overlaps — list them explicitly
+        let matches_str: Vec<String> = matched.iter().map(|kw| {
+            if kw.reading.is_empty() {
+                format!("{} (meaning: {})", kw.word, kw.meaning)
+            } else {
+                format!("{} (reading: {}, meaning: {})", kw.word, kw.reading, kw.meaning)
+            }
+        }).collect();
+
+        format!(
+            "Create a mnemonic to help remember the {} word: \"{}\"\n\n\
+            The following known words share sounds or kanji with the target:\n{}\n\n\
+            Pick the BEST match from the list above and build a mnemonic that explains the connection.\n\
+            The connection must be based on the REAL overlap — shared kanji or shared reading syllables.\n\n\
+            Example: Target 食堂 (しょくどう, canteen). Match: 食べる (reading: たべる, meaning: to eat).\n\
+            Mnemonic: \"You already know 食べる (たべる). The kanji 食 can also be read as しょ (onyomi). So 食堂 しょくどう is a HALL where you EAT — a canteen!\"\n\n\
+            RULES:\n\
+            - You MUST use one of the matched words listed above — explain the shared kanji or reading\n\
+            - Always show both the target's reading and the matched word's reading in the mnemonic\n\
+            - Keep it to 1-2 short sentences — natural and easy to recall\n\
+            - Write in English\n\
+            - Return ONLY the mnemonic text. No JSON, no labels, no quotes, no explanation.",
+            lang_name, target_info,
+            matches_str.join("\n")
+        )
+    };
+
+    // 3. Call LLM (same pattern as db_generate_detail)
+    let url = build_url(&api_host, "chat/completions");
+    let client = Client::new();
+    let req = ChatRequest {
+        model: &model,
+        messages: &vec![ChatMessage { role: "user".to_string(), content: prompt }],
+    };
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("API error: {} — {}", status, body.trim()));
+    }
+    let parsed: ChatResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
+    let mnemonic = parsed.choices.get(0).map(|c| c.message.content.clone()).unwrap_or_default();
+
+    // 4. Save to DB
+    let conn = open_db(&app)?;
+    conn.execute("UPDATE review_items SET mnemonic=?1 WHERE id=?2", params![mnemonic, id])
+        .map_err(|e| e.to_string())?;
+
+    Ok(mnemonic)
+}
+
+#[tauri::command]
+fn db_update_mnemonic(app: tauri::AppHandle, id: String, mnemonic: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    conn.execute("UPDATE review_items SET mnemonic=?1 WHERE id=?2", params![mnemonic, id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 fn db_rename_session(app: tauri::AppHandle, session_id: String, title: String) -> Result<(), String> {
     let conn = open_db(&app)?;
@@ -900,7 +1178,7 @@ fn db_update_review_detail(app: tauri::AppHandle, id: String, detail: String) ->
 #[tauri::command]
 fn db_get_review_items_by_language(app: tauri::AppHandle, language: String) -> Result<Vec<ReviewItem>, String> {
     let conn = open_db(&app)?;
-    let mut stmt = conn.prepare("SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail FROM review_items WHERE language=?1").map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare("SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic FROM review_items WHERE language=?1").map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![language], |row| {
         Ok(ReviewItem {
             id: row.get(0)?,
@@ -915,6 +1193,7 @@ fn db_get_review_items_by_language(app: tauri::AppHandle, language: String) -> R
             tags: row.get(9)?,
             language: row.get(10)?,
             detail: row.get(11)?,
+            mnemonic: row.get(12)?,
         })
     }).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
@@ -951,7 +1230,7 @@ fn db_get_due_review_items(
     let limit_val = limit.unwrap_or(200);
 
     let mut sql = String::from(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic
          FROM review_items
          WHERE (next_review IS NULL OR next_review <= ?1)"
     );
@@ -980,6 +1259,7 @@ fn db_get_due_review_items(
             tags: row.get(9)?,
             language: row.get(10)?,
             detail: row.get(11)?,
+            mnemonic: row.get(12)?,
         })
     }
 
@@ -1086,7 +1366,7 @@ async fn db_generate_detail(app: tauri::AppHandle, api_host: String, api_key: St
     };
     let prompt = format!(
         "You are a language learning assistant. For the {} word/phrase \"{}\", provide a detailed vocabulary card in this exact JSON format:\n\
-        {{\"reading\": \"pronunciation in IPA or romaji\", \"meaning\": \"English translation\", \"part_of_speech\": \"noun/verb/adj/etc\", \"example\": \"a natural example sentence in {}\", \"example_meaning\": \"English translation of the example\"}}\n\
+        {{\"reading\": \"hiragana reading for Japanese (e.g., たべる for 食べる, しょくどう for 食堂), or IPA/romaji for non-Japanese\", \"meaning\": \"English translation\", \"part_of_speech\": \"noun/verb/adj/etc\", \"example\": \"a natural example sentence in {}\", \"example_meaning\": \"English translation of the example\"}}\n\
         Return ONLY the JSON object, nothing else.",
         lang_name, content, lang_name
     );
@@ -1661,6 +1941,8 @@ pub fn run() {
             db_get_telemetry_days,
             db_list_known_words,
             db_add_known_word,
+            db_generate_mnemonic,
+            db_update_mnemonic,
             db_rename_session,
             db_delete_session,
             db_update_review_detail,

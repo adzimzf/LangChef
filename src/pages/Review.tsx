@@ -18,6 +18,7 @@ import {
   CheckOutlined,
   CloseOutlined,
   SettingOutlined,
+  BulbOutlined,
 } from '@ant-design/icons'
 
 type ReviewItem = {
@@ -33,6 +34,7 @@ type ReviewItem = {
   tags: string | null
   language: string | null
   detail: string | null
+  mnemonic: string | null
 }
 
 const LANGUAGES: Record<string, { label: string; flag: string }> = {
@@ -121,6 +123,8 @@ export default function Review() {
   const [selectedLang, setSelectedLang] = useState<string | null>(null)
   const [revealed, setRevealed] = useState(false)
   const [generatingDetail, setGeneratingDetail] = useState(false)
+  const [generatingMnemonic, setGeneratingMnemonic] = useState(false)
+  const [showMnemonic, setShowMnemonic] = useState(false)
   const [editingDetail, setEditingDetail] = useState<string | null>(null)
   const [editDetailText, setEditDetailText] = useState('')
   const [showImport, setShowImport] = useState(false)
@@ -298,6 +302,7 @@ export default function Review() {
     }
 
     setRevealed(false)
+    setShowMnemonic(false)
 
     // Determine if the card graduated (left learning/relearning into review)
     const graduated = (updated.state === 'review') && (card.state === 'new' || card.state === 'learning' || card.state === 'relearning')
@@ -357,7 +362,7 @@ export default function Review() {
     if (!visibleCard) return
     const apiHost = localStorage.getItem('api_host') || ''
     const apiKey = localStorage.getItem('api_key') || ''
-    const model = localStorage.getItem('api_model') || 'gpt-3.5-turbo'
+    const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
     if (!apiHost || !apiKey) {
       alert('Please configure your API settings first (Settings page).')
       return
@@ -377,6 +382,35 @@ export default function Review() {
       alert(`Failed to generate: ${e}`)
     }
     setGeneratingDetail(false)
+  }
+
+  async function generateMnemonic() {
+    if (!visibleCard) return
+    const apiHost = localStorage.getItem('api_host') || ''
+    const apiKey = localStorage.getItem('api_key') || ''
+    const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
+    if (!apiHost || !apiKey) {
+      alert('Please configure your API settings first (Settings page).')
+      return
+    }
+    setGeneratingMnemonic(true)
+    try {
+      const lang = visibleCard.language || 'ja'
+      const result = await invoke<string>('db_generate_mnemonic', {
+        apiHost, apiKey, model,
+        id: visibleCard.id,
+        content: visibleCard.content,
+        language: lang,
+        detail: visibleCard.detail,
+      })
+      setSessionQueue(prev => prev.map(item =>
+        item.id === visibleCard.id ? { ...item, mnemonic: result } : item
+      ))
+      setShowMnemonic(true)
+    } catch (e) {
+      alert(`Failed to generate mnemonic: ${e}`)
+    }
+    setGeneratingMnemonic(false)
   }
 
   async function saveDetail() {
@@ -490,6 +524,42 @@ export default function Review() {
               )}
             </div>
           )}
+          {/* Mnemonic section */}
+          <div className="mt-3 pt-2 border-t border-gray-100">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-gray-400">Mnemonic</span>
+              {!visibleCard?.mnemonic && (
+                <button
+                  onClick={generateMnemonic}
+                  disabled={generatingMnemonic}
+                  className="flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-50 text-amber-600 text-xs font-medium hover:bg-amber-100 transition-colors disabled:opacity-50"
+                >
+                  <BulbOutlined />
+                  {generatingMnemonic ? 'Creating...' : 'Create mnemonic'}
+                </button>
+              )}
+            </div>
+            {visibleCard?.mnemonic ? (
+              <div>
+                <button
+                  onClick={() => setShowMnemonic(!showMnemonic)}
+                  className="text-sm text-left w-full"
+                >
+                  {showMnemonic ? visibleCard.mnemonic : 'Tap to reveal mnemonic'}
+                </button>
+                <button
+                  onClick={generateMnemonic}
+                  disabled={generatingMnemonic}
+                  className="text-xs text-gray-400 hover:text-gray-600 mt-1"
+                >
+                  <ReloadOutlined className="mr-1" />
+                  {generatingMnemonic ? 'Regenerating...' : 'Regenerate'}
+                </button>
+              </div>
+            ) : (
+              <p className="text-xs text-gray-300">No mnemonic yet</p>
+            )}
+          </div>
           <button
             onClick={() => {
               setEditingDetail(visibleCard?.id || null)
@@ -746,10 +816,10 @@ export default function Review() {
       ) : (
         <>
           {/* Flashcard */}
-          <div className="flex-1 flex flex-col items-center justify-center pb-6">
+          <div className="flex-1 flex flex-col items-center justify-center pb-28 overflow-y-auto">
             <div
               onClick={() => setRevealed(true)}
-              className="w-full max-w-sm bg-white rounded-2xl shadow-md p-8 text-center cursor-pointer hover:shadow-lg active:shadow transition-shadow"
+              className="w-full max-w-sm bg-white rounded-2xl shadow-md p-8 text-center cursor-pointer hover:shadow-lg active:shadow transition-shadow my-auto"
             >
               {/* State badge & difficulty indicator */}
               <div className="flex items-center justify-center gap-2 mb-4">

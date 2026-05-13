@@ -12,6 +12,7 @@ import {
   SortDescendingOutlined,
   RobotOutlined,
   SearchOutlined,
+  BulbOutlined,
 } from '@ant-design/icons'
 import { difficultyColor, difficultyBgClass, stateLabel } from '../lib/srs'
 import type { CardState } from '../lib/srs'
@@ -29,6 +30,7 @@ type ReviewItem = {
   tags: string | null
   language: string | null
   detail: string | null
+  mnemonic: string | null
 }
 
 const PAGE_SIZE = 20
@@ -144,6 +146,8 @@ export default function WordsList() {
   const [editPartOfSpeech, setEditPartOfSpeech] = useState('')
   const [editExample, setEditExample] = useState('')
   const [editExampleMeaning, setEditExampleMeaning] = useState('')
+  const [editMnemonic, setEditMnemonic] = useState('')
+  const [generatingMnemonic, setGeneratingMnemonic] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
 
   // Delete confirmation
@@ -258,6 +262,7 @@ export default function WordsList() {
     setEditPartOfSpeech(parsed?.part_of_speech || '')
     setEditExample(parsed?.example || '')
     setEditExampleMeaning(parsed?.example_meaning || '')
+    setEditMnemonic(item.mnemonic || '')
   }
 
   /** Serialize form fields back to a detail JSON string */
@@ -277,7 +282,7 @@ export default function WordsList() {
     if (!item) return
     const apiHost = localStorage.getItem('api_host') || ''
     const apiKey = localStorage.getItem('api_key') || ''
-    const model = localStorage.getItem('api_model') || 'gpt-3.5-turbo'
+    const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
     if (!apiHost || !apiKey) {
       alert('Please configure your API settings first (Settings page).')
       return
@@ -308,6 +313,37 @@ export default function WordsList() {
     setGeneratingDetail(false)
   }
 
+  async function generateMnemonic() {
+    if (!editingId) return
+    const item = allItems.find((i) => i.id === editingId)
+    if (!item) return
+    const apiHost = localStorage.getItem('api_host') || ''
+    const apiKey = localStorage.getItem('api_key') || ''
+    const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
+    if (!apiHost || !apiKey) {
+      alert('Please configure your API settings first (Settings page).')
+      return
+    }
+    setGeneratingMnemonic(true)
+    try {
+      const lang = item.language || 'ja'
+      const result = await invoke<string>('db_generate_mnemonic', {
+        apiHost, apiKey, model,
+        id: item.id,
+        content: item.content,
+        language: lang,
+        detail: item.detail,
+      })
+      setEditMnemonic(result)
+      setAllItems((prev) =>
+        prev.map((i) => (i.id === editingId ? { ...i, mnemonic: result } : i))
+      )
+    } catch (e) {
+      alert(`Failed to generate mnemonic: ${e}`)
+    }
+    setGeneratingMnemonic(false)
+  }
+
   async function saveEdit() {
     if (!editingId) return
     setSaveError(null)
@@ -321,6 +357,8 @@ export default function WordsList() {
       }
       // Update detail
       await invoke('db_update_review_detail', { id: editingId, detail: detailValue })
+      // Update mnemonic
+      await invoke('db_update_mnemonic', { id: editingId, mnemonic: editMnemonic })
       // Refetch from DB to ensure consistency
       await loadItems()
       // Go to detail view
@@ -341,6 +379,7 @@ export default function WordsList() {
     setEditPartOfSpeech('')
     setEditExample('')
     setEditExampleMeaning('')
+    setEditMnemonic('')
     setSaveError(null)
   }
 
@@ -490,6 +529,16 @@ export default function WordsList() {
             {/* Detail section */}
             {renderDetailContent(selectedItem.detail)}
 
+            {/* Mnemonic section */}
+            <div className="mt-3 pt-2 border-t border-gray-100 text-left">
+              <span className="text-xs text-gray-400">Mnemonic</span>
+              {selectedItem.mnemonic ? (
+                <p className="text-sm text-amber-700 bg-amber-50 p-2 rounded-lg mt-1">{selectedItem.mnemonic}</p>
+              ) : (
+                <p className="text-xs text-gray-300 mt-1">No mnemonic. Edit this word to generate one.</p>
+              )}
+            </div>
+
             {/* SRS stats */}
             <div className="mt-4 pt-3 border-t border-gray-100">
               <div className="flex items-center justify-center gap-4 text-xs text-gray-400">
@@ -604,6 +653,26 @@ export default function WordsList() {
                     onChange={(e) => setEditExampleMeaning(e.target.value)}
                     className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white resize-none"
                     placeholder="English translation of the example"
+                    rows={2}
+                  />
+                </div>
+                <div>
+                  <div className="flex items-center justify-between mb-0.5">
+                    <label className="text-xs text-gray-400">Mnemonic</label>
+                    <button
+                      onClick={generateMnemonic}
+                      disabled={generatingMnemonic}
+                      className="flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-50 text-amber-600 text-xs font-medium hover:bg-amber-100 transition-colors disabled:opacity-50"
+                    >
+                      <BulbOutlined />
+                      {generatingMnemonic ? 'Creating...' : 'Generate'}
+                    </button>
+                  </div>
+                  <textarea
+                    value={editMnemonic}
+                    onChange={(e) => setEditMnemonic(e.target.value)}
+                    className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white resize-none"
+                    placeholder="A memory aid connecting to words you already know"
                     rows={2}
                   />
                 </div>
