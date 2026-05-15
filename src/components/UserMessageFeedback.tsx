@@ -9,10 +9,100 @@ type Props = {
   feedback: UserFeedback | undefined
 }
 
+type VocabItem = { word: string; reading_meaning: string; ok: boolean; note: string }
+type GrammarItem = { pattern: string; ok: boolean; note: string }
+type TargetWordItem = { word: string; used: boolean; note: string }
+type FeedbackJSON = {
+  score: number
+  summary: string
+  vocab?: VocabItem[]
+  grammar?: GrammarItem[]
+  target_words?: TargetWordItem[]
+  suggestion?: string
+}
+
 function scoreColor(score: number): string {
   if (score >= 4) return 'text-green-600 bg-green-50'
   if (score >= 3) return 'text-yellow-600 bg-yellow-50'
   return 'text-orange-500 bg-orange-50'
+}
+
+function stars(score: number): string {
+  return '★'.repeat(score) + '☆'.repeat(5 - score)
+}
+
+/** Try to parse feedback as JSON; return null if it's old-style markdown */
+function tryParseJSON(raw: string): FeedbackJSON | null {
+  const cleaned = raw.trim().replace(/^```json\s*\n?/i, '').replace(/\n?```\s*$/i, '').trim()
+  try {
+    const obj = JSON.parse(cleaned)
+    if (typeof obj.score === 'number' && typeof obj.summary === 'string') return obj
+  } catch {}
+  return null
+}
+
+/** Convert structured JSON feedback to markdown for rendering */
+function feedbackToMarkdown(fb: FeedbackJSON): string {
+  const lines: string[] = []
+
+  lines.push(`**Overall Score**`)
+  lines.push(`[ \`${stars(fb.score)}\` ] **${fb.score} / 5**`)
+  lines.push('')
+  lines.push(`> ${fb.summary}`)
+  lines.push('')
+  lines.push('---')
+  lines.push('')
+
+  if (fb.vocab && fb.vocab.length > 0) {
+    lines.push('### 🔤 Vocabulary Analysis')
+    lines.push('')
+    lines.push('| Status | Word | Reading / Meaning | Diagnosis & Suggestion |')
+    lines.push('|:---:|:---|:---|:---|')
+    for (const v of fb.vocab) {
+      const status = v.ok ? '✅' : '❌'
+      lines.push(`| ${status} | **${v.word}** | *${v.reading_meaning}* | ${v.note} |`)
+    }
+    lines.push('')
+    lines.push('---')
+    lines.push('')
+  }
+
+  if (fb.grammar && fb.grammar.length > 0) {
+    lines.push('### 📝 Grammar')
+    lines.push('')
+    lines.push('| Status | Grammar | Diagnosis |')
+    lines.push('|:---:|:---|:---|')
+    for (const g of fb.grammar) {
+      const status = g.ok ? '✅' : '❌'
+      lines.push(`| ${status} | **${g.pattern}** | ${g.note} |`)
+    }
+    lines.push('')
+    lines.push('---')
+    lines.push('')
+  }
+
+  if (fb.target_words && fb.target_words.length > 0) {
+    lines.push('### 🎯 Target Word Usage')
+    lines.push('')
+    lines.push('| Status | Target Word | Used? | Notes |')
+    lines.push('|:---:|:---|:---:|:---|')
+    for (const tw of fb.target_words) {
+      const status = tw.used ? '✅' : '❌'
+      lines.push(`| ${status} | **${tw.word}** | ${tw.used ? 'Yes' : 'No'} | ${tw.note} |`)
+    }
+    lines.push('')
+    lines.push('---')
+    lines.push('')
+  }
+
+  if (fb.suggestion) {
+    lines.push('### 📝 Suggestion')
+    lines.push('')
+    lines.push(`> ✅ **${fb.suggestion}**`)
+    lines.push('')
+  }
+
+  return lines.join('\n')
 }
 
 export default function UserMessageFeedback({ feedback }: Props) {
@@ -28,6 +118,10 @@ export default function UserMessageFeedback({ feedback }: Props) {
       </div>
     )
   }
+
+  // Try JSON format first, fall back to raw markdown for cached entries
+  const json = tryParseJSON(feedback.feedback)
+  const displayMarkdown = json ? feedbackToMarkdown(json) : feedback.feedback
 
   return (
     <>
@@ -74,7 +168,7 @@ export default function UserMessageFeedback({ feedback }: Props) {
               [&_hr]:my-3 [&_hr]:border-gray-200
               [&_strong]:font-semibold [&_code]:bg-gray-100 [&_code]:px-1 [&_code]:py-0.5 [&_code]:rounded [&_code]:text-[12px] [&_em]:text-gray-600
             ">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{feedback.feedback}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayMarkdown}</ReactMarkdown>
             </div>
           </div>
         </div>

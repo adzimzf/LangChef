@@ -1886,91 +1886,37 @@ async fn db_evaluate_user_message(
         format!("\nJLPT/Level context: {}", level)
     };
 
-    let mut context_block = String::new();
-    if !context_messages.is_empty() {
-        context_block = "\n\n## Conversation Context\nHere is the recent conversation for reference:\n".to_string();
-        for cm in &context_messages {
-            let role_label = if cm.role == "user" { "Learner" } else { "Partner" };
-            context_block.push_str(&format!("- **{}**: {}\n", role_label, cm.content));
-        }
-        context_block.push_str("\nEvaluate the learner's latest message above in the context of this conversation.\n");
-    }
-
-    let target_words_section = if target_words.is_empty() {
-        String::new()
+    let target_words_json = if target_words.is_empty() {
+        "[]".to_string()
     } else {
-        let words_list = target_words.join(", ");
-        format!(
-            "\n\n## Target Words Check\n\n\
-             The learner was expected to use these target words in their response:\n\
-             {words_list}\n\n\
-             You MUST include a section:\n\n\
-             ### 🎯 Target Word Usage\n\n\
-             | Status | Target Word | Used? | Notes |\n\
-             |:---:|:---|:---:|:---|\n\
-             | ✅/❌ | word | Yes/No | How it was used, or suggested usage |\n\n\
-             "
-        )
+        serde_json::to_string(&target_words).unwrap_or_else(|_| "[]".to_string())
+    };
+
+    let context_json = if context_messages.is_empty() {
+        "[]".to_string()
+    } else {
+        serde_json::to_string(&context_messages).unwrap_or_else(|_| "[]".to_string())
     };
 
     let prompt = format!(
-        "You are a language learning evaluator. Evaluate the following {} learner's message.{}\n\
-         {}\n\
-         Rate the message on a scale of 1-5:\n\
-         - 1 = Many errors, hard to understand\n\
-         - 2 = Frequent errors but meaning is clear\n\
-         - 3 = Some errors, generally understandable\n\
-         - 4 = Minor issues, mostly correct\n\
-         - 5 = Natural, no errors\n\n\
-         Provide your evaluation in Markdown with these sections:\n\
-         ## Score: X/5\n\
-         ## Vocabulary\n\
-
-         ## Grammar\n\
-         a table with this column with column Status, Grammar, Diagnosis\n\n\
-         ## Suggestion
-         - Provide a revised version of the learner's message that naturally includes ONE or MORE the missing target words and used the correct grammar.\n
-         - The suggestion format must start with markdown >
-         Be concise and encouraging. If the message is perfect, say so!\n\n\
-         Message to evaluate:\n\"{}\"\n\
-         {}
-         YOU MUST RESPONSE IN BELOW FORMAT:
-
-         **Overall Score**
-         [ `★☆☆☆☆` ] **1 / 5**
-
-         > ⚠️ Your overall response
-
-         ---
-
-         ### 🔤 Vocabulary Analysis
-
-         | Status | Word | Reading / Meaning | Diagnosis & Suggestion |
-         |:---:|:---|:---|:---|
-         | ❌ | **何** | *nani* / \"what\" | Fragment used incorrectly. A single question word does not constitute a proper response to a statement of concern. |
-
-         ---
-
-         ### 📝 Grammar
-          | Status | Grammar | Diagnosis |
-          |:---:|:---|:---|:---|
-          | ❌ | **何** | is not a grammatically complete response to the previous statement |
-
-         ### 📝 Suggestion
-
-         > ✅ **はい、気をつけます。**
-         > *(Hai, ki o tsukemasu.)* — \"Yes, I will be careful.\"
-
-         ---
-
-         ### 🛠️ Styling Guide for Markdown
-         To achieve clean visual hierarchy, apply the following rules when rendering this feedback:
-
-         - **Headings:** Use `#` and `##` with emoji prefixes for immediate context recognition.
-         - **Tables:** Use tables for error logging (Status, Word, Meaning, Fix) for quick scanning.
-         - **Callouts:** Use blockquotes (`>`) for the score banner and warnings.
-         - **Positive Examples:** Use green check emoji (`✅`) in a distinct block to clearly separate the **Error** from the **Fix**.",
-        lang_name, level_context, context_block, message_content, target_words_section
+        "Evaluate this {lang_name} learner's message.{level_context}\n\
+         Message: \"{message_content}\"\n\n\
+         Target words: {target_words_json}\n\
+         Context: {context_json}\n\n\
+         Return ONLY a JSON object (no markdown, no explanation):\n\
+         {{\"score\":1-5,\"summary\":\"...\",\"vocab\":[...],\"grammar\":[...],\"target_words\":[...],\"suggestion\":\"...\"}}\n\n\
+         - \"vocab\": analyze words the learner ACTUALLY WROTE — check spelling, usage, word choice errors.\n\
+         - \"target_words\": check whether each assigned target word was used in the message.\n\
+         - Do NOT put target word usage in \"vocab\". These are separate concerns.\n\n\
+         Example — if the learner wrote \"何？\" and target words were [\"気をつける\", \"はい\"]:\n\
+         {{\"score\":1,\"summary\":\"Incomplete response with a single question word.\",\"vocab\":[{{\"word\":\"何\",\"reading_meaning\":\"nani / what\",\"ok\":false,\"note\":\"Fragment used incorrectly; a single question word is not a proper response.\"}}],\"grammar\":[{{\"pattern\":\"何\",\"ok\":false,\"note\":\"Not a grammatically complete response.\"}}],\"target_words\":[{{\"word\":\"気をつける\",\"used\":false,\"note\":\"Expected but not used. Try: はい、気をつけます。\"}},{{\"word\":\"はい\",\"used\":false,\"note\":\"Expected but not used. Try: はい、気をつけます。\"}}],\"suggestion\":\"はい、気をつけます。\"}}\n\n\
+         Score: 1=many errors, 2=frequent errors, 3=some errors, 4=minor issues, 5=natural.\n\
+         Be concise. Omit empty arrays.",
+        lang_name = lang_name,
+        level_context = level_context,
+        message_content = message_content,
+        target_words_json = target_words_json,
+        context_json = context_json,
     );
 
     let url = build_url(&api_host, "chat/completions");
@@ -1994,8 +1940,8 @@ async fn db_evaluate_user_message(
     let parsed: ChatResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
     let feedback = parsed.choices.get(0).map(|c| c.message.content.clone()).unwrap_or_default();
 
-    // Extract score from the response (look for "Score: X/5" pattern)
-    let score = extract_score_from_feedback(&feedback);
+    // Extract score from JSON response
+    let score = extract_score_from_json(&feedback);
 
     // Save to DB
     conn.execute(
@@ -2012,13 +1958,28 @@ async fn db_evaluate_user_message(
     Ok(UserMessageFeedback { message_id, score, feedback, created_at: msg_created_at })
 }
 
-/// Extract a score (1-5) from the LLM's markdown feedback by looking for patterns like "Score: X/5"
-fn extract_score_from_feedback(feedback: &str) -> i64 {
-    // Try common patterns
+/// Extract a score (1-5) from the LLM's JSON feedback response.
+fn extract_score_from_json(feedback: &str) -> i64 {
+    // Strip markdown code fences if present
+    let cleaned = feedback
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(cleaned) {
+        if let Some(score) = val.get("score").and_then(|s| s.as_i64()) {
+            if (1..=5).contains(&score) {
+                return score;
+            }
+        }
+    }
+
+    // Fallback: try old markdown patterns for cached entries
     for pattern in &["Score: ", "score: ", "**Score:** ", "# Score: "] {
         if let Some(idx) = feedback.find(pattern) {
             let after = &feedback[idx + pattern.len()..];
-            // Take up to 3 chars and parse as number before "/"
             let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
             if let Ok(n) = num_str.parse::<i64>() {
                 if (1..=5).contains(&n) {
