@@ -16,6 +16,8 @@ struct Message {
     role: String,
     content: String,
     created_at: i64,
+    parent_message_id: Option<i64>,
+    is_active_path: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -275,6 +277,9 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN lapse_count INTEGER DEFAULT 0", []);
     // best-effort: add mnemonic column if missing
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN mnemonic TEXT", []);
+    // best-effort: add parent_message_id and is_active_path columns to messages if missing (for edit tree)
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN parent_message_id INTEGER", []);
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN is_active_path INTEGER DEFAULT 1", []);
     // Migrate existing cards that have NULL state to 'review' if they have R > 0
     let _ = conn.execute("UPDATE review_items SET state = 'review' WHERE state IS NULL OR state = ''", []);
     let _ = conn.execute("UPDATE review_items SET state = 'new' WHERE state IS NULL OR state = ''", []);
@@ -419,12 +424,12 @@ fn db_list_sessions(app: tauri::AppHandle) -> Result<Vec<ChatSession>, String> {
 }
 
 #[tauri::command]
-fn db_add_message_in_session(app: tauri::AppHandle, session_id: String, role: String, content: String) -> Result<i64, String> {
+fn db_add_message_in_session(app: tauri::AppHandle, session_id: String, role: String, content: String, parent_message_id: Option<i64>) -> Result<i64, String> {
     let conn = open_db(&app)?;
     let now = chrono::Utc::now().timestamp();
     conn.execute(
-        "INSERT INTO messages(role, content, created_at, session_id) VALUES (?1, ?2, ?3, ?4)",
-        params![role, content, now, session_id],
+        "INSERT INTO messages(role, content, created_at, session_id, parent_message_id, is_active_path) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+        params![role, content, now, session_id, parent_message_id],
     ).map_err(|e| e.to_string())?;
     conn.execute("UPDATE chat_sessions SET last_activity=?1 WHERE id=?2", params![now, session_id])
         .map_err(|e| e.to_string())?;
@@ -434,7 +439,7 @@ fn db_add_message_in_session(app: tauri::AppHandle, session_id: String, role: St
 #[tauri::command]
 fn db_list_session_messages(app: tauri::AppHandle, session_id: String) -> Result<Vec<Message>, String> {
     let conn = open_db(&app)?;
-    let mut stmt = conn.prepare("SELECT id, role, content, created_at FROM messages WHERE session_id=?1 ORDER BY created_at ASC")
+    let mut stmt = conn.prepare("SELECT id, role, content, created_at, parent_message_id, is_active_path FROM messages WHERE session_id=?1 ORDER BY created_at ASC")
         .map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![session_id], |row| {
         Ok(Message {
@@ -442,6 +447,8 @@ fn db_list_session_messages(app: tauri::AppHandle, session_id: String) -> Result
             role: row.get(1)?,
             content: row.get(2)?,
             created_at: row.get(3)?,
+            parent_message_id: row.get(4)?,
+            is_active_path: row.get(5)?,
         })
     }).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
@@ -1142,6 +1149,126 @@ fn db_update_mnemonic(app: tauri::AppHandle, id: String, mnemonic: String) -> Re
 }
 
 #[tauri::command]
+fn db_update_message_content(app: tauri::AppHandle, message_id: i64, content: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    conn.execute(
+        "UPDATE messages SET content=?1 WHERE id=?2",
+        params![content, message_id],
+    ).map_err(|e| e.to_string())?;
+    // Clear cached feedback so re-evaluation works cleanly
+    conn.execute(
+        "DELETE FROM user_message_feedback WHERE message_id=?1",
+        params![message_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Deactivate a message and all its descendants (mark is_active_path = 0).
+/// Used when a user edits a message — the old branch becomes inactive.
+#[tauri::command]
+fn db_deactivate_message_branch(app: tauri::AppHandle, message_id: i64) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    // BFS: collect all descendant message IDs, then mark them inactive
+    let mut to_deactivate = vec![message_id];
+    let mut idx = 0;
+    while idx < to_deactivate.len() {
+        let current = to_deactivate[idx];
+        let mut stmt = conn.prepare("SELECT id FROM messages WHERE parent_message_id=?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(params![current], |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            to_deactivate.push(r.map_err(|e| e.to_string())?);
+        }
+        idx += 1;
+    }
+    for id in to_deactivate {
+        conn.execute("UPDATE messages SET is_active_path=0 WHERE id=?1", params![id])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Get sibling user messages that share the same parent_message_id.
+/// Used for arrow navigation between edit versions.
+#[derive(Serialize)]
+struct SiblingMessage {
+    id: i64,
+    content: String,
+    is_active_path: i64,
+}
+
+#[tauri::command]
+fn db_get_message_siblings(app: tauri::AppHandle, message_id: i64) -> Result<Vec<SiblingMessage>, String> {
+    let conn = open_db(&app)?;
+    // Get the parent of the given message
+    let parent_id: Option<i64> = conn.query_row(
+        "SELECT parent_message_id FROM messages WHERE id=?1",
+        params![message_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+
+    // Find all user messages with the same parent
+    let mut stmt = conn.prepare(
+        "SELECT id, content, is_active_path FROM messages WHERE parent_message_id=?1 AND role='user' ORDER BY created_at ASC"
+    ).map_err(|e| e.to_string())?;
+
+    let parent_param = match parent_id {
+        Some(id) => id as i64,
+        None => 0i64, // Won't match any parent_message_id since they're non-zero
+    };
+
+    // Handle NULL parent (first messages in conversation)
+    let rows = if parent_id.is_none() {
+        let mut stmt2 = conn.prepare(
+            "SELECT id, content, is_active_path FROM messages WHERE parent_message_id IS NULL AND role='user' AND session_id=(SELECT session_id FROM messages WHERE id=?1) ORDER BY created_at ASC"
+        ).map_err(|e| e.to_string())?;
+        let mapped = stmt2.query_map(params![message_id], |row| {
+            Ok(SiblingMessage {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                is_active_path: row.get(2)?,
+            })
+        }).map_err(|e| e.to_string())?;
+        mapped.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    } else {
+        let mapped = stmt.query_map(params![parent_param], |row| {
+            Ok(SiblingMessage {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                is_active_path: row.get(2)?,
+            })
+        }).map_err(|e| e.to_string())?;
+        mapped.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
+
+    Ok(rows)
+}
+
+/// Get the bot response child of a user message (any, including inactive for arrow navigation).
+#[tauri::command]
+fn db_get_bot_response_for_user(app: tauri::AppHandle, user_message_id: i64) -> Result<Option<Message>, String> {
+    let conn = open_db(&app)?;
+    let result = conn.query_row(
+        "SELECT id, role, content, created_at, parent_message_id, is_active_path FROM messages WHERE parent_message_id=?1 AND role='assistant' ORDER BY created_at DESC LIMIT 1",
+        params![user_message_id],
+        |row| Ok(Message {
+            id: row.get(0)?,
+            role: row.get(1)?,
+            content: row.get(2)?,
+            created_at: row.get(3)?,
+            parent_message_id: row.get(4)?,
+            is_active_path: row.get(5)?,
+        }),
+    );
+    match result {
+        Ok(msg) => Ok(Some(msg)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
 fn db_rename_session(app: tauri::AppHandle, session_id: String, title: String) -> Result<(), String> {
     let conn = open_db(&app)?;
     conn.execute("UPDATE chat_sessions SET title=?1 WHERE id=?2", params![title, session_id])
@@ -1728,6 +1855,7 @@ async fn db_evaluate_user_message(
     language: String,
     level: String,
     context_messages: Vec<ChatMessage>,
+    target_words: Vec<String>,
 ) -> Result<UserMessageFeedback, String> {
     // Check cache first
     let conn = open_db(&app)?;
@@ -1768,6 +1896,23 @@ async fn db_evaluate_user_message(
         context_block.push_str("\nEvaluate the learner's latest message above in the context of this conversation.\n");
     }
 
+    let target_words_section = if target_words.is_empty() {
+        String::new()
+    } else {
+        let words_list = target_words.join(", ");
+        format!(
+            "\n\n## Target Words Check\n\n\
+             The learner was expected to use these target words in their response:\n\
+             {words_list}\n\n\
+             You MUST include a section:\n\n\
+             ### 🎯 Target Word Usage\n\n\
+             | Status | Target Word | Used? | Notes |\n\
+             |:---:|:---|:---:|:---|\n\
+             | ✅/❌ | word | Yes/No | How it was used, or suggested usage |\n\n\
+             "
+        )
+    };
+
     let prompt = format!(
         "You are a language learning evaluator. Evaluate the following {} learner's message.{}\n\
          {}\n\
@@ -1780,19 +1925,21 @@ async fn db_evaluate_user_message(
          Provide your evaluation in Markdown with these sections:\n\
          ## Score: X/5\n\
          ## Vocabulary\n\
-         - List words that are appropriate/good ✓\n\
-         - List words that should be replaced or removed ✗ (with better alternatives)\n\
+
          ## Grammar\n\
-         - List any grammar mistakes with corrections\n\
-         - Note good grammar usage\n\n\
+         a table with this column with column Status, Grammar, Diagnosis\n\n\
+         ## Suggestion
+         - Provide a revised version of the learner's message that naturally includes ONE or MORE the missing target words and used the correct grammar.\n
+         - The suggestion format must start with markdown >
          Be concise and encouraging. If the message is perfect, say so!\n\n\
-         Message to evaluate:\n\"{}\"\n\n\n
-         BELOW is the EXPECTED RESPONSE:
+         Message to evaluate:\n\"{}\"\n\
+         {}
+         YOU MUST RESPONSE IN BELOW FORMAT:
 
          **Overall Score**
          [ `★☆☆☆☆` ] **1 / 5**
 
-         > ⚠️ Response is incomplete and does not appropriately address the partner's comment about health.
+         > ⚠️ Your overall response
 
          ---
 
@@ -1804,21 +1951,15 @@ async fn db_evaluate_user_message(
 
          ---
 
-         ### 📝 Grammar Correction
+         ### 📝 Grammar
+          | Status | Grammar | Diagnosis |
+          |:---:|:---|:---|:---|
+          | ❌ | **何** | is not a grammatically complete response to the previous statement |
 
-         **Issue:** Incomplete Sentence / Fragment
-         The message `何` is not a grammatically complete response to the previous statement.
-
-         **Recommended Alternatives:**
+         ### 📝 Suggestion
 
          > ✅ **はい、気をつけます。**
          > *(Hai, ki o tsukemasu.)* — \"Yes, I will be careful.\"
-
-         > ✅ **わかりました。**
-         > *(Wakarimashita.)* — \"I understand.\"
-
-         > ✅ **ありがとうございます。**
-         > *(Arigatou gozaimasu.)* — \"Thank you.\"
 
          ---
 
@@ -1829,7 +1970,7 @@ async fn db_evaluate_user_message(
          - **Tables:** Use tables for error logging (Status, Word, Meaning, Fix) for quick scanning.
          - **Callouts:** Use blockquotes (`>`) for the score banner and warnings.
          - **Positive Examples:** Use green check emoji (`✅`) in a distinct block to clearly separate the **Error** from the **Fix**.",
-        lang_name, level_context, context_block, message_content
+        lang_name, level_context, context_block, message_content, target_words_section
     );
 
     let url = build_url(&api_host, "chat/completions");
@@ -1966,6 +2107,10 @@ pub fn run() {
             db_get_user_feedback,
             db_list_all_feedback,
             db_evaluate_user_message,
+            db_update_message_content,
+            db_deactivate_message_branch,
+            db_get_message_siblings,
+            db_get_bot_response_for_user,
             // Google Auth
             google_auth::google_sign_in,
             google_auth::google_sign_out,

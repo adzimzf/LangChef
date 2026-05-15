@@ -8,11 +8,16 @@ import type { JLPTLevel } from '../lib/jlpt'
 import UserMessageFeedback, { type UserFeedback } from '../components/UserMessageFeedback'
 import { Input } from 'antd'
 const { TextArea } = Input
-import { ArrowLeftOutlined, SendOutlined, InfoCircleOutlined, CloseOutlined, PlusOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, SendOutlined, InfoCircleOutlined, CloseOutlined, PlusOutlined, EditOutlined, LeftOutlined, RightOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 
-type Msg = { id: number | null, role: 'user' | 'assistant' | 'system', content: string }
+type Msg = { id: number | null, role: 'user' | 'assistant' | 'system', content: string, parentMessageId?: number | null, isActivePath?: boolean }
+
+type BranchPointInfo = {
+  siblings: Msg[]        // All sibling messages at this branch point
+  selectedIndex: number  // Index of the currently selected sibling
+}
 
 const LANGUAGES: Record<string, { label: string, flag: string }> = {
   ja: { label: 'Japanese', flag: '🇯🇵' },
@@ -122,6 +127,72 @@ function TypingIndicator() {
   )
 }
 
+/**
+ * Walk the message tree from root, following branchSelection at each branch point.
+ * Returns the ordered list of visible messages and metadata about branch points
+ * for rendering navigation UI.
+ */
+function computeVisiblePath(
+  messages: Msg[],
+  branchSelection: Map<number | null, number>
+): {
+  visibleMessages: Msg[]
+  branchPoints: Map<number | null, BranchPointInfo>
+} {
+  // Build children lookup: parentMessageId -> array of child messages
+  const childrenByParent = new Map<number | null, Msg[]>()
+  for (const m of messages) {
+    const key = m.parentMessageId ?? null
+    const children = childrenByParent.get(key) ?? []
+    children.push(m)
+    childrenByParent.set(key, children)
+  }
+
+  // Walk the tree from root
+  const visibleMessages: Msg[] = []
+  const branchPoints = new Map<number | null, BranchPointInfo>()
+  let currentParentId: number | null = null
+
+  while (true) {
+    const children = childrenByParent.get(currentParentId)
+    if (!children || children.length === 0) break
+
+    if (children.length === 1) {
+      // No branch point — just follow the single child
+      const selected = children[0]
+      visibleMessages.push(selected)
+      if (selected.id === null) break // unsaved message has no children yet
+      currentParentId = selected.id
+    } else {
+      // Branch point — multiple children share the same parent
+      // Determine which child to follow:
+      //   1. Check branchSelection for user override
+      //   2. Fall back to the child with isActivePath = true
+      //   3. Fall back to the first child
+      let selectedIndex = children.findIndex(c => c.isActivePath === true)
+      if (selectedIndex === -1) selectedIndex = 0
+
+      const overrideId = branchSelection.get(currentParentId)
+      if (overrideId !== undefined) {
+        const overrideIdx = children.findIndex(c => c.id === overrideId)
+        if (overrideIdx !== -1) selectedIndex = overrideIdx
+      }
+
+      branchPoints.set(currentParentId, {
+        siblings: children,
+        selectedIndex,
+      })
+
+      const selected = children[selectedIndex]
+      visibleMessages.push(selected)
+      if (selected.id === null) break
+      currentParentId = selected.id
+    }
+  }
+
+  return { visibleMessages, branchPoints }
+}
+
 export default function Chat() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
@@ -159,8 +230,16 @@ export default function Chat() {
   // Track whether component is mounted — prevents stale state updates after navigation
   const mounted = useRef(true)
   const [keyboardInset, setKeyboardInset] = useState(0)
+  // Branch selection: maps parentMessageId to the selected child message ID.
+  // Only stores user overrides; defaults come from isActivePath in the DB.
+  const [branchSelection, setBranchSelection] = useState<Map<number | null, number>>(new Map())
+  const [editingMessageId, setEditingMessageId] = useState<number | null>(null)
 
   const langInfo = LANGUAGES[lang]
+
+  // Compute visible path through the message tree
+  const { visibleMessages, branchPoints } = useMemo(() =>
+    computeVisiblePath(messages, branchSelection), [messages, branchSelection])
 
   // Selected grammar items (full objects) derived from selectedGrammar IDs
   const selectedGrammarItems = useMemo(() => {
@@ -259,8 +338,17 @@ export default function Chat() {
     async function load() {
       if (!sessionId) return
       try {
-        const res = await invoke<{ id: number, role: string, content: string, created_at: number }[]>('db_list_session_messages', { sessionId })
-        setMessages(res.map(m => ({ id: m.id, role: m.role as Msg['role'], content: m.content })))
+        const res = await invoke<{ id: number, role: string, content: string, created_at: number, parent_message_id: number | null, is_active_path: number }[]>('db_list_session_messages', { sessionId })
+        const msgs: Msg[] = res.map(m => ({
+          id: m.id,
+          role: m.role as Msg['role'],
+          content: m.content,
+          parentMessageId: m.parent_message_id,
+          isActivePath: m.is_active_path === 1,
+        }))
+        setMessages(msgs)
+        setBranchSelection(new Map())
+
         // Restore cached feedback for user messages
         for (const m of res) {
           if (m.role === 'user' && m.id) {
@@ -289,7 +377,11 @@ export default function Chat() {
           clearInterval(interval)
           clearLLMPending(sessionId)
           setLoading(false)
-          setMessages(res.map(m => ({ id: m.id, role: m.role as Msg['role'], content: m.content })))
+          setMessages(res.map(m => ({
+            id: m.id, role: m.role as Msg['role'], content: m.content,
+            parentMessageId: (m as any).parent_message_id ?? null,
+            isActivePath: (m as any).is_active_path !== 0,
+          })))
         }
       } catch {}
     }, 1500)
@@ -565,7 +657,7 @@ export default function Chat() {
     return [selected, nextIndex]
   }
 
-  function buildSSRSystemPrompt(): string {
+  function buildTargetWordsList(): string[] {
     const difficultArr = Array.from(difficult.keys())
     const knownArr = Array.from(known).filter(w => !difficult.has(w))
     // Shuffle known words so each rotation batch is random
@@ -573,16 +665,16 @@ export default function Chat() {
       const j = Math.floor(Math.random() * (i + 1))
       ;[knownArr[i], knownArr[j]] = [knownArr[j], knownArr[i]]
     }
-
-    // Use configured max difficult words count
     const maxWords = getMaxDifficultWords()
     const maxKnown = getMaxKnownWords()
-    // Rotate through words via FIFO queue instead of always taking first N
     const [selectedDifficult, nextDifficultIdx] = dequeueRotate(difficultArr, wordQueueIndex.current.difficult, maxWords)
     const [selectedKnown, nextKnownIdx] = dequeueRotate(knownArr, wordQueueIndex.current.known, maxKnown)
     // Advance queue positions for next message
     wordQueueIndex.current = { difficult: nextDifficultIdx, known: nextKnownIdx }
+    return [...selectedDifficult, ...selectedKnown]
+  }
 
+  function buildSSRSystemPrompt(targetWords: string[]): string {
     const langName = langInfo?.label || 'the target language'
 
     let prompt = `You are a language learning conversation partner. The target language is ${langName}. Reply in ${langName} only. `
@@ -604,14 +696,18 @@ export default function Chat() {
       prompt += `You MUST use ALL of them in your response. Weave them naturally into your sentences.\n`
     }
 
-    if (selectedDifficult.length > 0 || selectedKnown.length > 0) {
+    // Split targetWords back into difficult vs known using the original maps
+    const selectedDiff = targetWords.filter(w => difficult.has(w))
+    const selectedKn = targetWords.filter(w => !difficult.has(w))
+
+    if (selectedDiff.length > 0 || selectedKn.length > 0) {
       prompt += `\n\nCRITICAL SSR RULE — YOU MUST FOLLOW THIS:\n`
-      if (selectedDifficult.length > 0) {
-        prompt += `- DIFFICULT words (you MUST use ALL of these in your response): ${selectedDifficult.join(', ')}\n`
+      if (selectedDiff.length > 0) {
+        prompt += `- DIFFICULT words (you MUST use ALL of these in your response): ${selectedDiff.join(', ')}\n`
         prompt += `  These are words the learner is struggling with. Using them reinforces memory. Do NOT skip any.\n`
       }
-      if (selectedKnown.length > 0) {
-        prompt += `- KNOWN words (use at least half of these to maintain retention): ${selectedKnown.join(', ')}\n`
+      if (selectedKn.length > 0) {
+        prompt += `- KNOWN words (use at least half of these to maintain retention): ${selectedKn.join(', ')}\n`
       }
       prompt += `\nWeave these naturally into your sentences. Do NOT list them explicitly. Each difficult word MUST appear at least once in your response.`
     }
@@ -627,6 +723,19 @@ export default function Chat() {
     return prompt
   }
 
+  /**
+   * Check if the user's message contains any of the target words.
+   * For Japanese, uses simple includes check (Lindera base forms not easily accessible here).
+   * For other languages, uses word boundary matching.
+   */
+  function checkTargetWordUsage(message: string, targetWords: string[]): boolean {
+    if (lang === 'ja') {
+      return targetWords.some(tw => message.toLowerCase().includes(tw.toLowerCase()))
+    }
+    const words = message.toLowerCase().split(/\s+/)
+    return targetWords.some(tw => words.includes(tw.toLowerCase()))
+  }
+
   async function send(message?: string) {
     const msg = message?.trim() || input.trim()
     if (!msg) return
@@ -636,10 +745,14 @@ export default function Chat() {
         setSessionId(id)
       } catch {}
     }
-    const user: Msg = { id: null, role: 'user', content: msg }
+    // Capture target words BEFORE building prompt (queue advances in buildTargetWordsList)
+    const targetWords = buildTargetWordsList()
+    // Find parent for user message: last assistant message ID (or null for first message)
+    const userParentId = [...visibleMessages].reverse().find(m => m.role === 'assistant' && m.id)?.id ?? null
+    const user: Msg = { id: null, role: 'user', content: msg, parentMessageId: userParentId, isActivePath: true }
     const nextMessages = [...messages, user]
     setMessages(nextMessages)
-    const userId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'user', content: user.content }).catch(() => -1)
+    const userId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'user', content: user.content, parentMessageId: userParentId }).catch(() => -1)
     if (userId >= 0) {
       setMessages(prev => prev.map((m, idx) => idx === nextMessages.length - 1 ? { ...m, id: userId } : m))
     }
@@ -648,7 +761,8 @@ export default function Chat() {
     if (userId >= 0 && apiHost && apiKey && !/^talk about /i.test(msg)) {
       setFeedbackMap(prev => new Map(prev).set(userId, { messageId: userId, score: 0, feedback: '', loading: true }))
       // Build context from previous messages (exclude the current one being evaluated)
-      const contextMsgs = nextMessages.slice(0, -1).map(m => ({ role: m.role as string, content: m.content }))
+      const { visibleMessages: feedbackVisible } = computeVisiblePath(nextMessages.slice(0, -1), branchSelection)
+      const contextMsgs = feedbackVisible.map(m => ({ role: m.role as string, content: m.content }))
       invoke<UserFeedback>('db_evaluate_user_message', {
         apiHost, apiKey, model,
         messageId: userId,
@@ -656,8 +770,11 @@ export default function Chat() {
         language: lang || '',
         level: lang === 'ja' ? jlptLevel : '',
         contextMessages: contextMsgs,
+        targetWords,
       }).then(fb => {
-        setFeedbackMap(prev => { const next = new Map(prev); next.set(userId, { ...fb, messageId: userId, loading: false }); return next })
+        const userUsedAnyTarget = checkTargetWordUsage(msg, targetWords)
+        const finalScore = (!userUsedAnyTarget && targetWords.length > 0) ? 0 : fb.score
+        setFeedbackMap(prev => { const next = new Map(prev); next.set(userId, { ...fb, messageId: userId, score: finalScore, loading: false }); return next })
       }).catch(() => {
         setFeedbackMap(prev => { const next = new Map(prev); const existing = next.get(userId); if (existing?.loading) next.delete(userId); return next })
       })
@@ -673,13 +790,14 @@ export default function Chat() {
       // Mark LLM as pending so typing indicator persists across navigation
       if (sessionId) setLLMPending(sessionId)
       try {
-        // Build SSR system prompt
-        const systemPrompt = buildSSRSystemPrompt()
+        // Build SSR system prompt using the same target words
+        const systemPrompt = buildSSRSystemPrompt(targetWords)
 
-        // Send full conversation history with system prompt
+        // Send visible conversation history with system prompt
+        const { visibleMessages: contextVisible } = computeVisiblePath(nextMessages, branchSelection)
         const llmMessages = [
           { role: 'system' as const, content: systemPrompt },
-          ...nextMessages.map(m => ({ role: m.role as string, content: m.content })),
+          ...contextVisible.map(m => ({ role: m.role as string, content: m.content })),
         ]
 
         const res = await invoke<string>('llm_chat', {
@@ -695,11 +813,13 @@ export default function Chat() {
           : res
 
         // Always save assistant response to DB so it persists across navigation
-        const assistantId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: annotatedRes }).catch(() => -1)
+        // Parent of assistant message is the user message it responds to
+        const assistantParentId = userId >= 0 ? userId : null
+        const assistantId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: annotatedRes, parentMessageId: assistantParentId }).catch(() => -1)
 
         // Only update React state if component is still mounted
         if (mounted.current) {
-          const assistant: Msg = { id: null, role: 'assistant', content: annotatedRes }
+          const assistant: Msg = { id: null, role: 'assistant', content: annotatedRes, parentMessageId: assistantParentId, isActivePath: true }
           const targetIdx = nextMessages.length
           setMessages(prev => [...prev, assistant])
           if (assistantId >= 0) {
@@ -711,11 +831,12 @@ export default function Chat() {
 
         // Always save error to DB for persistence
         const errorContent = `[Error] ${errMsg}`
-        const errorId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: errorContent }).catch(() => -1)
+        const errorParentId = userId >= 0 ? userId : null
+        const errorId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: errorContent, parentMessageId: errorParentId }).catch(() => -1)
 
         // Only update React state if component is still mounted
         if (mounted.current) {
-          const errorMsg: Msg = { id: null, role: 'assistant', content: errorContent }
+          const errorMsg: Msg = { id: null, role: 'assistant', content: errorContent, parentMessageId: errorParentId, isActivePath: true }
           const errorIdx = nextMessages.length
           setMessages(prev => [...prev, errorMsg])
           if (errorId >= 0) {
@@ -728,13 +849,152 @@ export default function Chat() {
       }
     } else {
       const fallback = `Let's talk about it. Which parts feel tricky for you? Try rephrasing in the target language.`
-      const fallbackMsg: Msg = { id: null, role: 'assistant', content: fallback }
+      const fallbackParentId = userId >= 0 ? userId : null
+      const fallbackMsg: Msg = { id: null, role: 'assistant', content: fallback, parentMessageId: fallbackParentId, isActivePath: true }
       const fallbackIdx = nextMessages.length
       setMessages(prev => [...prev, fallbackMsg])
-      const fallbackId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: fallback }).catch(() => -1)
+      const fallbackId = await invoke<number>('db_add_message_in_session', { sessionId, role: 'assistant', content: fallback, parentMessageId: fallbackParentId }).catch(() => -1)
       if (fallbackId >= 0) {
         setMessages(prev => prev.map((m, idx) => idx === fallbackIdx ? { ...m, id: fallbackId } : m))
       }
+    }
+  }
+
+  async function handleEditSave(m: Msg) {
+    if (!m.id || !input.trim()) return
+    const newContent = input.trim()
+
+    // 1. Deactivate old branch (old user msg + its bot response + descendants)
+    await invoke('db_deactivate_message_branch', { messageId: m.id })
+
+    // 1b. Update React state: mark deactivated messages as inactive
+    // Collect all message IDs that should be deactivated (the edited msg + its descendants)
+    const toDeactivate = new Set<number>()
+    toDeactivate.add(m.id!)
+    // Find children of the deactivated message in current state
+    const findDescendants = (parentId: number) => {
+      for (const msg of messages) {
+        if (msg.parentMessageId === parentId && msg.id) {
+          toDeactivate.add(msg.id)
+          findDescendants(msg.id)
+        }
+      }
+    }
+    findDescendants(m.id!)
+    setMessages(prev => prev.map(msg =>
+      msg.id && toDeactivate.has(msg.id) ? { ...msg, isActivePath: false } : msg
+    ))
+
+    // 2. Find the parent of the old user message (for the tree link)
+    const parentMsgId = m.parentMessageId ?? null
+
+    // 3. Add the edited user message as a new active message in the tree
+    const editedMsg: Msg = { id: null, role: 'user', content: newContent, parentMessageId: parentMsgId, isActivePath: true }
+    setMessages(prev => [...prev, editedMsg])
+
+    const editedId = await invoke<number>('db_add_message_in_session', {
+      sessionId, role: 'user', content: newContent, parentMessageId: parentMsgId
+    }).catch(() => -1)
+
+    if (editedId >= 0) {
+      setMessages(prev => prev.map((msg, idx) =>
+        idx === prev.length - 1 ? { ...msg, id: editedId } : msg
+      ))
+      // Update branch selection to point to the new message
+      setBranchSelection(prev => {
+        const next = new Map(prev)
+        next.set(parentMsgId, editedId)
+        return next
+      })
+    }
+
+    setEditingMessageId(null)
+    setInput('')
+
+    // 4. Re-trigger LLM chat + feedback
+    setLoading(true)
+    if (sessionId) setLLMPending(sessionId)
+
+    const targetWords = buildTargetWordsList()
+    const systemPrompt = buildSSRSystemPrompt(targetWords)
+
+    // Build conversation history: visible path including the edited message
+    const tempMessages = [...messages.filter(msg => !toDeactivate.has(msg.id ?? -1)), editedMsg]
+    const { visibleMessages: contextVisible } = computeVisiblePath(tempMessages, branchSelection)
+    const llmMessages = [
+      { role: 'system' as const, content: systemPrompt },
+      ...contextVisible.map(msg => ({ role: msg.role as string, content: msg.content })),
+    ]
+
+    try {
+      const res = await invoke<string>('llm_chat', { apiHost, apiKey, model, messages: llmMessages })
+      const annotatedRes = lang === 'ja'
+        ? await invoke<string>('add_furigana', { text: res, language: lang })
+        : res
+
+      // Bot response's parent is the edited user message
+      const assistantId = await invoke<number>('db_add_message_in_session', {
+        sessionId, role: 'assistant', content: annotatedRes, parentMessageId: editedId >= 0 ? editedId : null
+      }).catch(() => -1)
+
+      if (mounted.current) {
+        const assistant: Msg = { id: null, role: 'assistant', content: annotatedRes, parentMessageId: editedId >= 0 ? editedId : null, isActivePath: true }
+        setMessages(prev => [...prev, assistant])
+        if (assistantId >= 0) {
+          setMessages(prev => prev.map((msg, idx) =>
+            idx === prev.length - 1 ? { ...msg, id: assistantId } : msg
+          ))
+        }
+      }
+
+      // Re-evaluate feedback for the edited message
+      if (editedId >= 0 && apiHost && apiKey) {
+        const fbId = editedId
+        setFeedbackMap(prev => new Map(prev).set(fbId, { messageId: fbId, score: 0, feedback: '', loading: true }))
+        const contextMsgs = contextVisible.filter(m => m.id !== null).map(msg => ({ role: msg.role as string, content: msg.content }))
+        invoke<UserFeedback>('db_evaluate_user_message', {
+          apiHost, apiKey, model,
+          messageId: fbId,
+          messageContent: newContent,
+          language: lang || '',
+          level: lang === 'ja' ? jlptLevel : '',
+          contextMessages: contextMsgs,
+          targetWords,
+        }).then(fb => {
+          const userUsedAnyTarget = checkTargetWordUsage(newContent, targetWords)
+          const finalScore = (!userUsedAnyTarget && targetWords.length > 0) ? 0 : fb.score
+          setFeedbackMap(prev => {
+            const next = new Map(prev)
+            next.set(fbId, { ...fb, messageId: fbId, score: finalScore, loading: false })
+            return next
+          })
+        }).catch(() => {
+          setFeedbackMap(prev => {
+            const next = new Map(prev)
+            const existing = next.get(fbId)
+            if (existing?.loading) next.delete(fbId)
+            return next
+          })
+        })
+      }
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e)
+      const errorContent = `[Error] ${errMsg}`
+      const errorId = await invoke<number>('db_add_message_in_session', {
+        sessionId, role: 'assistant', content: errorContent, parentMessageId: editedId >= 0 ? editedId : null
+      }).catch(() => -1)
+      if (mounted.current) {
+        const errorMsg: Msg = { id: null, role: 'assistant', content: errorContent, parentMessageId: editedId >= 0 ? editedId : null, isActivePath: true }
+        setMessages(prev => [...prev, errorMsg])
+        if (errorId >= 0) {
+          setMessages(prev => prev.map((msg, idx) =>
+            idx === prev.length - 1 ? { ...msg, id: errorId } : msg
+          ))
+        }
+      }
+    } finally {
+      if (sessionId) clearLLMPending(sessionId)
+      if (mounted.current) setLoading(false)
     }
   }
 
@@ -1065,37 +1325,138 @@ export default function Chat() {
             </div>
           </div>
         )}
-        {messages.map((m, i) => (
-          <div key={i} className={`flex mb-2 ${m.role === 'user' ? 'justify-end flex-col items-end' : 'justify-start'}`}>
-            <div
-              className={`
-                max-w-[80%] px-3 py-2 text-[15px] leading-relaxed
-                ${m.role === 'user'
-                  ? 'bg-blue-500 text-white rounded-2xl rounded-br-md'
-                  : 'bg-white text-gray-800 rounded-2xl rounded-bl-md shadow-sm'
-                }
-              `}
-            >
-              {m.role === 'assistant' ? (
-                <div>
-                  {renderAssistantContent(m.content, m.id)}
-                  <button
-                    onClick={() => handleGrammarAnalysis(m.id, m.content)}
-                    disabled={m.id === null || grammarAnalysisLoading === m.id}
-                    className="mt-1 text-gray-400 hover:text-indigo-500 transition-colors disabled:opacity-30"
-                    title="Analyze grammar"
-                  >
-                    <InfoCircleOutlined style={{ fontSize: 14 }} />
-                    {grammarAnalysisLoading === m.id && <span className="ml-1 text-xs text-gray-400">analyzing...</span>}
-                  </button>
-                </div>
-              ) : m.content}
-            </div>
+        {visibleMessages.map((m, i) => {
+          // Check if this message is at a branch point
+          const parentKey = m.parentMessageId ?? null
+          const branchPoint = branchPoints.get(parentKey)
+          const isAtBranchPoint = !!branchPoint && branchPoint.siblings.length > 1
 
-            {/* Feedback badge for user messages */}
-            {m.role === 'user' && <UserMessageFeedback feedback={m.id ? feedbackMap.get(m.id) : undefined} />}
-          </div>
-        ))}
+          // For user messages at a branch point, render with arrow navigation
+          if (m.role === 'user' && isAtBranchPoint && branchPoint) {
+            const { siblings, selectedIndex } = branchPoint
+            const hasOlder = selectedIndex > 0
+            const hasNewer = selectedIndex < siblings.length - 1
+            const isActiveVersion = m.isActivePath !== false
+
+            return (
+              <div key={m.id ?? `unsaved-${i}`}>
+                <div className="flex mb-2 justify-end flex-col items-end">
+                  {/* Arrow navigation for branch siblings */}
+                  <div className="flex items-center gap-1 mb-0.5">
+                    <button
+                      onClick={() => {
+                        if (hasOlder) {
+                          const olderSibling = siblings[selectedIndex - 1]
+                          setBranchSelection(prev => new Map(prev).set(parentKey, olderSibling.id!))
+                        }
+                      }}
+                      disabled={!hasOlder}
+                      className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
+                        hasOlder ? 'text-blue-400 hover:text-blue-200' : 'text-gray-500 cursor-not-allowed'
+                      }`}
+                      title="Older version"
+                    >
+                      <RightOutlined style={{ fontSize: 9 }} />
+                    </button>
+                    <span className="text-[9px] text-blue-300/70">edited {selectedIndex + 1}/{siblings.length}</span>
+                    <button
+                      onClick={() => {
+                        if (hasNewer) {
+                          const newerSibling = siblings[selectedIndex + 1]
+                          setBranchSelection(prev => new Map(prev).set(parentKey, newerSibling.id!))
+                        }
+                      }}
+                      disabled={!hasNewer}
+                      className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
+                        hasNewer ? 'text-blue-400 hover:text-blue-200' : 'text-gray-500 cursor-not-allowed'
+                      }`}
+                      title="Newer version"
+                    >
+                      <LeftOutlined style={{ fontSize: 9 }} />
+                    </button>
+                  </div>
+                  <div
+                    className={`max-w-[80%] px-3 py-2 text-[15px] leading-relaxed ${
+                      isActiveVersion
+                        ? 'bg-blue-500 text-white rounded-2xl rounded-br-md'
+                        : 'bg-blue-300 text-white rounded-2xl rounded-br-md opacity-80'
+                    }`}
+                  >
+                    {m.content}
+                  </div>
+
+                  {/* Edit button + Feedback badge */}
+                  <div className="flex items-center gap-1">
+                    {m.id && !loading && isActiveVersion && (
+                      <button
+                        onClick={() => {
+                          setEditingMessageId(m.id)
+                          setInput('')
+                          setTimeout(() => inputRef.current?.focus(), 0)
+                        }}
+                        className="mt-1 text-blue-300 hover:text-blue-100 transition-colors"
+                        title="Edit message"
+                      >
+                        <EditOutlined style={{ fontSize: 12 }} />
+                      </button>
+                    )}
+                    <UserMessageFeedback feedback={m.id ? feedbackMap.get(m.id) : undefined} />
+                  </div>
+                </div>
+              </div>
+            )
+          }
+
+          // Normal message rendering (not at a branch point, or assistant message)
+          return (
+            <div key={m.id ?? `unsaved-${i}`} className={`flex mb-2 ${m.role === 'user' ? 'justify-end flex-col items-end' : 'justify-start'}`}>
+              <div
+                className={`
+                  max-w-[80%] px-3 py-2 text-[15px] leading-relaxed
+                  ${m.role === 'user'
+                    ? 'bg-blue-500 text-white rounded-2xl rounded-br-md'
+                    : 'bg-white text-gray-800 rounded-2xl rounded-bl-md shadow-sm'
+                  }
+                `}
+              >
+                {m.role === 'assistant' ? (
+                  <div>
+                    {renderAssistantContent(m.content, m.id)}
+                    <button
+                      onClick={() => handleGrammarAnalysis(m.id, m.content)}
+                      disabled={m.id === null || grammarAnalysisLoading === m.id}
+                      className="mt-1 text-gray-400 hover:text-indigo-500 transition-colors disabled:opacity-30"
+                      title="Analyze grammar"
+                    >
+                      <InfoCircleOutlined style={{ fontSize: 14 }} />
+                      {grammarAnalysisLoading === m.id && <span className="ml-1 text-xs text-gray-400">analyzing...</span>}
+                    </button>
+                  </div>
+                ) : m.content}
+              </div>
+
+              {/* Edit button + Feedback badge for user messages */}
+              {m.role === 'user' && (
+                <div className="flex items-center gap-1">
+                  {m.id && !loading && (
+                    <button
+                      onClick={() => {
+                        setEditingMessageId(m.id)
+                        setInput('')
+                        setTimeout(() => inputRef.current?.focus(), 0)
+                      }}
+                      className="mt-1 text-blue-300 hover:text-blue-100 transition-colors"
+                      title="Edit message"
+                    >
+                      <EditOutlined style={{ fontSize: 12 }} />
+                    </button>
+                  )}
+                  <UserMessageFeedback feedback={m.id ? feedbackMap.get(m.id) : undefined} />
+                </div>
+              )}
+            </div>
+          )
+        })}
         {loading && <TypingIndicator />}
       </div>
 
@@ -1104,19 +1465,48 @@ export default function Chat() {
         className="shrink-0 bg-white border-t px-3 py-2 safe-bottom mb-1"
         style={{ paddingBottom: `calc(env(safe-area-inset-bottom, 0px) + ${keyboardInset}px)` }}
       >
+        {editingMessageId && (
+          <div className="flex items-center gap-2 mb-1">
+            <span className="text-[10px] font-semibold text-blue-500 uppercase tracking-wider">Edit</span>
+            <button
+              onClick={() => { setEditingMessageId(null); setInput('') }}
+              className="text-[10px] text-gray-400 hover:text-gray-600 transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
         <div className="flex items-end gap-2">
           <TextArea
             ref={inputRef}
             value={input}
             onChange={(e) => setInput(e.target.value)}
-            placeholder={`Type in ${langInfo?.label || 'target language'}...`}
+            placeholder={editingMessageId ? 'Retype your message using target words...' : `Type in ${langInfo?.label || 'target language'}...`}
             className="flex-1 rounded-2xl bg-gray-100 border-none"
             style={{ borderRadius: 20, padding: '8px 16px', resize: 'none' }}
             autoSize={{ minRows: 1, maxRows: 4 }}
             disabled={loading}
+            onPressEnter={(e) => {
+              if (!e.shiftKey) {
+                e.preventDefault()
+                if (editingMessageId) {
+                  const editMsg = messages.find(m => m.id === editingMessageId)
+                  if (editMsg) handleEditSave(editMsg)
+                } else {
+                  send()
+                }
+              }
+            }}
           />
           <button
-            onClick={() => send()}
+            onClick={() => {
+              if (editingMessageId) {
+                const editMsg = messages.find(m => m.id === editingMessageId)
+                if (editMsg) handleEditSave(editMsg)
+              } else {
+                send()
+              }
+            }}
             disabled={!input.trim() || loading}
             className={`
               flex items-center justify-center w-10 h-10 rounded-full shrink-0 transition-colors
