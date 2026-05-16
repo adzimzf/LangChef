@@ -5,33 +5,17 @@ import {
   ArrowLeftOutlined,
   EditOutlined,
   DeleteOutlined,
-  CheckOutlined,
   CloseOutlined,
   FilterOutlined,
   SortAscendingOutlined,
   SortDescendingOutlined,
-  RobotOutlined,
   SearchOutlined,
-  BulbOutlined,
 } from '@ant-design/icons'
 import { difficultyColor, difficultyBgClass, stateLabel } from '../lib/srs'
 import type { CardState } from '../lib/srs'
-
-type ReviewItem = {
-  id: string
-  content: string
-  EF: number
-  I: number
-  R: number
-  state: string
-  step: number
-  lapse_count: number
-  next_review: number | null
-  tags: string | null
-  language: string | null
-  detail: string | null
-  mnemonic: string | null
-}
+import type { ReviewItem } from '../lib/types'
+import { parseDetailJson } from '../lib/types'
+import EditWordForm from '../components/EditWordForm'
 
 const PAGE_SIZE = 20
 
@@ -99,18 +83,6 @@ function easeScore(EF: number, R: number): number {
   return 0.6 * efNorm + 0.4 * rNorm
 }
 
-function parseDetailJson(detail: string): {
-  reading?: string; meaning?: string; part_of_speech?: string; example?: string; example_meaning?: string
-} | null {
-  try {
-    const match = detail.match(/\{[\s\S]*\}/)
-    if (!match) return null
-    return JSON.parse(match[0])
-  } catch {
-    return null
-  }
-}
-
 export default function WordsList() {
   const navigate = useNavigate()
 
@@ -137,18 +109,6 @@ export default function WordsList() {
 
   // Edit state
   const [editingId, setEditingId] = useState<string | null>(null)
-  const [editContent, setEditContent] = useState('')
-  const [editDetail, setEditDetail] = useState('')
-  const [generatingDetail, setGeneratingDetail] = useState(false)
-  // Structured detail form fields
-  const [editReading, setEditReading] = useState('')
-  const [editMeaning, setEditMeaning] = useState('')
-  const [editPartOfSpeech, setEditPartOfSpeech] = useState('')
-  const [editExample, setEditExample] = useState('')
-  const [editExampleMeaning, setEditExampleMeaning] = useState('')
-  const [editMnemonic, setEditMnemonic] = useState('')
-  const [generatingMnemonic, setGeneratingMnemonic] = useState(false)
-  const [saveError, setSaveError] = useState<string | null>(null)
 
   // Delete confirmation
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -251,138 +211,6 @@ export default function WordsList() {
     }
   }
 
-  function startEdit(item: ReviewItem) {
-    setEditingId(item.id)
-    setEditContent(item.content)
-    setEditDetail(item.detail || '')
-    // Parse detail into form fields
-    const parsed = item.detail ? parseDetailJson(item.detail) : null
-    setEditReading(parsed?.reading || '')
-    setEditMeaning(parsed?.meaning || '')
-    setEditPartOfSpeech(parsed?.part_of_speech || '')
-    setEditExample(parsed?.example || '')
-    setEditExampleMeaning(parsed?.example_meaning || '')
-    setEditMnemonic(item.mnemonic || '')
-  }
-
-  /** Serialize form fields back to a detail JSON string */
-  function serializeDetail(): string {
-    const obj: Record<string, string> = {}
-    if (editReading) obj.reading = editReading
-    if (editMeaning) obj.meaning = editMeaning
-    if (editPartOfSpeech) obj.part_of_speech = editPartOfSpeech
-    if (editExample) obj.example = editExample
-    if (editExampleMeaning) obj.example_meaning = editExampleMeaning
-    return Object.keys(obj).length > 0 ? JSON.stringify(obj) : ''
-  }
-
-  async function generateDetail() {
-    if (!editingId) return
-    const item = allItems.find((i) => i.id === editingId)
-    if (!item) return
-    const apiHost = localStorage.getItem('api_host') || ''
-    const apiKey = localStorage.getItem('api_key') || ''
-    const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
-    if (!apiHost || !apiKey) {
-      alert('Please configure your API settings first (Settings page).')
-      return
-    }
-    setGeneratingDetail(true)
-    try {
-      const lang = item.language || 'ja'
-      const result = await invoke<string>('db_generate_detail', {
-        apiHost, apiKey, model,
-        content: item.content,
-        language: lang,
-      })
-      setEditDetail(result)
-      // Parse into form fields
-      const parsed = parseDetailJson(result)
-      setEditReading(parsed?.reading || '')
-      setEditMeaning(parsed?.meaning || '')
-      setEditPartOfSpeech(parsed?.part_of_speech || '')
-      setEditExample(parsed?.example || '')
-      setEditExampleMeaning(parsed?.example_meaning || '')
-      // Update local state
-      setAllItems((prev) =>
-        prev.map((i) => (i.id === editingId ? { ...i, detail: result } : i))
-      )
-    } catch (e) {
-      alert(`Failed to generate: ${e}`)
-    }
-    setGeneratingDetail(false)
-  }
-
-  async function generateMnemonic() {
-    if (!editingId) return
-    const item = allItems.find((i) => i.id === editingId)
-    if (!item) return
-    const apiHost = localStorage.getItem('api_host') || ''
-    const apiKey = localStorage.getItem('api_key') || ''
-    const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
-    if (!apiHost || !apiKey) {
-      alert('Please configure your API settings first (Settings page).')
-      return
-    }
-    setGeneratingMnemonic(true)
-    try {
-      const lang = item.language || 'ja'
-      const result = await invoke<string>('db_generate_mnemonic', {
-        apiHost, apiKey, model,
-        id: item.id,
-        content: item.content,
-        language: lang,
-        detail: item.detail,
-      })
-      setEditMnemonic(result)
-      setAllItems((prev) =>
-        prev.map((i) => (i.id === editingId ? { ...i, mnemonic: result } : i))
-      )
-    } catch (e) {
-      alert(`Failed to generate mnemonic: ${e}`)
-    }
-    setGeneratingMnemonic(false)
-  }
-
-  async function saveEdit() {
-    if (!editingId) return
-    setSaveError(null)
-    try {
-      const detailValue = serializeDetail()
-      // Update content - only if changed and non-empty
-      if (editContent.trim()) {
-        await invoke('db_update_review_item', {
-          item: { id: editingId, content: editContent.trim() },
-        })
-      }
-      // Update detail
-      await invoke('db_update_review_detail', { id: editingId, detail: detailValue })
-      // Update mnemonic
-      await invoke('db_update_mnemonic', { id: editingId, mnemonic: editMnemonic })
-      // Refetch from DB to ensure consistency
-      await loadItems()
-      // Go to detail view
-      setSelectedId(editingId)
-      setEditingId(null)
-    } catch (e: any) {
-      const msg = typeof e === 'string' ? e : e?.message || String(e)
-      setSaveError(msg)
-    }
-  }
-
-  function cancelEdit() {
-    setEditingId(null)
-    setEditContent('')
-    setEditDetail('')
-    setEditReading('')
-    setEditMeaning('')
-    setEditPartOfSpeech('')
-    setEditExample('')
-    setEditExampleMeaning('')
-    setEditMnemonic('')
-    setSaveError(null)
-  }
-
   // Get available languages from data
   const availableLangs = useMemo(() => {
     const langs = new Set(allItems.map((i) => i.language).filter(Boolean) as string[])
@@ -455,7 +283,7 @@ export default function WordsList() {
           </button>
           <h2 className="text-lg font-semibold flex-1">Word Detail</h2>
           <button
-            onClick={() => startEdit(selectedItem)}
+            onClick={() => setEditingId(selectedItem.id)}
             className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-blue-50 text-blue-600 text-sm font-medium hover:bg-blue-100 transition-colors"
           >
             <EditOutlined /> Edit
@@ -562,153 +390,28 @@ export default function WordsList() {
   // ─── Edit view (full screen overlay) ─────────────────────────────────
   if (editingId) {
     const item = allItems.find((i) => i.id === editingId)
-    const hasDetail = editReading || editMeaning || editPartOfSpeech || editExample || editExampleMeaning || editDetail
-
+    if (!item) {
+      setEditingId(null)
+      return null
+    }
     return (
-      <div className="flex flex-col h-full -m-4">
-        <div className="shrink-0 sticky top-0 z-10 bg-gray-50 flex items-center gap-3 px-4 pt-4 pb-2">
-          <button
-            onClick={cancelEdit}
-            className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
-          >
-            <ArrowLeftOutlined />
-          </button>
-          <h2 className="text-lg font-semibold">Edit Word</h2>
-        </div>
-
-        <div className="space-y-4 flex-1 overflow-y-auto px-4">
-          <div>
-            <label className="text-sm text-gray-500 mb-1 block">Content</label>
-            <input
-              type="text"
-              value={editContent}
-              onChange={(e) => setEditContent(e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-xl outline-none focus:border-blue-400"
-              placeholder="Word or phrase"
-            />
-          </div>
-
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-sm text-gray-500">Detail</label>
-              {!hasDetail && (
-                <button
-                  onClick={generateDetail}
-                  disabled={generatingDetail}
-                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-500 text-white text-xs font-medium hover:bg-blue-600 transition-colors disabled:opacity-50"
-                >
-                  <RobotOutlined />
-                  {generatingDetail ? 'Generating...' : 'Generate with AI'}
-                </button>
-              )}
-            </div>
-
-            {hasDetail ? (
-              /* Structured form fields for editing detail */
-              <div className="space-y-3 bg-gray-50 rounded-xl p-3">
-                <div>
-                  <label className="text-xs text-gray-400 block mb-0.5">Reading</label>
-                  <input
-                    type="text"
-                    value={editReading}
-                    onChange={(e) => setEditReading(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white"
-                    placeholder="Pronunciation in IPA or romaji"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-400 block mb-0.5">Meaning</label>
-                  <input
-                    type="text"
-                    value={editMeaning}
-                    onChange={(e) => setEditMeaning(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white"
-                    placeholder="English translation"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-400 block mb-0.5">Part of speech</label>
-                  <input
-                    type="text"
-                    value={editPartOfSpeech}
-                    onChange={(e) => setEditPartOfSpeech(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white"
-                    placeholder="noun / verb / adjective / etc."
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-400 block mb-0.5">Example sentence</label>
-                  <textarea
-                    value={editExample}
-                    onChange={(e) => setEditExample(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white resize-none"
-                    placeholder="A natural example sentence"
-                    rows={2}
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-400 block mb-0.5">Example meaning</label>
-                  <textarea
-                    value={editExampleMeaning}
-                    onChange={(e) => setEditExampleMeaning(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white resize-none"
-                    placeholder="English translation of the example"
-                    rows={2}
-                  />
-                </div>
-                <div>
-                  <div className="flex items-center justify-between mb-0.5">
-                    <label className="text-xs text-gray-400">Mnemonic</label>
-                    <button
-                      onClick={generateMnemonic}
-                      disabled={generatingMnemonic}
-                      className="flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-50 text-amber-600 text-xs font-medium hover:bg-amber-100 transition-colors disabled:opacity-50"
-                    >
-                      <BulbOutlined />
-                      {generatingMnemonic ? 'Creating...' : 'Generate'}
-                    </button>
-                  </div>
-                  <textarea
-                    value={editMnemonic}
-                    onChange={(e) => setEditMnemonic(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white resize-none"
-                    placeholder="A memory aid connecting to words you already know"
-                    rows={2}
-                  />
-                </div>
-                <button
-                  onClick={generateDetail}
-                  disabled={generatingDetail}
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-gray-200 text-gray-600 text-xs font-medium hover:bg-gray-300 transition-colors disabled:opacity-50"
-                >
-                  <RobotOutlined />
-                  {generatingDetail ? 'Regenerating...' : 'Regenerate with AI'}
-                </button>
-              </div>
-            ) : (
-              /* Empty state */
-              <div className="bg-gray-50 rounded-xl p-6 text-center">
-                <p className="text-sm text-gray-400 mb-1">No detail yet</p>
-                <p className="text-xs text-gray-300">Click "Generate with AI" above or fill in the content and save first.</p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="shrink-0 px-4 pt-2 pb-4 bg-gray-50">
-          {saveError && (
-            <div className="mb-2 p-2.5 rounded-xl bg-red-50 border border-red-100 text-red-700 text-sm">
-              {saveError}
-            </div>
-          )}
-          <button
-            onClick={saveEdit}
-            className="w-full py-3 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600 active:bg-blue-700 transition-colors flex items-center justify-center gap-2"
-          >
-            <CheckOutlined /> Save
-          </button>
-        </div>
-      </div>
+      <EditWordForm
+        item={item}
+        title="Edit Word"
+        onCancel={() => setEditingId(null)}
+        onSave={async (data) => {
+          if (data.content) {
+            await invoke('db_update_review_item', {
+              item: { id: editingId, content: data.content },
+            })
+          }
+          await invoke('db_update_review_detail', { id: editingId, detail: data.detail })
+          await invoke('db_update_mnemonic', { id: editingId, mnemonic: data.mnemonic })
+          await loadItems()
+          setSelectedId(editingId)
+          setEditingId(null)
+        }}
+      />
     )
   }
 
@@ -990,7 +693,7 @@ export default function WordsList() {
                     ) : (
                       <>
                         <button
-                          onClick={() => startEdit(item)}
+                          onClick={() => setEditingId(item.id)}
                           className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-blue-500 hover:bg-blue-50 transition-colors"
                           title="Edit"
                         >

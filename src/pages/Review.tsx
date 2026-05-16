@@ -15,27 +15,13 @@ import {
   ReloadOutlined,
   RobotOutlined,
   EditOutlined,
-  CheckOutlined,
   CloseOutlined,
   SettingOutlined,
   BulbOutlined,
 } from '@ant-design/icons'
-
-type ReviewItem = {
-  id: string
-  content: string
-  EF: number
-  I: number
-  R: number
-  state: string
-  step: number
-  lapse_count: number
-  next_review: number | null
-  tags: string | null
-  language: string | null
-  detail: string | null
-  mnemonic: string | null
-}
+import type { ReviewItem } from '../lib/types'
+import { parseDetailJson } from '../lib/types'
+import EditWordForm from '../components/EditWordForm'
 
 const LANGUAGES: Record<string, { label: string; flag: string }> = {
   ja: { label: 'Japanese', flag: '\u{1F1EF}\u{1F1F5}' },
@@ -86,16 +72,6 @@ function incrementNewCardsToday() {
 // Grade button config
 type GradeOption = { grade: Grade; label: string; nextLabel: string; color: string }
 
-function parseDetailJson(detail: string): { reading?: string; meaning?: string; part_of_speech?: string; example?: string; example_meaning?: string } | null {
-  try {
-    const match = detail.match(/\{[\s\S]*\}/)
-    if (!match) return null
-    return JSON.parse(match[0])
-  } catch {
-    return null
-  }
-}
-
 /**
  * Convert a ReviewItem (from DB) into the Card shape expected by srs.ts
  */
@@ -125,8 +101,7 @@ export default function Review() {
   const [generatingDetail, setGeneratingDetail] = useState(false)
   const [generatingMnemonic, setGeneratingMnemonic] = useState(false)
   const [showMnemonic, setShowMnemonic] = useState(false)
-  const [editingDetail, setEditingDetail] = useState<string | null>(null)
-  const [editDetailText, setEditDetailText] = useState('')
+  const [editingId, setEditingId] = useState<string | null>(null)
   const [showImport, setShowImport] = useState(false)
   const [importText, setImportText] = useState('')
   const [importLang, setImportLang] = useState('ja')
@@ -413,18 +388,6 @@ export default function Review() {
     setGeneratingMnemonic(false)
   }
 
-  async function saveDetail() {
-    if (!editingDetail) return
-    try {
-      await invoke('db_update_review_detail', { id: editingDetail, detail: editDetailText })
-      setSessionQueue(prev => prev.map(item =>
-        item.id === editingDetail ? { ...item, detail: editDetailText } : item
-      ))
-    } catch {}
-    setEditingDetail(null)
-    setEditDetailText('')
-  }
-
   async function handleImport() {
     if (!importText.trim()) return
     setImporting(true)
@@ -481,8 +444,7 @@ export default function Review() {
             </button>
             <button
               onClick={() => {
-                setEditingDetail(visibleCard?.id || null)
-                setEditDetailText('')
+                setEditingId(visibleCard?.id || null)
               }}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gray-200 text-gray-700 text-sm font-medium hover:bg-gray-300 active:bg-gray-400 transition-colors"
             >
@@ -562,8 +524,7 @@ export default function Review() {
           </div>
           <button
             onClick={() => {
-              setEditingDetail(visibleCard?.id || null)
-              setEditDetailText(detail)
+              setEditingId(visibleCard?.id || null)
             }}
             className="text-xs text-gray-400 hover:text-gray-600 mt-1"
           >
@@ -578,8 +539,7 @@ export default function Review() {
         <p className="text-sm text-gray-600 whitespace-pre-wrap">{detail}</p>
         <button
           onClick={() => {
-            setEditingDetail(visibleCard?.id || null)
-            setEditDetailText(detail)
+            setEditingId(visibleCard?.id || null)
           }}
           className="text-xs text-gray-400 hover:text-gray-600 mt-2"
         >
@@ -590,33 +550,35 @@ export default function Review() {
   }
 
   // Edit detail modal
-  if (editingDetail) {
-    const card = sessionQueue.find(i => i.id === editingDetail) || allItems.find(i => i.id === editingDetail)
+  if (editingId) {
+    const card = sessionQueue.find(i => i.id === editingId) || allItems.find(i => i.id === editingId)
+    if (!card) {
+      setEditingId(null)
+      return null
+    }
     return (
-      <div className="flex flex-col h-full -m-4 p-4">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold">Edit Detail</h2>
-          <button
-            onClick={() => { setEditingDetail(null); setEditDetailText('') }}
-            className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100"
-          >
-            <CloseOutlined />
-          </button>
-        </div>
-        <div className="mb-2 text-xl font-semibold text-center">{card?.content}</div>
-        <textarea
-          value={editDetailText}
-          onChange={(e) => setEditDetailText(e.target.value)}
-          placeholder='Enter detail as JSON: {"reading":"...","meaning":"...","part_of_speech":"...","example":"...","example_meaning":"..."}'
-          className="flex-1 w-full p-3 bg-gray-50 rounded-xl border-none outline-none text-sm resize-none"
-        />
-        <button
-          onClick={saveDetail}
-          className="mt-3 w-full py-3 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600 active:bg-blue-700 transition-colors flex items-center justify-center gap-2"
-        >
-          <CheckOutlined /> Save
-        </button>
-      </div>
+      <EditWordForm
+        item={card}
+        title="Edit Detail"
+        onCancel={() => setEditingId(null)}
+        onSave={async (data) => {
+          if (data.content) {
+            await invoke('db_update_review_item', {
+              item: { id: editingId, content: data.content },
+            })
+          }
+          await invoke('db_update_review_detail', { id: editingId, detail: data.detail })
+          await invoke('db_update_mnemonic', { id: editingId, mnemonic: data.mnemonic })
+          // Update local state
+          setSessionQueue(prev => prev.map(item =>
+            item.id === editingId ? { ...item, content: data.content, detail: data.detail, mnemonic: data.mnemonic } : item
+          ))
+          setAllItems(prev => prev.map(item =>
+            item.id === editingId ? { ...item, content: data.content, detail: data.detail, mnemonic: data.mnemonic } : item
+          ))
+          setEditingId(null)
+        }}
+      />
     )
   }
 
