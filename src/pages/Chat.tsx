@@ -53,6 +53,7 @@ const MAX_DIFFICULT_WORDS_KEY = 'max_difficult_words'
 const MAX_DIFFICULT_WORDS_DEFAULT = 10
 const MAX_KNOWN_WORDS_KEY = 'max_known_words'
 const MAX_KNOWN_WORDS_DEFAULT = 20
+const WORD_QUEUE_USED_KEY = 'word_queue_used_difficult'
 
 function getMaxReviews(): number {
   const val = localStorage.getItem(MAX_REVIEWS_KEY)
@@ -225,8 +226,21 @@ export default function Chat() {
   const [wordColorsByMessage, setWordColorsByMessage] = useState<Map<number, { tokens: Array<{surface: string, base_form: string}>, colors: Map<string, { EF: number; R: number; isNew: boolean }> }>>(new Map())
   const logRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<any>(null)
-  // FIFO queue index for rotating through difficult/known words per message
-  const wordQueueIndex = useRef<{ difficult: number; known: number }>({ difficult: 0, known: 0 })
+  // Tracks which difficult words have already been used in the current rotation cycle.
+  // Persisted to localStorage so new chats continue where the last one left off.
+  // Uses word content (string) instead of a numeric index, so it survives DB
+  // changes like reordering, additions, or removals of difficult words.
+  const usedDifficultWords = useRef<Set<string>>(
+    (() => {
+      try {
+        const saved = localStorage.getItem(WORD_QUEUE_USED_KEY)
+        if (saved) return new Set<string>(JSON.parse(saved) as string[])
+      } catch { /* ignore corrupt data */ }
+      return new Set<string>()
+    })()
+  )
+  // Known words still use a simple numeric rotation index (they're shuffled each cycle anyway)
+  const knownQueueIndex = useRef(0)
   // Track whether component is mounted — prevents stale state updates after navigation
   const mounted = useRef(true)
   const [keyboardInset, setKeyboardInset] = useState(0)
@@ -667,10 +681,29 @@ export default function Chat() {
     }
     const maxWords = getMaxDifficultWords()
     const maxKnown = getMaxKnownWords()
-    const [selectedDifficult, nextDifficultIdx] = dequeueRotate(difficultArr, wordQueueIndex.current.difficult, maxWords)
-    const [selectedKnown, nextKnownIdx] = dequeueRotate(knownArr, wordQueueIndex.current.known, maxKnown)
-    // Advance queue positions for next message
-    wordQueueIndex.current = { difficult: nextDifficultIdx, known: nextKnownIdx }
+
+    // Pick difficult words that haven't been used yet in this rotation cycle.
+    // When all difficult words have been used, reset and start a new cycle.
+    const unusedDifficult = difficultArr.filter(w => !usedDifficultWords.current.has(w))
+    let selectedDifficult: string[]
+    if (unusedDifficult.length >= maxWords) {
+      selectedDifficult = unusedDifficult.slice(0, maxWords)
+    } else {
+      // Not enough unused words left — take what's available, then reset and fill the rest
+      selectedDifficult = [...unusedDifficult]
+      usedDifficultWords.current.clear()
+      const remaining = maxWords - selectedDifficult.length
+      const freshPool = difficultArr.filter(w => !selectedDifficult.includes(w))
+      selectedDifficult.push(...freshPool.slice(0, remaining))
+    }
+    // Mark selected words as used
+    for (const w of selectedDifficult) {
+      usedDifficultWords.current.add(w)
+    }
+    localStorage.setItem(WORD_QUEUE_USED_KEY, JSON.stringify([...usedDifficultWords.current]))
+
+    const [selectedKnown, nextKnownIdx] = dequeueRotate(knownArr, knownQueueIndex.current, maxKnown)
+    knownQueueIndex.current = nextKnownIdx
     return [...selectedDifficult, ...selectedKnown]
   }
 
