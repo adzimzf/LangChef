@@ -1487,7 +1487,7 @@ export default function Chat() {
             autoSize={{ minRows: 1, maxRows: 4 }}
             disabled={loading}
             onPressEnter={(e) => {
-              if (!e.shiftKey) {
+              if (e.shiftKey) {
                 e.preventDefault()
                 if (editingMessageId) {
                   const editMsg = messages.find(m => m.id === editingMessageId)
