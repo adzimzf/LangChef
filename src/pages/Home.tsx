@@ -10,7 +10,7 @@ import {
   UnorderedListOutlined,
   ReadOutlined,
 } from '@ant-design/icons'
-import { type Day, todayKey, computeStreak } from '../lib/stats'
+import { type ActivityRow, todayKey, computeStreakFromActivity } from '../lib/stats'
 
 export default function Home() {
   const navigate = useNavigate()
@@ -26,13 +26,16 @@ export default function Home() {
   useEffect(() => {
     async function loadStats() {
       try {
-        const [telemetryDays, reviewItems] = await Promise.all([
-          invoke<Day[]>('db_get_telemetry_days'),
+        const [activityRows, reviewItems] = await Promise.all([
+          invoke<ActivityRow[]>('db_get_user_activity', { dateFrom: '2000-01-01', dateTo: todayKey() }),
           invoke<{ R: number }[]>('db_get_review_items'),
         ])
-        const streak = computeStreak(telemetryDays)
+        const streak = computeStreakFromActivity(activityRows)
         const mastered = reviewItems.filter((c) => c.R >= 3).length
-        const sessionsToday = telemetryDays.find((d) => d.date === todayKey())?.sessions ?? 0
+        const today = todayKey()
+        const sessionsToday = activityRows
+          .filter(a => a.date === today)
+          .reduce((sum, a) => sum + a.count, 0)
 
         setStats({
           streak,
@@ -87,7 +90,7 @@ export default function Home() {
       label: 'Your Stats',
       desc: `${stats.sessionsToday} sessions today`,
       color: 'bg-purple-500',
-      onClick: () => navigate('/telemetry'),
+      onClick: () => navigate('/stats'),
     },
   ]
 

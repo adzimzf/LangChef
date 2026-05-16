@@ -780,7 +780,7 @@ export default function Chat() {
       })
     }
     setInput('')
-    await invoke('db_increment_session_today').catch(() => {})
+    await invoke('db_record_activity', { activityType: 'chat' }).catch(() => {})
     setTimeout(() => {
       if (logRef.current) logRef.current.scrollTop = logRef.current.scrollHeight
     }, 0)

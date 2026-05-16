@@ -234,6 +234,16 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
           date TEXT PRIMARY KEY,
           sessions INTEGER NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS user_activity(
+          date TEXT NOT NULL,
+          activity_type TEXT NOT NULL,
+          count INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (date, activity_type)
+        );
+        CREATE TABLE IF NOT EXISTS daily_active_time(
+          date TEXT PRIMARY KEY,
+          total_seconds INTEGER NOT NULL DEFAULT 0
+        );
         CREATE TABLE IF NOT EXISTS chat_sessions(
           id TEXT PRIMARY KEY,
           title TEXT,
@@ -285,7 +295,47 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let _ = conn.execute("UPDATE review_items SET state = 'new' WHERE state IS NULL OR state = ''", []);
     // Auto-seed bundled grammar data if grammar_items is empty
     seed_bundled_grammar_if_empty(&conn);
+    // Migrate telemetry_days to user_activity (one-time)
+    migrate_telemetry_to_activity(&conn)?;
     Ok(conn)
+}
+
+fn migrate_telemetry_to_activity(conn: &Connection) -> Result<(), String> {
+    // Check if migration already happened
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM user_activity",
+        [],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if count > 0 {
+        return Ok(());
+    }
+    // Check if there's data to migrate
+    let telemetry_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM telemetry_days",
+        [],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if telemetry_count == 0 {
+        return Ok(());
+    }
+    // Atomic migration in a transaction
+    conn.execute("BEGIN TRANSACTION", []).map_err(|e| e.to_string())?;
+    let result = conn.execute(
+        "INSERT INTO user_activity (date, activity_type, count)
+         SELECT date, 'chat', sessions FROM telemetry_days",
+        [],
+    );
+    match result {
+        Ok(_) => {
+            conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e.to_string())
+        }
+    }
 }
 
 // ─── Bundled Grammar Markdown Data ──────────────────────────────────────────
@@ -479,6 +529,19 @@ struct ReviewItem {
 struct TelemetryDay {
     date: String,
     sessions: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct UserActivity {
+    date: String,
+    activity_type: String,
+    count: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DailyActiveTime {
+    date: String,
+    total_seconds: i64,
 }
 
 // ─── SRS Configuration ────────────────────────────────────────────────────────
@@ -827,14 +890,7 @@ fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRS
 
 #[tauri::command]
 fn db_increment_session_today(app: tauri::AppHandle) -> Result<(), String> {
-    let conn = open_db(&app)?;
-    let today = chrono::Local::now().date_naive().to_string();
-    conn.execute(
-        "INSERT INTO telemetry_days(date, sessions) VALUES (?1, 1)
-         ON CONFLICT(date) DO UPDATE SET sessions=sessions+1",
-        params![today],
-    ).map_err(|e| e.to_string())?;
-    Ok(())
+    db_record_activity(app, "chat".to_string())
 }
 
 #[tauri::command]
@@ -846,6 +902,73 @@ fn db_get_telemetry_days(app: tauri::AppHandle) -> Result<Vec<TelemetryDay>, Str
         Ok(TelemetryDay {
             date: row.get(0)?,
             sessions: row.get(1)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+fn db_record_activity(app: tauri::AppHandle, activity_type: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let today = chrono::Local::now().date_naive().to_string();
+    conn.execute(
+        "INSERT INTO user_activity(date, activity_type, count) VALUES (?1, ?2, 1)
+         ON CONFLICT(date, activity_type) DO UPDATE SET count = count + 1",
+        params![today, activity_type],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn db_get_user_activity(app: tauri::AppHandle, date_from: String, date_to: String) -> Result<Vec<UserActivity>, String> {
+    let conn = open_db(&app)?;
+    let mut stmt = conn.prepare(
+        "SELECT date, activity_type, count FROM user_activity
+         WHERE date >= ?1 AND date <= ?2
+         ORDER BY date ASC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![date_from, date_to], |row| {
+        Ok(UserActivity {
+            date: row.get(0)?,
+            activity_type: row.get(1)?,
+            count: row.get(2)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+fn db_record_active_time(app: tauri::AppHandle) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let today = chrono::Local::now().date_naive().to_string();
+    conn.execute(
+        "INSERT INTO daily_active_time(date, total_seconds) VALUES (?1, 30)
+         ON CONFLICT(date) DO UPDATE SET total_seconds = MIN(total_seconds + 30, 57600)",
+        params![today],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn db_get_active_time(app: tauri::AppHandle, date_from: String, date_to: String) -> Result<Vec<DailyActiveTime>, String> {
+    let conn = open_db(&app)?;
+    let mut stmt = conn.prepare(
+        "SELECT date, total_seconds FROM daily_active_time
+         WHERE date >= ?1 AND date <= ?2
+         ORDER BY date ASC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![date_from, date_to], |row| {
+        Ok(DailyActiveTime {
+            date: row.get(0)?,
+            total_seconds: row.get(1)?,
         })
     }).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
@@ -2041,6 +2164,10 @@ pub fn run() {
             db_update_srs,
             db_increment_session_today,
             db_get_telemetry_days,
+            db_record_activity,
+            db_get_user_activity,
+            db_record_active_time,
+            db_get_active_time,
             db_list_known_words,
             db_add_known_word,
             db_generate_mnemonic,

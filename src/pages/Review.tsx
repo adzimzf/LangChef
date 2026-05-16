@@ -94,6 +94,26 @@ function itemToCard(item: ReviewItem) {
   }
 }
 
+function SessionCompleteEffect({ sessionCompleted }: { sessionCompleted: number }) {
+  const recorded = useRef(false)
+
+  useEffect(() => {
+    if (sessionCompleted > 0 && !recorded.current) {
+      recorded.current = true
+      invoke('db_record_activity', { activityType: 'review' }).catch(() => {})
+    }
+  }, [sessionCompleted])
+
+  // Reset when session restarts (sessionCompleted goes back to 0)
+  useEffect(() => {
+    if (sessionCompleted === 0) {
+      recorded.current = false
+    }
+  }, [sessionCompleted])
+
+  return null
+}
+
 export default function Review() {
   const [allItems, setAllItems] = useState<ReviewItem[]>([])
   const [selectedLang, setSelectedLang] = useState<string | null>(null)
@@ -760,6 +780,7 @@ export default function Review() {
       {/* No due cards for selected language */}
       {!visibleCard ? (
         <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-3">
+          <SessionCompleteEffect sessionCompleted={sessionCompleted} />
           <>
             <div className="text-4xl">🎉</div>
             <p className="text-sm text-center">All done for {LANGUAGES[selectedLang || '']?.label || selectedLang}!</p>

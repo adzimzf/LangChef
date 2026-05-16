@@ -8,6 +8,7 @@ import {
   SettingOutlined,
   ReadOutlined,
 } from '@ant-design/icons'
+import { useActiveTimeHeartbeat } from '../hooks/useActiveTimeHeartbeat'
 
 const NAV_ITEMS = [
   { key: 'home', label: 'Home', icon: HomeOutlined, path: '/' },
@@ -22,13 +23,16 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate()
   const isChatPage = location.pathname === '/chat'
 
+  useActiveTimeHeartbeat(true)
+
   const activeKey = useMemo(() => {
     if (location.pathname.startsWith('/chats')) return 'chats'
-    if (location.pathname.startsWith('/chat')) return 'chats' // chat falls under chats tab
+    if (location.pathname.startsWith('/chat')) return 'chats'
     if (location.pathname.startsWith('/grammar')) return 'grammar'
     if (location.pathname.startsWith('/review')) return 'review'
     if (location.pathname.startsWith('/settings')) return 'settings'
-    if (location.pathname.startsWith('/telemetry')) return 'telemetry'
+    if (location.pathname.startsWith('/stats')) return 'home'
+    if (location.pathname.startsWith('/telemetry')) return 'home'
     if (location.pathname.startsWith('/words')) return 'home'
     return 'home'
   }, [location.pathname])
