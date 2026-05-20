@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { splitTappable, isWordSegment } from '../lib/unknown'
 import { renderFurigana, hasFuriganaAnnotations, stripFurigana } from '../lib/furigana'
-import { difficultyColor } from '../lib/srs'
 import { JLPT_LEVELS, DEFAULT_JLPT_LEVEL, JLPT_LEVEL_STORAGE_KEY } from '../lib/jlpt'
 import type { JLPTLevel } from '../lib/jlpt'
+import type { ReviewItem } from '../lib/types'
 import UserMessageFeedback, { type UserFeedback } from '../components/UserMessageFeedback'
 import { Input } from 'antd'
 const { TextArea } = Input
@@ -106,16 +106,6 @@ function getNewCardsToday(): number {
 
 type GrammarDBItem = { id: string; pattern: string; detail: string; language: string; level: string; is_default: number }
 
-type ReviewItemRaw = { id: string; content: string; EF: number; I: number; R: number; tags: string | null; state: string | null; next_review: number | null }
-
-/** Compute an ease score (0 = hardest, 1 = easiest) — same as WordList */
-function easeScore(EF: number, R: number): number {
-  const efNorm = Math.min(1, Math.max(0, (EF - 1.3) / (3.0 - 1.3)))
-  const rNorm = Math.min(1, Math.max(0, R / 5))
-  return 0.6 * efNorm + 0.4 * rNorm
-}
-
-
 function TypingIndicator() {
   return (
     <div className="flex mb-2 justify-start">
@@ -194,6 +184,8 @@ function computeVisiblePath(
   return { visibleMessages, branchPoints }
 }
 
+type WordColorInfo = { EF: number; R: number; isNew: boolean; difficulty_color: string }
+
 export default function Chat() {
   const navigate = useNavigate()
   const [params] = useSearchParams()
@@ -212,7 +204,7 @@ export default function Chat() {
   const [model, setModel] = useState('')
   const [input, setInput] = useState('')
   const [messages, setMessages] = useState<Msg[]>([])
-  const [difficult, setDifficult] = useState<Map<string, { EF: number; R: number; isNew: boolean }>>(new Map())
+  const [difficult, setDifficult] = useState<Map<string, WordColorInfo>>(new Map())
   const [known, setKnown] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
   const [showFurigana, setShowFurigana] = useState(false)
@@ -223,7 +215,7 @@ export default function Chat() {
   const [grammarAnalysis, setGrammarAnalysis] = useState<string | null>(null)
   const [grammarAnalysisLoading, setGrammarAnalysisLoading] = useState<number | null>(null)
   const [feedbackMap, setFeedbackMap] = useState<Map<number, UserFeedback>>(new Map())
-  const [wordColorsByMessage, setWordColorsByMessage] = useState<Map<number, { tokens: Array<{surface: string, base_form: string}>, colors: Map<string, { EF: number; R: number; isNew: boolean }> }>>(new Map())
+  const [wordColorsByMessage, setWordColorsByMessage] = useState<Map<number, { tokens: Array<{surface: string, base_form: string}>, colors: Map<string, WordColorInfo> }>>(new Map())
   const logRef = useRef<HTMLDivElement | null>(null)
   const inputRef = useRef<any>(null)
   // Tracks which difficult words have already been used in the current rotation cycle.
@@ -402,53 +394,31 @@ export default function Chat() {
     return () => clearInterval(interval)
   }, [sessionId])
 
-  // Load difficult words from review_items for LLM system prompt
+  // Load difficult/known words from backend (pre-classified)
   useEffect(() => {
     async function load() {
       try {
-        // Query: For LLM system prompt — all items, sorted hardest-first (same as Word List)
-        const allItems = await invoke<ReviewItemRaw[]>('db_get_review_items')
-
-        // Sort by ease score (hardest first) — same as WordList default sortOrder
-        allItems.sort((a, b) => easeScore(a.EF, a.R) - easeScore(b.EF, b.R))
-
-        const hardMap = new Map<string, { EF: number; R: number; isNew: boolean }>()
-
-        // Classify using easeScore — hard (< 0.3) or medium (0.3–0.7) are difficult
-        allItems.forEach(i => {
-          const ease = easeScore(i.EF, i.R)
-          if (ease < 0.7) {
-            const isNew = i.state === 'new' || !i.state
-            hardMap.set(i.content.toLowerCase(), { EF: i.EF, R: i.R, isNew })
-          }
+        const data = await invoke<{ difficult: WordColorInfo[]; known: string[] }>(
+          'db_get_difficult_and_known_words',
+          { language: lang || null }
+        )
+        const hardMap = new Map<string, WordColorInfo>()
+        data.difficult.forEach((w) => {
+          hardMap.set(w.content.toLowerCase(), {
+            EF: w.ef,
+            R: w.r,
+            isNew: w.is_new,
+            difficulty_color: w.difficulty_color,
+          })
         })
         setDifficult(hardMap)
-
-        // Known words: easy items (ease >= 0.7) — same metric as WordList
-        const knownWords = new Set<string>()
-        allItems.filter(i => easeScore(i.EF, i.R) >= 0.7).forEach(i => {
-          knownWords.add(i.content.toLowerCase())
-        })
-        setKnown(knownWords)
-      } catch {}
+        setKnown(new Set(data.known.map((w) => w.toLowerCase())))
+      } catch {
+        console.error('Failed to load difficult/known words')
+      }
     }
     load()
-  }, [])
-
-  // Load known words from DB
-  useEffect(() => {
-    async function load() {
-      try {
-        const words = await invoke<string[]>('db_list_known_words')
-        setKnown(prev => {
-          const next = new Set(prev)
-          words.forEach(w => next.add(w.toLowerCase()))
-          return next
-        })
-      } catch {}
-    }
-    load()
-  }, [])
+  }, [lang])
 
   // Fetch word colors for assistant messages using Lindera tokenization
   useEffect(() => {
@@ -493,7 +463,7 @@ export default function Chat() {
   async function markWordDifficult(word: string) {
     const w = word.toLowerCase()
     const next = new Map(difficult)
-    next.set(w, { EF: 2.5, R: 0, isNew: true })
+    next.set(w, { EF: 2.5, R: 0, isNew: true, difficulty_color: 'hsl(0, 70%, 50%)' })
     setDifficult(next)
     try {
       await invoke('db_upsert_review_item', { content: w, language: lang || null })
@@ -507,14 +477,14 @@ export default function Chat() {
   }
 
   // Cache for word colors to avoid repeated DB queries
-  const wordColorCache = useRef<Map<string, { EF: number; R: number; isNew: boolean }>>(new Map())
+  const wordColorCache = useRef<Map<string, WordColorInfo>>(new Map())
 
   /**
    * Tokenize text using Lindera and query DB for word colors.
    * For verbs/adjectives, uses dictionary form (base form) for DB lookup.
    * Returns both tokens and color map for consistent rendering.
    */
-  async function getWordColors(text: string): Promise<{ tokens: Array<{surface: string, base_form: string}>, colors: Map<string, { EF: number; R: number; isNew: boolean }> }> {
+  async function getWordColors(text: string): Promise<{ tokens: Array<{surface: string, base_form: string}>, colors: Map<string, WordColorInfo> }> {
     if (lang !== 'ja') {
       return { tokens: [], colors: new Map() }
     }
@@ -528,7 +498,7 @@ export default function Chat() {
       const baseForms = [...new Set(tokens.map(t => t.base_form.toLowerCase()))]
 
       // Check cache first
-      const cached = new Map<string, { EF: number; R: number; isNew: boolean }>()
+      const cached = new Map<string, WordColorInfo>()
       const uncached: string[] = []
 
       for (const base of baseForms) {
@@ -541,11 +511,16 @@ export default function Chat() {
 
       // Query DB for uncached words
       if (uncached.length > 0) {
-        const items = await invoke<ReviewItemRaw[]>('db_get_review_items_by_words', { words: uncached })
+        const items = await invoke<ReviewItem[]>('db_get_review_items_by_words', { words: uncached })
         const foundWords = new Set<string>()
 
         for (const item of items) {
-          const info = { EF: item.EF, R: item.R, isNew: item.state === 'new' || !item.state }
+          const info: WordColorInfo = {
+            EF: item.EF,
+            R: item.R,
+            isNew: item.state === 'new' || !item.state,
+            difficulty_color: item.difficulty_color,
+          }
           wordColorCache.current.set(item.content.toLowerCase(), info)
           cached.set(item.content.toLowerCase(), info)
           foundWords.add(item.content.toLowerCase())
@@ -1083,7 +1058,7 @@ export default function Chat() {
                 ? ''
                 : 'hover:bg-blue-50 active:bg-yellow-50'
             }`}
-            style={isHard ? { backgroundColor: difficultyColor(diffInfo.EF, diffInfo.R), color: '#fff' } : undefined}
+            style={isHard ? { backgroundColor: diffInfo.difficulty_color, color: '#fff' } : undefined}
             title={isHard ? 'Marked difficult' : 'Tap to mark difficult'}
           >
             {renderFurigana(slice, showFurigana)}
@@ -1123,7 +1098,7 @@ export default function Chat() {
                 ? ''
                 : 'hover:bg-blue-50 active:bg-yellow-50'
             }`}
-            style={isHard ? { backgroundColor: difficultyColor(diffInfo.EF, diffInfo.R), color: '#fff' } : undefined}
+            style={isHard ? { backgroundColor: diffInfo.difficulty_color, color: '#fff' } : undefined}
             title={isHard ? 'Marked difficult' : 'Tap to mark difficult'}
           >
             {renderFurigana(slice, showFurigana)}
@@ -1149,7 +1124,7 @@ export default function Chat() {
               ? ''
               : 'hover:bg-blue-50 active:bg-yellow-50'
           }`}
-          style={isHard ? { backgroundColor: difficultyColor(diffInfo.EF, diffInfo.R), color: '#fff' } : undefined}
+          style={isHard ? { backgroundColor: diffInfo.difficulty_color, color: '#fff' } : undefined}
           title={isHard ? 'Marked difficult' : 'Tap to mark difficult'}
         >
           {part}

@@ -12,7 +12,18 @@ export type ReviewItem = {
   language: string | null
   detail: string | null
   mnemonic: string | null
+  // Pre-computed display fields from backend
+  difficulty_color: string
+  difficulty_bg_class: string
+  state_label: string
+  next_review_formatted: string
 }
+
+/** Anki-style grade button */
+export type Grade = 'again' | 'hard' | 'good' | 'easy'
+
+/** Card lifecycle state */
+export type CardState = 'new' | 'learning' | 'review' | 'relearning'
 
 export function parseDetailJson(detail: string): {
   reading?: string; meaning?: string; part_of_speech?: string; example?: string; example_meaning?: string

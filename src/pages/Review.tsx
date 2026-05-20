@@ -1,15 +1,6 @@
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import type { Grade, CardState } from '../lib/srs'
-import {
-  scheduleCard,
-  previewGrades,
-  formatNextReview,
-  difficultyColor,
-  difficultyBgClass,
-  stateLabel,
-  DEFAULT_SRS_CONFIG,
-} from '../lib/srs'
+import type { Grade } from '../lib/types'
 import {
   ImportOutlined,
   ReloadOutlined,
@@ -43,56 +34,8 @@ function getMaxNewCards(): number {
   return val ? parseInt(val, 10) || MAX_NEW_CARDS_DEFAULT : MAX_NEW_CARDS_DEFAULT
 }
 
-function todayKey(): string {
-  return new Date().toISOString().slice(0, 10)
-}
-
-function getReviewedToday(): number {
-  const stored = localStorage.getItem(`reviewed_${todayKey()}`)
-  return stored ? parseInt(stored, 10) : 0
-}
-
-function incrementReviewedToday() {
-  const key = `reviewed_${todayKey()}`
-  const current = getReviewedToday()
-  localStorage.setItem(key, String(current + 1))
-}
-
-function getNewCardsToday(): number {
-  const stored = localStorage.getItem(`new_seen_${todayKey()}`)
-  return stored ? parseInt(stored, 10) : 0
-}
-
-function incrementNewCardsToday() {
-  const key = `new_seen_${todayKey()}`
-  const current = getNewCardsToday()
-  localStorage.setItem(key, String(current + 1))
-}
-
 // Grade button config
 type GradeOption = { grade: Grade; label: string; nextLabel: string; color: string }
-
-/**
- * Convert a ReviewItem (from DB) into the Card shape expected by srs.ts
- */
-function itemToCard(item: ReviewItem) {
-  return {
-    id: item.id,
-    content: item.content,
-    EF: item.EF,
-    I: item.I,
-    R: item.R,
-    state: (item.state || 'new') as CardState,
-    step: item.step || 0,
-    lapseCount: item.lapse_count || 0,
-    lastReviewed: undefined,
-    nextReview: item.next_review ? item.next_review * 1000 : undefined, // DB stores seconds, Card expects ms
-    history: [],
-    tags: item.tags ? item.tags.split(',') : undefined,
-    language: item.language || undefined,
-    detail: item.detail || undefined,
-  }
-}
 
 function SessionCompleteEffect({ sessionCompleted }: { sessionCompleted: number }) {
   const recorded = useRef(false)
@@ -128,8 +71,11 @@ export default function Review() {
   const [importing, setImporting] = useState(false)
   const [importResult, setImportResult] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const [reviewedToday, setReviewedToday] = useState(getReviewedToday())
-  const [newCardsToday, setNewCardsToday] = useState(getNewCardsToday())
+  const [reviewedToday, setReviewedToday] = useState(0)
+  const [newCardsToday, setNewCardsToday] = useState(0)
+  const newCardsTodayRef = useRef(0)
+  // Keep ref in sync so loadDueItems (captured in buildQueue) always reads the latest value
+  useEffect(() => { newCardsTodayRef.current = newCardsToday }, [newCardsToday])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const maxReviews = getMaxReviews()
   const maxNewCards = getMaxNewCards()
@@ -162,6 +108,17 @@ export default function Review() {
     loadItems()
   }, [])
 
+  // Load study limits from backend when language changes
+  useEffect(() => {
+    if (!selectedLang) return
+    invoke<{ reviews_completed: number; new_cards_seen: number }>('db_get_study_limits', { language: selectedLang })
+      .then(limits => {
+        setReviewedToday(limits.reviews_completed)
+        setNewCardsToday(limits.new_cards_seen)
+      })
+      .catch(() => {})
+  }, [selectedLang])
+
   async function loadItems() {
     setLoading(true)
     try {
@@ -173,7 +130,7 @@ export default function Review() {
 
   async function loadDueItems(lang: string | null) {
     try {
-      const remaining = Math.max(0, maxNewCards - getNewCardsToday())
+      const remaining = Math.max(0, maxNewCards - newCardsTodayRef.current)
       const d = new Date()
       d.setHours(23, 59, 59, 999)
       const items = await invoke<ReviewItem[]>('db_get_due_review_items', {
@@ -181,6 +138,7 @@ export default function Review() {
         limit: maxReviews,
         newCardsRemaining: remaining,
         maxNextReview: Math.floor(d.getTime() / 1000),
+        maxNewCardsPerDay: maxNewCards,
       })
       // don't remove this line
       // console.log(items)
@@ -255,18 +213,26 @@ export default function Review() {
     return deckItems.filter((item: ReviewItem) => !item.next_review || item.next_review <= endOfDaySeconds).length
   })()
 
-  // Anki-style grade options with dynamic next-review preview
-  const gradeOptions: GradeOption[] = (() => {
-    if (!visibleCard) return []
-    const card = itemToCard(visibleCard)
-    const previews = previewGrades(card, DEFAULT_SRS_CONFIG)
-    return [
-      { grade: 'again', label: 'Again', nextLabel: formatNextReview(previews.again), color: 'bg-red-500' },
-      { grade: 'hard', label: 'Hard', nextLabel: formatNextReview(previews.hard), color: 'bg-orange-500' },
-      { grade: 'good', label: 'Good', nextLabel: formatNextReview(previews.good), color: 'bg-blue-500' },
-      { grade: 'easy', label: 'Easy', nextLabel: formatNextReview(previews.easy), color: 'bg-green-500' },
-    ]
-  })()
+  // Anki-style grade options with dynamic next-review preview (loaded from backend)
+  const [gradeOptions, setGradeOptions] = useState<GradeOption[]>([])
+
+  useEffect(() => {
+    if (!visibleCard) { setGradeOptions([]); return }
+    let cancelled = false
+    invoke<Array<{ grade: string; label: string; next_review_formatted: string; lapsed: boolean; graduated: boolean }>>('db_preview_srs_grades', { id: visibleCard.id })
+      .then(previews => {
+        if (cancelled) return
+        const colors: Record<string, string> = { again: 'bg-red-500', hard: 'bg-orange-500', good: 'bg-blue-500', easy: 'bg-green-500' }
+        setGradeOptions(previews.map(p => ({
+          grade: p.grade as Grade,
+          label: p.label,
+          nextLabel: p.next_review_formatted,
+          color: colors[p.grade] || 'bg-gray-500',
+        })))
+      })
+      .catch(() => { if (!cancelled) setGradeOptions([]) })
+    return () => { cancelled = true }
+  }, [visibleCard?.id])
 
   async function handleGrade(grade: Grade) {
     if (!visibleCard) return
@@ -276,33 +242,32 @@ export default function Review() {
 
     // Capture card ID upfront so the setSessionQueue closure never uses a stale visibleCard
     const cardId = visibleCard.id
+    const cardState = visibleCard.state || 'new'
 
-    // Compute new SRS state locally for immediate UI update
-    const card = itemToCard(visibleCard)
-    const { card: updated, lapsed } = scheduleCard(card, grade, DEFAULT_SRS_CONFIG)
+    let result: { EF: number; I: number; R: number; state: string; step: number; lapse_count: number; next_review: number; lapsed: boolean; graduated: boolean }
+    try {
+      result = await invoke<{ EF: number; I: number; R: number; state: string; step: number; lapse_count: number; next_review: number; lapsed: boolean; graduated: boolean }>('db_update_srs', { id: cardId, grade })
+    } catch {
+      isGrading.current = false
+      return
+    }
 
-    // Update SRS in DB (fire and forget)
-    invoke('db_update_srs', { id: cardId, grade }).catch(() => {})
-
-    // Only count as reviewed if card's new next_review is tomorrow or later
-    if (updated.nextReview && updated.nextReview > endOfDaySeconds * 1000) {
-      incrementReviewedToday()
+    // Only count as reviewed if card graduated (backend determines this)
+    if (result.graduated) {
+      invoke('db_increment_study_limit', { language: selectedLang, field: 'reviews' }).catch(() => {})
       setReviewedToday(prev => prev + 1)
     }
 
     // Track new cards introduced today
-    if (card.state === 'new') {
-      incrementNewCardsToday()
+    if (cardState === 'new') {
+      invoke('db_increment_study_limit', { language: selectedLang, field: 'new_cards' }).catch(() => {})
       setNewCardsToday(prev => prev + 1)
     }
 
     setRevealed(false)
     setShowMnemonic(false)
 
-    // Determine if the card graduated (left learning/relearning into review)
-    const graduated = (updated.state === 'review') && (card.state === 'new' || card.state === 'learning' || card.state === 'relearning')
-
-    // Update session queue with locally computed new state.
+    // Update session queue with backend-computed SRS state.
     // Uses captured cardId instead of visibleCard from outer scope to avoid stale closures.
     setSessionQueue(prev => {
       const idx = prev.findIndex(item => item.id === cardId)
@@ -311,39 +276,36 @@ export default function Review() {
       const before = prev.slice(0, idx)
       const after = prev.slice(idx + 1)
 
-      // Map the updated card back to ReviewItem shape
       const updatedItem: ReviewItem = {
         ...prev[idx],
-        EF: updated.EF,
-        I: updated.I,
-        R: updated.R,
-        state: updated.state,
-        step: updated.step,
-        lapse_count: updated.lapseCount,
-        next_review: updated.nextReview ? Math.round(updated.nextReview / 1000) : null,
+        EF: result.EF,
+        I: result.I,
+        R: result.R,
+        state: result.state,
+        step: result.step,
+        lapse_count: result.lapse_count,
+        next_review: result.next_review,
       }
 
       let newQueue: ReviewItem[]
-      if (graduated && !lapsed) {
+      if (result.graduated && !result.lapsed) {
         // Card graduated to Review: remove from session queue entirely.
-        // It will reappear on a future day when its next_review arrives.
         newQueue = [...before, ...after]
       } else {
-        // All other cases (Again/Hard/Good on learning/relearning): move to back of queue.
-        // Even if next_review is still today, the card cycles to the end.
+        // All other cases: move to back of queue.
         newQueue = [...before, ...after, updatedItem]
       }
 
       // If new card limit reached, remove remaining new cards from the queue
-      const newSeenAfterGrade = card.state === 'new' ? newCardsToday + 1 : newCardsToday
+      const newSeenAfterGrade = cardState === 'new' ? newCardsToday + 1 : newCardsToday
       if (newSeenAfterGrade >= maxNewCards) {
-        newQueue = newQueue.filter(item => item.state !== 'new' && item.state !== null)
+        newQueue = newQueue.filter(item => item.state !== 'new' && item.state !== null && item.state !== '')
       }
 
       return newQueue
     })
 
-    if (graduated && !lapsed) {
+    if (result.graduated && !result.lapsed) {
       setSessionCompleted(prev => prev + 1)
     }
 
@@ -812,17 +774,17 @@ export default function Review() {
                   visibleCard.state === 'relearning' ? 'bg-orange-500' :
                   'bg-green-500'
                 }`}>
-                  {stateLabel((visibleCard.state || 'new') as CardState)}
+                  {visibleCard.state_label}
                 </span>
                 <div
                   className="w-16 h-2 rounded-full"
-                  style={{ backgroundColor: difficultyColor(visibleCard.EF, visibleCard.R) }}
+                  style={{ backgroundColor: visibleCard.difficulty_color }}
                 />
               </div>
 
               <div className="text-2xl font-semibold mb-1">{visibleCard?.content || ''}</div>
               {visibleCard.tags && (
-                <span className={`inline-block text-xs px-2 py-0.5 rounded-full text-white ${difficultyBgClass(visibleCard.EF, visibleCard.R)} mt-1`}>
+                <span className={`inline-block text-xs px-2 py-0.5 rounded-full text-white ${visibleCard.difficulty_bg_class} mt-1`}>
                   {visibleCard.tags}
                 </span>
               )}

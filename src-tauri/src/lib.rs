@@ -268,6 +268,13 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
             score INTEGER NOT NULL,
             feedback TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS study_limits(
+            date TEXT NOT NULL,
+            language TEXT NOT NULL DEFAULT '',
+            reviews_completed INTEGER NOT NULL DEFAULT 0,
+            new_cards_seen INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (date, language)
+        );
         "
     ).map_err(|e| e.to_string())?;
     // best-effort: add session_id column if missing
@@ -508,7 +515,7 @@ fn db_list_session_messages(app: tauri::AppHandle, session_id: String) -> Result
     Ok(out)
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct ReviewItem {
     id: String,
     content: String,
@@ -523,6 +530,38 @@ struct ReviewItem {
     language: Option<String>,
     detail: Option<String>,
     mnemonic: Option<String>,
+    // Display-computed fields (set by helper functions on query)
+    difficulty_color: String,
+    difficulty_bg_class: String,
+    state_label: String,
+    next_review_formatted: String,
+}
+
+/// Map a rusqlite row (from a review_items query) to a ReviewItem with computed display fields.
+fn row_to_review_item(row: &rusqlite::Row) -> rusqlite::Result<ReviewItem> {
+    let ef: f64 = row.get(2)?;
+    let r: i64 = row.get(4)?;
+    let state: String = row.get(5)?;
+    let next_review: Option<i64> = row.get(8)?;
+    Ok(ReviewItem {
+        id: row.get(0)?,
+        content: row.get(1)?,
+        EF: ef,
+        I: row.get(3)?,
+        R: r,
+        state: state.clone(),
+        step: row.get(6)?,
+        lapse_count: row.get(7)?,
+        next_review,
+        tags: row.get(9)?,
+        language: row.get(10)?,
+        detail: row.get(11)?,
+        mnemonic: row.get(12)?,
+        difficulty_color: compute_difficulty_color(ef, r),
+        difficulty_bg_class: compute_difficulty_bg_class(ef, r).to_string(),
+        state_label: compute_state_label(&state).to_string(),
+        next_review_formatted: compute_next_review_formatted(next_review),
+    })
 }
 
 #[derive(Serialize, Deserialize)]
@@ -590,6 +629,7 @@ struct SRSResult {
     next_review: i64,       // unix timestamp (seconds)
     next_minutes: i64,      // for display
     lapsed: bool,
+    graduated: bool,        // card left learning/relearning into review
 }
 
 /// Compute new EF from current EF and quality (0–5).
@@ -612,20 +652,114 @@ fn grace_bonus(next_review: Option<i64>, now: i64, multiplier: f64) -> f64 {
     }
 }
 
+/// Format minutes to human-readable string for grade button labels.
+fn format_next_review_minutes(minutes: i64) -> String {
+    if minutes <= 0 { return "soon".to_string(); }
+    if minutes < 60 { return format!("{}m", minutes); }
+    if minutes < 24 * 60 { return format!("{}h", (minutes / 60)); }
+    let days = (minutes as f64 / (24.0 * 60.0)).round() as i64;
+    if days == 1 { return "1d".to_string(); }
+    if days < 7 { return format!("{}d", days); }
+    if days < 30 { return format!("{}w", (days as f64 / 7.0).round()); }
+    if days < 365 { return format!("{}mo", (days as f64 / 30.0).round()); }
+    format!("{}y", (days as f64 / 365.0).round())
+}
+
+/// End of today as a Unix timestamp (seconds).
+fn end_of_today() -> i64 {
+    let now_local = chrono::Local::now();
+    now_local
+        .date_naive()
+        .and_hms_opt(23, 59, 59)
+        .unwrap()
+        .and_local_timezone(chrono::Local)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+        .timestamp()
+}
+
+/// Normalize EF (1.3–3.3+) to a 0..1 scale for color display.
+fn ef_normalized(ef: f64) -> f64 {
+    ((ef - 1.3) / 2.0).clamp(0.0, 1.0)
+}
+
 /// Compute a difficulty tag from EF and R values.
-/// Mirrors the frontend easeScore formula:
-///   ease = 0.6 * efNorm + 0.4 * rNorm
-/// Returns: "hard" (ease < 0.3), "medium" (0.3 <= ease < 0.7), "easy" (ease >= 0.7)
+/// - "hard":  EF < 2.0
+/// - "medium": EF >= 2.0 AND (EF < 2.7 OR R < 5)
+/// - "easy":  EF >= 2.7 AND R >= 5
 fn compute_tag_from_ef_r(ef: f64, r: i64) -> &'static str {
-    let ef_norm = ((ef - 1.3) / (3.0 - 1.3)).clamp(0.0, 1.0);
-    let r_norm = (r as f64 / 5.0).clamp(0.0, 1.0);
-    let ease = 0.6 * ef_norm + 0.4 * r_norm;
-    if ease < 0.3 {
-        "hard"
-    } else if ease < 0.7 {
-        "medium"
-    } else {
+    if ef >= 2.7 && r >= 5 {
         "easy"
+    } else if ef < 2.0 {
+        "hard"
+    } else {
+        "medium"
+    }
+}
+
+/// Compute a CSS HSL color string for difficulty display.
+fn compute_difficulty_color(ef: f64, _r: i64) -> String {
+    let hue = ef_normalized(ef) * 120.0;
+    format!("hsl({:.0}, 70%, 50%)", hue)
+}
+
+/// Compute a Tailwind background class for difficulty display.
+fn compute_difficulty_bg_class(ef: f64, _r: i64) -> &'static str {
+    let n = ef_normalized(ef);
+    if n < 0.15 { "bg-red-500" }
+    else if n < 0.30 { "bg-orange-500" }
+    else if n < 0.40 { "bg-amber-500" }
+    else if n < 0.50 { "bg-yellow-500" }
+    else if n < 0.65 { "bg-lime-500" }
+    else if n < 0.80 { "bg-green-500" }
+    else { "bg-emerald-500" }
+}
+
+/// Compute a human-readable state label.
+fn compute_state_label(state: &str) -> &'static str {
+    match state {
+        "new" => "New",
+        "learning" => "Learning",
+        "review" => "Review",
+        "relearning" => "Relearning",
+        _ => "New",
+    }
+}
+
+/// Format next_review timestamp as relative time string (e.g. "in 3d", "overdue").
+fn compute_next_review_formatted(next_review: Option<i64>) -> String {
+    match next_review {
+        None => "Now".to_string(),
+        Some(nr) => {
+            let now = chrono::Utc::now().timestamp();
+            let diff_ms = (nr - now) * 1000;
+            let is_past = diff_ms < 0;
+            let abs_diff = diff_ms.abs() as f64;
+            let minute = 60.0 * 1000.0;
+            let hour = 60.0 * minute;
+            let day = 24.0 * hour;
+            let week = 7.0 * day;
+            let month = 30.0 * day;
+            let year = 365.0 * day;
+
+            if is_past { return "overdue".to_string(); }
+
+            if abs_diff < minute {
+                format!("in {}s", (abs_diff / 1000.0) as i64)
+            } else if abs_diff < hour {
+                format!("in {}m", (abs_diff / minute) as i64)
+            } else if abs_diff < day {
+                format!("in {}h", (abs_diff / hour) as i64)
+            } else if abs_diff < week {
+                format!("in {}d", (abs_diff / day) as i64)
+            } else if abs_diff < month {
+                format!("in {}w", (abs_diff / week) as i64)
+            } else if abs_diff < year {
+                format!("in {}mo", (abs_diff / month) as i64)
+            } else {
+                format!("in {}y", (abs_diff / year) as i64)
+            }
+        }
     }
 }
 
@@ -770,12 +904,15 @@ fn schedule_card(
         EF: new_ef,
         I: new_i,
         R: new_r,
-        state: new_state,
+        state: new_state.clone(),
         step: new_step,
         lapse_count: new_lapse_count,
         next_review: next,
         next_minutes,
         lapsed,
+        graduated: (state == "new" || state == "learning" || state == "relearning")
+            && new_state == "review"
+            && next > end_of_today(),
     }
 }
 
@@ -800,23 +937,7 @@ fn db_get_review_items(app: tauri::AppHandle) -> Result<Vec<ReviewItem>, String>
         "SELECT
             id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic
         FROM review_items").map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([], |row| {
-        Ok(ReviewItem {
-            id: row.get(0)?,
-            content: row.get(1)?,
-            EF: row.get(2)?,
-            I: row.get(3)?,
-            R: row.get(4)?,
-            state: row.get(5)?,
-            step: row.get(6)?,
-            lapse_count: row.get(7)?,
-            next_review: row.get(8)?,
-            tags: row.get(9)?,
-            language: row.get(10)?,
-            detail: row.get(11)?,
-            mnemonic: row.get(12)?,
-        })
-    }).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], row_to_review_item).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
     for r in rows {
         items.push(r.map_err(|e| e.to_string())?);
@@ -840,23 +961,7 @@ fn db_get_review_items_by_words(app: tauri::AppHandle, words: Vec<String>) -> Re
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let params: Vec<&dyn rusqlite::ToSql> = words.iter().map(|w| w as &dyn rusqlite::ToSql).collect();
 
-    let rows = stmt.query_map(params.as_slice(), |row| {
-        Ok(ReviewItem {
-            id: row.get(0)?,
-            content: row.get(1)?,
-            EF: row.get(2)?,
-            I: row.get(3)?,
-            R: row.get(4)?,
-            state: row.get(5)?,
-            step: row.get(6)?,
-            lapse_count: row.get(7)?,
-            next_review: row.get(8)?,
-            tags: row.get(9)?,
-            language: row.get(10)?,
-            detail: row.get(11)?,
-            mnemonic: row.get(12)?,
-        })
-    }).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params.as_slice(), row_to_review_item).map_err(|e| e.to_string())?;
 
     let mut items = Vec::new();
     for r in rows {
@@ -886,6 +991,47 @@ fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRS
     ).map_err(|e| e.to_string())?;
 
     Ok(result)
+}
+
+#[derive(Serialize)]
+struct GradePreview {
+    grade: String,
+    label: String,
+    next_minutes: i64,
+    next_review_formatted: String,
+    state: String,
+    lapsed: bool,
+    graduated: bool,
+}
+
+#[tauri::command]
+fn db_preview_srs_grades(app: tauri::AppHandle, id: String) -> Result<Vec<GradePreview>, String> {
+    let conn = open_db(&app)?;
+    let (ef, i, r, state, step, lapse_count, next_review): (f64, i64, i64, String, i64, i64, Option<i64>) = conn.query_row(
+        "SELECT EF, I, R, state, step, lapse_count, next_review FROM review_items WHERE id=?1",
+        params![id],
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+    ).map_err(|e| e.to_string())?;
+
+    let config = SRSConfig::default();
+    let grades = ["again", "hard", "good", "easy"];
+    let labels = ["Again", "Hard", "Good", "Easy"];
+    let colors = ["bg-red-500", "bg-orange-500", "bg-blue-500", "bg-green-500"];
+
+    let mut previews = Vec::new();
+    for idx in 0..grades.len() {
+        let result = schedule_card(ef, i, r, &state, step, lapse_count, next_review, grades[idx], &config);
+        previews.push(GradePreview {
+            grade: grades[idx].to_string(),
+            label: labels[idx].to_string(),
+            next_minutes: result.next_minutes,
+            next_review_formatted: format_next_review_minutes(result.next_minutes),
+            state: result.state,
+            lapsed: result.lapsed,
+            graduated: result.graduated,
+        });
+    }
+    Ok(previews)
 }
 
 #[tauri::command]
@@ -998,13 +1144,6 @@ fn db_add_known_word(app: tauri::AppHandle, word: String) -> Result<(), String> 
     Ok(())
 }
 
-/// Compute ease score (0 = hardest, 1 = easiest) — mirrors frontend easeScore()
-fn ease_score(ef: f64, r: i64) -> f64 {
-    let ef_norm = ((ef - 1.3) / (3.0 - 1.3)).clamp(0.0, 1.0);
-    let r_norm = (r as f64 / 5.0).clamp(0.0, 1.0);
-    0.6 * ef_norm + 0.4 * r_norm
-}
-
 /// A known word with its reading and meaning
 struct KnownWord {
     word: String,
@@ -1038,7 +1177,7 @@ fn find_mnemonic_matches(
     }).map_err(|e| e.to_string())?;
     for r in rows {
         let (content, ef, r_val, detail) = r.map_err(|e| e.to_string())?;
-        if ease_score(ef, r_val) < 0.7 { continue; }
+        if ef < 2.7 || r_val < 5 { continue; }
         // Don't match the word with itself
         if content == target_content { continue; }
 
@@ -1429,28 +1568,103 @@ fn db_update_review_detail(app: tauri::AppHandle, id: String, detail: String) ->
 fn db_get_review_items_by_language(app: tauri::AppHandle, language: String) -> Result<Vec<ReviewItem>, String> {
     let conn = open_db(&app)?;
     let mut stmt = conn.prepare("SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic FROM review_items WHERE language=?1").map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![language], |row| {
-        Ok(ReviewItem {
-            id: row.get(0)?,
-            content: row.get(1)?,
-            EF: row.get(2)?,
-            I: row.get(3)?,
-            R: row.get(4)?,
-            state: row.get(5)?,
-            step: row.get(6)?,
-            lapse_count: row.get(7)?,
-            next_review: row.get(8)?,
-            tags: row.get(9)?,
-            language: row.get(10)?,
-            detail: row.get(11)?,
-            mnemonic: row.get(12)?,
-        })
-    }).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![language], row_to_review_item).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
     for r in rows {
         items.push(r.map_err(|e| e.to_string())?);
     }
     Ok(items)
+}
+
+#[derive(Serialize)]
+struct SearchResult {
+    items: Vec<ReviewItem>,
+    total: i64,
+}
+
+#[tauri::command]
+fn db_search_review_items(
+    app: tauri::AppHandle,
+    query: Option<String>,
+    language: Option<String>,
+    state: Option<String>,
+    difficulty: Option<String>,
+    sort: Option<String>,
+    offset: Option<i64>,
+    limit: Option<i64>,
+) -> Result<SearchResult, String> {
+    use rusqlite::types::ToSql;
+    let conn = open_db(&app)?;
+
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+
+    if let Some(ref lang) = language {
+        conditions.push(format!("language = ?{}", params.len() + 1));
+        params.push(lang.clone());
+    }
+    if let Some(ref s) = state {
+        conditions.push(format!("state = ?{}", params.len() + 1));
+        params.push(s.clone());
+    }
+    if let Some(ref q) = query {
+        let q = q.trim().to_string();
+        if !q.is_empty() {
+            conditions.push(format!("LOWER(content) LIKE '%' || LOWER(?{}) || '%'", params.len() + 1));
+            params.push(q);
+        }
+    }
+    if let Some(ref d) = difficulty {
+        match d.as_str() {
+            "hard" => conditions.push("EF < 2.0".to_string()),
+            "medium" => conditions.push("EF >= 2.0 AND (EF < 2.7 OR R < 5)".to_string()),
+            "easy" => conditions.push("EF >= 2.7 AND R >= 5".to_string()),
+            _ => {}
+        }
+    }
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+
+    let order_clause = match sort.as_deref() {
+        Some("next_review") => " ORDER BY next_review ASC NULLS LAST".to_string(),
+        Some("hardest") => " ORDER BY EF ASC".to_string(),
+        _ => " ORDER BY EF DESC".to_string(), // default: easiest first
+    };
+
+    // Count total matching rows
+    let count_sql = format!("SELECT COUNT(*) FROM review_items{}", where_clause);
+    let param_refs: Vec<&dyn ToSql> = params.iter().map(|s| s as &dyn ToSql).collect();
+    let total: i64 = conn.query_row(&count_sql, param_refs.as_slice(), |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+
+    // Fetch page
+    let data_sql = format!(
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic FROM review_items{}{} LIMIT ?{} OFFSET ?{}",
+        where_clause, order_clause,
+        params.len() + 1, params.len() + 2,
+    );
+
+    let limit_val = limit.unwrap_or(20).max(1);
+    let offset_val = offset.unwrap_or(0).max(0);
+
+    let mut all_params: Vec<Box<dyn ToSql>> = params.into_iter().map(|s| Box::new(s) as Box<dyn ToSql>).collect();
+    all_params.push(Box::new(limit_val));
+    all_params.push(Box::new(offset_val));
+    let all_refs: Vec<&dyn ToSql> = all_params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&data_sql).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(all_refs.as_slice(), row_to_review_item).map_err(|e| e.to_string())?;
+
+    let mut items = Vec::new();
+    for r in rows {
+        items.push(r.map_err(|e| e.to_string())?);
+    }
+
+    Ok(SearchResult { items, total })
 }
 
 #[tauri::command]
@@ -1460,8 +1674,31 @@ fn db_get_due_review_items(
     limit: Option<i64>,
     new_cards_remaining: Option<i64>,
     max_next_review: Option<i64>,
+    max_new_cards_per_day: Option<i64>,
 ) -> Result<Vec<ReviewItem>, String> {
     let conn = open_db(&app)?;
+    let today = chrono::Local::now().date_naive().to_string();
+
+    // Read study_limits as authoritative source for daily counts (safety net
+    // against stale frontend state when buildQueue is called via refresh).
+    let limits_row = conn.query_row(
+        "SELECT reviews_completed, new_cards_seen FROM study_limits WHERE date = ?1 AND language = ?2",
+        params![today, language.clone().unwrap_or_default()],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    );
+    let (_backend_reviews_done, backend_new_seen) = limits_row.unwrap_or((0, 0));
+
+    // Compute authoritative remaining: frontend hint vs. what study_limits says
+    let authoritative_new_remaining = match max_new_cards_per_day {
+        Some(max_new) => {
+            let backend_remaining = i64::max(0, max_new - backend_new_seen);
+            match new_cards_remaining {
+                Some(frontend_rem) => Some(i64::min(frontend_rem, backend_remaining)),
+                None => Some(backend_remaining),
+            }
+        }
+        None => new_cards_remaining,
+    };
     // Use provided cutoff, or default to end of today (23:59:59 local)
     let end_of_day = match max_next_review {
         Some(ts) => ts,
@@ -1495,36 +1732,18 @@ fn db_get_due_review_items(
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
 
-    fn map_row(row: &rusqlite::Row) -> rusqlite::Result<ReviewItem> {
-        Ok(ReviewItem {
-            id: row.get(0)?,
-            content: row.get(1)?,
-            EF: row.get(2)?,
-            I: row.get(3)?,
-            R: row.get(4)?,
-            state: row.get(5)?,
-            step: row.get(6)?,
-            lapse_count: row.get(7)?,
-            next_review: row.get(8)?,
-            tags: row.get(9)?,
-            language: row.get(10)?,
-            detail: row.get(11)?,
-            mnemonic: row.get(12)?,
-        })
-    }
-
     let rows = if let Some(ref lang) = language {
-        stmt.query_map(params![end_of_day, lang, limit_val], map_row).map_err(|e| e.to_string())?
+        stmt.query_map(params![end_of_day, lang, limit_val], row_to_review_item).map_err(|e| e.to_string())?
     } else {
-        stmt.query_map(params![end_of_day, limit_val], map_row).map_err(|e| e.to_string())?
+        stmt.query_map(params![end_of_day, limit_val], row_to_review_item).map_err(|e| e.to_string())?
     };
 
     for r in rows {
         items.push(r.map_err(|e| e.to_string())?);
     }
 
-    // Apply new card cap on the Rust side
-    if let Some(new_cap) = new_cards_remaining {
+    // Apply new card cap using authoritative value from study_limits
+    if let Some(new_cap) = authoritative_new_remaining {
         if new_cap <= 0 {
             items.retain(|item| item.state != "new" && item.state != "");
         } else {
@@ -1542,6 +1761,144 @@ fn db_get_due_review_items(
     }
 
     Ok(items)
+}
+
+// ─── Study Limits ─────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct StudyLimits {
+    reviews_completed: i64,
+    new_cards_seen: i64,
+}
+
+#[tauri::command]
+fn db_get_study_limits(app: tauri::AppHandle, language: String) -> Result<StudyLimits, String> {
+    let conn = open_db(&app)?;
+    let today = chrono::Local::now().date_naive().to_string();
+    let result = conn.query_row(
+        "SELECT reviews_completed, new_cards_seen FROM study_limits WHERE date=?1 AND language=?2",
+        params![today, language],
+        |row| Ok(StudyLimits {
+            reviews_completed: row.get(0)?,
+            new_cards_seen: row.get(1)?,
+        }),
+    );
+    match result {
+        Ok(limits) => Ok(limits),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(StudyLimits {
+            reviews_completed: 0,
+            new_cards_seen: 0,
+        }),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+fn db_increment_study_limit(app: tauri::AppHandle, language: String, field: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let today = chrono::Local::now().date_naive().to_string();
+    let column = match field.as_str() {
+        "reviews" => "reviews_completed",
+        "new_cards" => "new_cards_seen",
+        _ => return Err(format!("Invalid field: {}", field)),
+    };
+    conn.execute(
+        &format!(
+            "INSERT INTO study_limits(date, language, reviews_completed, new_cards_seen) VALUES (?1, ?2, 0, 0)
+             ON CONFLICT(date, language) DO UPDATE SET {} = {} + 1",
+            column, column
+        ),
+        params![today, language],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct WordInfo {
+    content: String,
+    ef: f64,
+    r: i64,
+    is_new: bool,
+    difficulty_color: String,
+}
+
+#[derive(Serialize)]
+struct WordClassification {
+    difficult: Vec<WordInfo>,
+    known: Vec<String>,
+}
+
+/// Pre-classify review items as difficult or known, sorted hardest-first.
+/// Merges with known_words table for additional known words.
+#[tauri::command]
+fn db_get_difficult_and_known_words(
+    app: tauri::AppHandle,
+    language: Option<String>,
+) -> Result<WordClassification, String> {
+    let conn = open_db(&app)?;
+
+    // Fetch review items (filtered by language if provided)
+    let sql = if language.is_some() {
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic FROM review_items WHERE language=?1"
+    } else {
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic FROM review_items"
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = if let Some(ref lang) = language {
+        stmt.query_map(params![lang], row_to_review_item)
+    } else {
+        stmt.query_map([], row_to_review_item)
+    }
+    .map_err(|e| e.to_string())?;
+    let mut items = Vec::new();
+    for r in rows {
+        items.push(r.map_err(|e| e.to_string())?);
+    }
+
+    // Sort hardest-first (by EF ascending)
+    items.sort_by(|a, b| {
+        a.EF
+            .partial_cmp(&b.EF)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut difficult = Vec::new();
+    let mut known: Vec<String> = Vec::new();
+
+    for item in &items {
+        if item.EF < 2.7 || item.R < 5 {
+            let is_new = item.state == "new" || item.state.is_empty();
+            difficult.push(WordInfo {
+                content: item.content.clone(),
+                ef: item.EF,
+                r: item.R,
+                is_new,
+                difficulty_color: item.difficulty_color.clone(),
+            });
+        } else {
+            known.push(item.content.to_lowercase());
+        }
+    }
+
+    // Merge words from known_words table
+    if let Ok(mut stmt2) =
+        conn.prepare("SELECT word FROM known_words WHERE language IS NULL OR language=?1")
+    {
+        let lang = language.unwrap_or_default();
+        let rows2 = stmt2
+            .query_map(params![lang], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        for r in rows2 {
+            if let Ok(w) = r {
+                let lower = w.to_lowercase();
+                if !known.contains(&lower) {
+                    known.push(lower);
+                }
+            }
+        }
+    }
+
+    Ok(WordClassification { difficult, known })
 }
 
 #[tauri::command]
@@ -2162,6 +2519,7 @@ pub fn run() {
             db_get_review_items,
             db_get_review_items_by_words,
             db_update_srs,
+            db_preview_srs_grades,
             db_increment_session_today,
             db_get_telemetry_days,
             db_record_activity,
@@ -2176,11 +2534,15 @@ pub fn run() {
             db_delete_session,
             db_update_review_detail,
             db_get_review_items_by_language,
+            db_search_review_items,
             db_get_due_review_items,
             db_import_review_items,
             db_generate_detail,
             db_delete_review_item,
             db_update_review_item,
+            db_get_study_limits,
+            db_increment_study_limit,
+            db_get_difficult_and_known_words,
             db_list_grammar_items,
             db_add_grammar_item,
             db_update_grammar_item,
