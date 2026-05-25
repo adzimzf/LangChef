@@ -1,80 +1,21 @@
-import { useEffect, useState, useRef, useCallback, useMemo } from 'react'
+import { useEffect, useState, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
 import {
   ArrowLeftOutlined,
   EditOutlined,
   DeleteOutlined,
-  CheckOutlined,
   CloseOutlined,
   FilterOutlined,
   SortAscendingOutlined,
   SortDescendingOutlined,
-  RobotOutlined,
   SearchOutlined,
 } from '@ant-design/icons'
-import { difficultyColor, difficultyBgClass, stateLabel } from '../lib/srs'
-import type { CardState } from '../lib/srs'
-
-type ReviewItem = {
-  id: string
-  content: string
-  EF: number
-  I: number
-  R: number
-  state: string
-  step: number
-  lapse_count: number
-  next_review: number | null
-  tags: string | null
-  language: string | null
-  detail: string | null
-}
+import type { ReviewItem } from '../lib/types'
+import { parseDetailJson } from '../lib/types'
+import EditWordForm from '../components/EditWordForm'
 
 const PAGE_SIZE = 20
-
-function formatNextReview(nextReviewSeconds: number): string {
-  const now = Date.now()
-  const target = nextReviewSeconds * 1000
-  const diffMs = target - now
-  const isPast = diffMs < 0
-  const absDiff = Math.abs(diffMs)
-
-  const MINUTE = 60 * 1000
-  const HOUR = 60 * MINUTE
-  const DAY = 24 * HOUR
-  const WEEK = 7 * DAY
-  const MONTH = 30 * DAY
-  const YEAR = 365 * DAY
-
-  let value: number
-  let unit: string
-
-  if (absDiff < MINUTE) {
-    value = Math.floor(absDiff / 1000)
-    unit = 's'
-  } else if (absDiff < HOUR) {
-    value = Math.floor(absDiff / MINUTE)
-    unit = 'm'
-  } else if (absDiff < DAY) {
-    value = Math.floor(absDiff / HOUR)
-    unit = 'h'
-  } else if (absDiff < WEEK) {
-    value = Math.floor(absDiff / DAY)
-    unit = 'd'
-  } else if (absDiff < MONTH) {
-    value = Math.floor(absDiff / WEEK)
-    unit = 'w'
-  } else if (absDiff < YEAR) {
-    value = Math.floor(absDiff / MONTH)
-    unit = 'mo'
-  } else {
-    value = Math.floor(absDiff / YEAR)
-    unit = 'y+'
-  }
-
-  return isPast ? 'overdue' : `in ${value}${unit}`
-}
 
 const LANGUAGES: Record<string, { label: string; flag: string }> = {
   ja: { label: 'Japanese', flag: '\u{1F1EF}\u{1F1F5}' },
@@ -90,29 +31,11 @@ const STATES: { value: string; label: string; color: string }[] = [
 
 type SortOrder = 'hardest' | 'easiest' | 'next_review'
 
-/** Compute an ease score (0 = hardest, 1 = easiest) for sorting */
-function easeScore(EF: number, R: number): number {
-  const efNorm = Math.min(1, Math.max(0, (EF - 1.3) / (3.0 - 1.3)))
-  const rNorm = Math.min(1, Math.max(0, R / 5))
-  return 0.6 * efNorm + 0.4 * rNorm
-}
-
-function parseDetailJson(detail: string): {
-  reading?: string; meaning?: string; part_of_speech?: string; example?: string; example_meaning?: string
-} | null {
-  try {
-    const match = detail.match(/\{[\s\S]*\}/)
-    if (!match) return null
-    return JSON.parse(match[0])
-  } catch {
-    return null
-  }
-}
-
 export default function WordsList() {
   const navigate = useNavigate()
 
-  const [allItems, setAllItems] = useState<ReviewItem[]>([])
+  const [items, setItems] = useState<ReviewItem[]>([])
+  const [total, setTotal] = useState(0)
   const [loading, setLoading] = useState(true)
 
   // Search
@@ -128,23 +51,13 @@ export default function WordsList() {
   const [sortOrder, setSortOrder] = useState<SortOrder>('hardest')
 
   // Pagination
-  const [page, setPage] = useState(1)
+  const [offset, setOffset] = useState(0)
 
   // Detail view
   const [selectedId, setSelectedId] = useState<string | null>(null)
 
   // Edit state
   const [editingId, setEditingId] = useState<string | null>(null)
-  const [editContent, setEditContent] = useState('')
-  const [editDetail, setEditDetail] = useState('')
-  const [generatingDetail, setGeneratingDetail] = useState(false)
-  // Structured detail form fields
-  const [editReading, setEditReading] = useState('')
-  const [editMeaning, setEditMeaning] = useState('')
-  const [editPartOfSpeech, setEditPartOfSpeech] = useState('')
-  const [editExample, setEditExample] = useState('')
-  const [editExampleMeaning, setEditExampleMeaning] = useState('')
-  const [saveError, setSaveError] = useState<string | null>(null)
 
   // Delete confirmation
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -153,93 +66,55 @@ export default function WordsList() {
   const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    loadItems()
+    loadItems(false)
   }, [])
 
-  async function loadItems() {
+  const loadItems = useCallback(async (append: boolean) => {
     setLoading(true)
+    const currentOffset = append ? offset + PAGE_SIZE : 0
     try {
-      const items = await invoke<ReviewItem[]>('db_get_review_items')
-      setAllItems(items)
+      const result = await invoke<{ items: ReviewItem[]; total: number }>('db_search_review_items', {
+        query: searchQuery || null,
+        language: filterLang,
+        state: filterState,
+        difficulty: filterDifficulty !== 'all' ? filterDifficulty : null,
+        sort: sortOrder,
+        offset: currentOffset,
+        limit: PAGE_SIZE,
+      })
+      if (append) {
+        setItems((prev) => [...prev, ...result.items])
+      } else {
+        setItems(result.items)
+      }
+      setOffset(currentOffset)
+      setTotal(result.total)
     } catch (e) {
       console.error('Failed to load items:', e)
     }
     setLoading(false)
-  }
+  }, [searchQuery, filterLang, filterState, filterDifficulty, sortOrder, offset])
 
-  // Filter + sort
-  const filteredItems = useMemo(() => {
-    let items = [...allItems]
-
-    // Search by content (word key)
-    if (searchQuery.trim()) {
-      const q = searchQuery.trim().toLowerCase()
-      items = items.filter((i) => i.content.toLowerCase().includes(q))
-    }
-
-    // Filter by language
-    if (filterLang) {
-      items = items.filter((i) => i.language === filterLang)
-    }
-
-    // Filter by state
-    if (filterState) {
-      items = items.filter((i) => i.state === filterState)
-    }
-
-    // Filter by difficulty
-    if (filterDifficulty !== 'all') {
-      items = items.filter((i) => {
-        const ease = easeScore(i.EF, i.R)
-        if (filterDifficulty === 'hard') return ease < 0.3
-        if (filterDifficulty === 'medium') return ease >= 0.3 && ease < 0.7
-        if (filterDifficulty === 'easy') return ease >= 0.7
-        return true
-      })
-    }
-
-    // Sort
-    if (sortOrder === 'next_review') {
-      items.sort((a, b) => {
-        const aVal = a.next_review ?? Infinity
-        const bVal = b.next_review ?? Infinity
-        return aVal - bVal
-      })
-    } else if (sortOrder === 'hardest') {
-      items.sort((a, b) => easeScore(a.EF, a.R) - easeScore(b.EF, b.R))
-    } else {
-      items.sort((a, b) => easeScore(b.EF, b.R) - easeScore(a.EF, a.R))
-    }
-
-    return items
-  }, [allItems, searchQuery, filterLang, filterState, filterDifficulty, sortOrder])
-
-  // Visible items for current page
-  const visibleItems = useMemo(() => {
-    return filteredItems.slice(0, page * PAGE_SIZE)
-  }, [filteredItems, page])
-
-  const hasMore = visibleItems.length < filteredItems.length
-
-  // Reset page when filters/sort change
+  // Reload on filter/sort change (non-append)
   useEffect(() => {
-    setPage(1)
+    loadItems(false)
   }, [searchQuery, filterLang, filterState, filterDifficulty, sortOrder])
 
-  // Infinite scroll: load more when scrolling near the bottom
+  const hasMore = items.length < total
+
+  // Infinite scroll: load more when scrolling near bottom
   const handleScroll = useCallback(() => {
     const el = scrollRef.current
-    if (!el || !hasMore) return
-    // When user scrolls near the bottom, load more
+    if (!el || !hasMore || loading) return
     if (el.scrollHeight - el.scrollTop - el.clientHeight < 150) {
-      setPage((p) => p + 1)
+      loadItems(true)
     }
-  }, [hasMore])
+  }, [hasMore, loading, loadItems])
 
   async function handleDelete(id: string) {
     try {
       await invoke('db_delete_review_item', { id })
-      setAllItems((prev) => prev.filter((item) => item.id !== id))
+      setItems((prev) => prev.filter((item) => item.id !== id))
       if (selectedId === id) setSelectedId(null)
       setDeletingId(null)
     } catch (e) {
@@ -247,111 +122,11 @@ export default function WordsList() {
     }
   }
 
-  function startEdit(item: ReviewItem) {
-    setEditingId(item.id)
-    setEditContent(item.content)
-    setEditDetail(item.detail || '')
-    // Parse detail into form fields
-    const parsed = item.detail ? parseDetailJson(item.detail) : null
-    setEditReading(parsed?.reading || '')
-    setEditMeaning(parsed?.meaning || '')
-    setEditPartOfSpeech(parsed?.part_of_speech || '')
-    setEditExample(parsed?.example || '')
-    setEditExampleMeaning(parsed?.example_meaning || '')
-  }
-
-  /** Serialize form fields back to a detail JSON string */
-  function serializeDetail(): string {
-    const obj: Record<string, string> = {}
-    if (editReading) obj.reading = editReading
-    if (editMeaning) obj.meaning = editMeaning
-    if (editPartOfSpeech) obj.part_of_speech = editPartOfSpeech
-    if (editExample) obj.example = editExample
-    if (editExampleMeaning) obj.example_meaning = editExampleMeaning
-    return Object.keys(obj).length > 0 ? JSON.stringify(obj) : ''
-  }
-
-  async function generateDetail() {
-    if (!editingId) return
-    const item = allItems.find((i) => i.id === editingId)
-    if (!item) return
-    const apiHost = localStorage.getItem('api_host') || ''
-    const apiKey = localStorage.getItem('api_key') || ''
-    const model = localStorage.getItem('api_model') || 'gpt-3.5-turbo'
-    if (!apiHost || !apiKey) {
-      alert('Please configure your API settings first (Settings page).')
-      return
-    }
-    setGeneratingDetail(true)
-    try {
-      const lang = item.language || 'ja'
-      const result = await invoke<string>('db_generate_detail', {
-        apiHost, apiKey, model,
-        content: item.content,
-        language: lang,
-      })
-      setEditDetail(result)
-      // Parse into form fields
-      const parsed = parseDetailJson(result)
-      setEditReading(parsed?.reading || '')
-      setEditMeaning(parsed?.meaning || '')
-      setEditPartOfSpeech(parsed?.part_of_speech || '')
-      setEditExample(parsed?.example || '')
-      setEditExampleMeaning(parsed?.example_meaning || '')
-      // Update local state
-      setAllItems((prev) =>
-        prev.map((i) => (i.id === editingId ? { ...i, detail: result } : i))
-      )
-    } catch (e) {
-      alert(`Failed to generate: ${e}`)
-    }
-    setGeneratingDetail(false)
-  }
-
-  async function saveEdit() {
-    if (!editingId) return
-    setSaveError(null)
-    try {
-      const detailValue = serializeDetail()
-      // Update content - only if changed and non-empty
-      if (editContent.trim()) {
-        await invoke('db_update_review_item', {
-          item: { id: editingId, content: editContent.trim() },
-        })
-      }
-      // Update detail
-      await invoke('db_update_review_detail', { id: editingId, detail: detailValue })
-      // Refetch from DB to ensure consistency
-      await loadItems()
-      // Go to detail view
-      setSelectedId(editingId)
-      setEditingId(null)
-    } catch (e: any) {
-      const msg = typeof e === 'string' ? e : e?.message || String(e)
-      setSaveError(msg)
-    }
-  }
-
-  function cancelEdit() {
-    setEditingId(null)
-    setEditContent('')
-    setEditDetail('')
-    setEditReading('')
-    setEditMeaning('')
-    setEditPartOfSpeech('')
-    setEditExample('')
-    setEditExampleMeaning('')
-    setSaveError(null)
-  }
-
-  // Get available languages from data
-  const availableLangs = useMemo(() => {
-    const langs = new Set(allItems.map((i) => i.language).filter(Boolean) as string[])
-    return Array.from(langs)
-  }, [allItems])
+  // Available languages for filter
+  const availableLangs = Object.keys(LANGUAGES)
 
   // Selected item for detail view
-  const selectedItem = selectedId ? allItems.find((i) => i.id === selectedId) : null
+  const selectedItem = selectedId ? items.find((i) => i.id === selectedId) : null
 
   function renderDetailContent(detail: string | null) {
     if (!detail) {
@@ -409,14 +184,14 @@ export default function WordsList() {
       <div className="flex flex-col h-full -m-4">
         <div className="shrink-0 sticky top-0 z-10 bg-gray-50 flex items-center gap-3 px-4 pt-4 pb-2">
           <button
-            onClick={() => { setSelectedId(null); loadItems() }}
+            onClick={() => { setSelectedId(null); loadItems(false) }}
             className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
           >
             <ArrowLeftOutlined />
           </button>
           <h2 className="text-lg font-semibold flex-1">Word Detail</h2>
           <button
-            onClick={() => startEdit(selectedItem)}
+            onClick={() => setEditingId(selectedItem.id)}
             className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-blue-50 text-blue-600 text-sm font-medium hover:bg-blue-100 transition-colors"
           >
             <EditOutlined /> Edit
@@ -462,21 +237,18 @@ export default function WordsList() {
                     : 'bg-green-500'
                 }`}
               >
-                {stateLabel((selectedItem.state || 'new') as CardState)}
+                {selectedItem.state_label}
               </span>
               <div
                 className="w-16 h-2 rounded-full"
-                style={{ backgroundColor: difficultyColor(selectedItem.EF, selectedItem.R) }}
+                style={{ backgroundColor: selectedItem.difficulty_color }}
               />
             </div>
 
             <div className="text-2xl font-semibold mb-1">{selectedItem.content}</div>
             {selectedItem.tags && (
               <span
-                className={`inline-block text-xs px-2 py-0.5 rounded-full text-white ${difficultyBgClass(
-                  selectedItem.EF,
-                  selectedItem.R
-                )} mt-1`}
+                className={`inline-block text-xs px-2 py-0.5 rounded-full text-white ${selectedItem.difficulty_bg_class} mt-1`}
               >
                 {selectedItem.tags}
               </span>
@@ -490,17 +262,27 @@ export default function WordsList() {
             {/* Detail section */}
             {renderDetailContent(selectedItem.detail)}
 
+            {/* Mnemonic section */}
+            <div className="mt-3 pt-2 border-t border-gray-100 text-left">
+              <span className="text-xs text-gray-400">Mnemonic</span>
+              {selectedItem.mnemonic ? (
+                <p className="text-sm text-amber-700 bg-amber-50 p-2 rounded-lg mt-1">{selectedItem.mnemonic}</p>
+              ) : (
+                <p className="text-xs text-gray-300 mt-1">No mnemonic. Edit this word to generate one.</p>
+              )}
+            </div>
+
             {/* SRS stats */}
             <div className="mt-4 pt-3 border-t border-gray-100">
               <div className="flex items-center justify-center gap-4 text-xs text-gray-400">
                 <span>Reps: {selectedItem.R}</span>
-                <span>Interval: {selectedItem.I}d</span>
-                <span>EF: {selectedItem.EF.toFixed(2)}</span>
+                <span>Stability: {selectedItem.fsrs_stability != null ? `${selectedItem.fsrs_stability.toFixed(1)}d` : `${selectedItem.I}d`}</span>
+                <span>Difficulty: {selectedItem.fsrs_difficulty != null ? selectedItem.fsrs_difficulty.toFixed(1) : '—'}</span>
                 {selectedItem.lapse_count > 0 && <span>Lapses: {selectedItem.lapse_count}</span>}
               </div>
               {selectedItem.next_review && (
                 <div className="text-xs text-gray-300 mt-1">
-                  Next review: {formatNextReview(selectedItem.next_review)}
+                  Next review: {selectedItem.next_review_formatted}
                 </div>
               )}
             </div>
@@ -512,134 +294,29 @@ export default function WordsList() {
 
   // ─── Edit view (full screen overlay) ─────────────────────────────────
   if (editingId) {
-    const item = allItems.find((i) => i.id === editingId)
-    const hasDetail = editReading || editMeaning || editPartOfSpeech || editExample || editExampleMeaning || editDetail
-
+    const item = items.find((i) => i.id === editingId)
+    if (!item) {
+      setEditingId(null)
+      return null
+    }
     return (
-      <div className="flex flex-col h-full -m-4">
-        <div className="shrink-0 sticky top-0 z-10 bg-gray-50 flex items-center gap-3 px-4 pt-4 pb-2">
-          <button
-            onClick={cancelEdit}
-            className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
-          >
-            <ArrowLeftOutlined />
-          </button>
-          <h2 className="text-lg font-semibold">Edit Word</h2>
-        </div>
-
-        <div className="space-y-4 flex-1 overflow-y-auto px-4">
-          <div>
-            <label className="text-sm text-gray-500 mb-1 block">Content</label>
-            <input
-              type="text"
-              value={editContent}
-              onChange={(e) => setEditContent(e.target.value)}
-              className="w-full px-3 py-2 text-sm border border-gray-200 rounded-xl outline-none focus:border-blue-400"
-              placeholder="Word or phrase"
-            />
-          </div>
-
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-sm text-gray-500">Detail</label>
-              {!hasDetail && (
-                <button
-                  onClick={generateDetail}
-                  disabled={generatingDetail}
-                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-500 text-white text-xs font-medium hover:bg-blue-600 transition-colors disabled:opacity-50"
-                >
-                  <RobotOutlined />
-                  {generatingDetail ? 'Generating...' : 'Generate with AI'}
-                </button>
-              )}
-            </div>
-
-            {hasDetail ? (
-              /* Structured form fields for editing detail */
-              <div className="space-y-3 bg-gray-50 rounded-xl p-3">
-                <div>
-                  <label className="text-xs text-gray-400 block mb-0.5">Reading</label>
-                  <input
-                    type="text"
-                    value={editReading}
-                    onChange={(e) => setEditReading(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white"
-                    placeholder="Pronunciation in IPA or romaji"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-400 block mb-0.5">Meaning</label>
-                  <input
-                    type="text"
-                    value={editMeaning}
-                    onChange={(e) => setEditMeaning(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white"
-                    placeholder="English translation"
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-400 block mb-0.5">Part of speech</label>
-                  <input
-                    type="text"
-                    value={editPartOfSpeech}
-                    onChange={(e) => setEditPartOfSpeech(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white"
-                    placeholder="noun / verb / adjective / etc."
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-400 block mb-0.5">Example sentence</label>
-                  <textarea
-                    value={editExample}
-                    onChange={(e) => setEditExample(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white resize-none"
-                    placeholder="A natural example sentence"
-                    rows={2}
-                  />
-                </div>
-                <div>
-                  <label className="text-xs text-gray-400 block mb-0.5">Example meaning</label>
-                  <textarea
-                    value={editExampleMeaning}
-                    onChange={(e) => setEditExampleMeaning(e.target.value)}
-                    className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white resize-none"
-                    placeholder="English translation of the example"
-                    rows={2}
-                  />
-                </div>
-                <button
-                  onClick={generateDetail}
-                  disabled={generatingDetail}
-                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-gray-200 text-gray-600 text-xs font-medium hover:bg-gray-300 transition-colors disabled:opacity-50"
-                >
-                  <RobotOutlined />
-                  {generatingDetail ? 'Regenerating...' : 'Regenerate with AI'}
-                </button>
-              </div>
-            ) : (
-              /* Empty state */
-              <div className="bg-gray-50 rounded-xl p-6 text-center">
-                <p className="text-sm text-gray-400 mb-1">No detail yet</p>
-                <p className="text-xs text-gray-300">Click "Generate with AI" above or fill in the content and save first.</p>
-              </div>
-            )}
-          </div>
-        </div>
-
-        <div className="shrink-0 px-4 pt-2 pb-4 bg-gray-50">
-          {saveError && (
-            <div className="mb-2 p-2.5 rounded-xl bg-red-50 border border-red-100 text-red-700 text-sm">
-              {saveError}
-            </div>
-          )}
-          <button
-            onClick={saveEdit}
-            className="w-full py-3 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600 active:bg-blue-700 transition-colors flex items-center justify-center gap-2"
-          >
-            <CheckOutlined /> Save
-          </button>
-        </div>
-      </div>
+      <EditWordForm
+        item={item}
+        title="Edit Word"
+        onCancel={() => setEditingId(null)}
+        onSave={async (data) => {
+          if (data.content) {
+            await invoke('db_update_review_item', {
+              item: { id: editingId, content: data.content },
+            })
+          }
+          await invoke('db_update_review_detail', { id: editingId, detail: data.detail })
+          await invoke('db_update_mnemonic', { id: editingId, mnemonic: data.mnemonic })
+          await loadItems(false)
+          setSelectedId(editingId)
+          setEditingId(null)
+        }}
+      />
     )
   }
 
@@ -656,7 +333,7 @@ export default function WordsList() {
             <ArrowLeftOutlined />
           </button>
           <h2 className="text-lg font-semibold flex-1">Words List</h2>
-          <span className="text-xs text-gray-400">{filteredItems.length} words</span>
+          <span className="text-xs text-gray-400">{total} words</span>
         </div>
 
         {/* Search */}
@@ -808,11 +485,11 @@ export default function WordsList() {
         <div className="flex items-center justify-center py-16 text-gray-400">
           <p className="text-sm">Loading words...</p>
         </div>
-      ) : filteredItems.length === 0 ? (
+      ) : items.length === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-3">
           <div className="text-4xl">📚</div>
           <p className="text-sm">No words found</p>
-          {allItems.length === 0 ? (
+          {total === 0 ? (
             <p className="text-xs text-gray-300">Start chatting and flag difficult words to build your deck.</p>
           ) : (
             <button
@@ -834,27 +511,26 @@ export default function WordsList() {
           className="flex-1 overflow-y-auto px-4"
         >
           {/* Load more indicator (top) */}
-          {hasMore && page > 1 && (
+          {hasMore && offset > 0 && (
             <div className="flex items-center justify-center py-2 text-gray-400">
-              <span className="text-xs">{filteredItems.length - visibleItems.length} more words below</span>
+              <span className="text-xs">{total - items.length} more words available</span>
             </div>
           )}
 
           <div className="bg-white rounded-xl shadow-sm overflow-hidden">
-            {visibleItems.map((item, idx) => {
-              const ease = easeScore(item.EF, item.R)
+            {items.map((item, idx) => {
               return (
                 <div
                   key={item.id}
                   onClick={() => setSelectedId(item.id)}
                   className={`flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-gray-50 active:bg-gray-100 transition-colors ${
-                    idx < visibleItems.length - 1 ? 'border-b border-gray-50' : ''
+                    idx < items.length - 1 ? 'border-b border-gray-50' : ''
                   }`}
                 >
                   {/* Difficulty indicator */}
                   <div
                     className="w-1 h-8 rounded-full shrink-0"
-                    style={{ backgroundColor: difficultyColor(item.EF, item.R) }}
+                    style={{ backgroundColor: item.difficulty_color }}
                   />
 
                   {/* Word content */}
@@ -872,7 +548,7 @@ export default function WordsList() {
                             : 'bg-green-500'
                         }`}
                       >
-                        {stateLabel((item.state || 'new') as CardState)}
+                        {item.state_label}
                       </span>
                       {item.language && LANGUAGES[item.language] && (
                         <span className="text-xs shrink-0">{LANGUAGES[item.language].flag}</span>
@@ -881,21 +557,18 @@ export default function WordsList() {
                     <div className="flex items-center gap-2 mt-0.5">
                       {item.tags && (
                         <span
-                          className={`text-[10px] px-1.5 py-0.5 rounded-full text-white ${difficultyBgClass(
-                            item.EF,
-                            item.R
-                          )}`}
+                          className={`text-[10px] px-1.5 py-0.5 rounded-full text-white ${item.difficulty_bg_class}`}
                         >
                           {item.tags}
                         </span>
                       )}
                       <span className="text-[10px] text-gray-300">
-                        EF {item.EF.toFixed(2)} &middot; R {item.R}
+                        S {item.fsrs_stability != null ? `${Math.round(item.fsrs_stability)}d` : `${item.I}d`} &middot; D {item.fsrs_difficulty != null ? item.fsrs_difficulty.toFixed(1) : '—'} &middot; R {item.R}
                         {item.lapse_count > 0 && ` \u00B7 ${item.lapse_count} lapse${item.lapse_count > 1 ? 's' : ''}`}
                       </span>
                       {item.next_review && (
                         <span className="text-[10px] text-gray-400 shrink-0">
-                          Next Review: {formatNextReview(item.next_review)}
+                          Next Review: {item.next_review_formatted}
                         </span>
                       )}
                     </div>
@@ -921,7 +594,7 @@ export default function WordsList() {
                     ) : (
                       <>
                         <button
-                          onClick={() => startEdit(item)}
+                          onClick={() => setEditingId(item.id)}
                           className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-blue-500 hover:bg-blue-50 transition-colors"
                           title="Edit"
                         >
@@ -946,7 +619,7 @@ export default function WordsList() {
           {hasMore && (
             <div className="flex items-center justify-center py-3 text-gray-400">
               <span className="text-xs">
-                Showing {visibleItems.length} of {filteredItems.length} &middot; Scroll down for more
+                Showing {items.length} of {total} &middot; Scroll down for more
               </span>
             </div>
           )}

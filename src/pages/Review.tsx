@@ -1,39 +1,18 @@
 import { useEffect, useMemo, useState, useRef, useCallback } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import type { Grade, CardState } from '../lib/srs'
-import {
-  scheduleCard,
-  previewGrades,
-  formatNextReview,
-  difficultyColor,
-  difficultyBgClass,
-  stateLabel,
-  DEFAULT_SRS_CONFIG,
-} from '../lib/srs'
+import type { Grade } from '../lib/types'
 import {
   ImportOutlined,
   ReloadOutlined,
   RobotOutlined,
   EditOutlined,
-  CheckOutlined,
   CloseOutlined,
   SettingOutlined,
+  BulbOutlined,
 } from '@ant-design/icons'
-
-type ReviewItem = {
-  id: string
-  content: string
-  EF: number
-  I: number
-  R: number
-  state: string
-  step: number
-  lapse_count: number
-  next_review: number | null
-  tags: string | null
-  language: string | null
-  detail: string | null
-}
+import type { ReviewItem } from '../lib/types'
+import { parseDetailJson } from '../lib/types'
+import EditWordForm from '../components/EditWordForm'
 
 const LANGUAGES: Record<string, { label: string; flag: string }> = {
   ja: { label: 'Japanese', flag: '\u{1F1EF}\u{1F1F5}' },
@@ -55,65 +34,27 @@ function getMaxNewCards(): number {
   return val ? parseInt(val, 10) || MAX_NEW_CARDS_DEFAULT : MAX_NEW_CARDS_DEFAULT
 }
 
-function todayKey(): string {
-  return new Date().toISOString().slice(0, 10)
-}
-
-function getReviewedToday(): number {
-  const stored = localStorage.getItem(`reviewed_${todayKey()}`)
-  return stored ? parseInt(stored, 10) : 0
-}
-
-function incrementReviewedToday() {
-  const key = `reviewed_${todayKey()}`
-  const current = getReviewedToday()
-  localStorage.setItem(key, String(current + 1))
-}
-
-function getNewCardsToday(): number {
-  const stored = localStorage.getItem(`new_seen_${todayKey()}`)
-  return stored ? parseInt(stored, 10) : 0
-}
-
-function incrementNewCardsToday() {
-  const key = `new_seen_${todayKey()}`
-  const current = getNewCardsToday()
-  localStorage.setItem(key, String(current + 1))
-}
-
 // Grade button config
 type GradeOption = { grade: Grade; label: string; nextLabel: string; color: string }
 
-function parseDetailJson(detail: string): { reading?: string; meaning?: string; part_of_speech?: string; example?: string; example_meaning?: string } | null {
-  try {
-    const match = detail.match(/\{[\s\S]*\}/)
-    if (!match) return null
-    return JSON.parse(match[0])
-  } catch {
-    return null
-  }
-}
+function SessionCompleteEffect({ sessionCompleted }: { sessionCompleted: number }) {
+  const recorded = useRef(false)
 
-/**
- * Convert a ReviewItem (from DB) into the Card shape expected by srs.ts
- */
-function itemToCard(item: ReviewItem) {
-  return {
-    id: item.id,
-    content: item.content,
-    EF: item.EF,
-    I: item.I,
-    R: item.R,
-    state: (item.state || 'new') as CardState,
-    step: item.step || 0,
-    lapseCount: item.lapse_count || 0,
-    lastReviewed: undefined,
-    nextReview: item.next_review ? item.next_review * 1000 : undefined, // DB stores seconds, Card expects ms
-    history: [],
-    tags: item.tags ? item.tags.split(',') : undefined,
-    language: item.language || undefined,
-    detail: item.detail || undefined,
-  }
+  useEffect(() => {
+    if (sessionCompleted > 0 && !recorded.current) {
+      recorded.current = true
+      invoke('db_record_activity', { activityType: 'review' }).catch(() => {})
+    }
+  }, [sessionCompleted])
+
+  // Reset when session restarts (sessionCompleted goes back to 0)
+  useEffect(() => {
+    if (sessionCompleted === 0) {
+      recorded.current = false
+    }
+  }, [sessionCompleted])
+
+  return null
 }
 
 export default function Review() {
@@ -121,16 +62,20 @@ export default function Review() {
   const [selectedLang, setSelectedLang] = useState<string | null>(null)
   const [revealed, setRevealed] = useState(false)
   const [generatingDetail, setGeneratingDetail] = useState(false)
-  const [editingDetail, setEditingDetail] = useState<string | null>(null)
-  const [editDetailText, setEditDetailText] = useState('')
+  const [generatingMnemonic, setGeneratingMnemonic] = useState(false)
+  const [showMnemonic, setShowMnemonic] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
   const [showImport, setShowImport] = useState(false)
   const [importText, setImportText] = useState('')
   const [importLang, setImportLang] = useState('ja')
   const [importing, setImporting] = useState(false)
   const [importResult, setImportResult] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
-  const [reviewedToday, setReviewedToday] = useState(getReviewedToday())
-  const [newCardsToday, setNewCardsToday] = useState(getNewCardsToday())
+  const [reviewedToday, setReviewedToday] = useState(0)
+  const [newCardsToday, setNewCardsToday] = useState(0)
+  const newCardsTodayRef = useRef(0)
+  // Keep ref in sync so loadDueItems (captured in buildQueue) always reads the latest value
+  useEffect(() => { newCardsTodayRef.current = newCardsToday }, [newCardsToday])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const maxReviews = getMaxReviews()
   const maxNewCards = getMaxNewCards()
@@ -163,6 +108,17 @@ export default function Review() {
     loadItems()
   }, [])
 
+  // Load study limits from backend when language changes
+  useEffect(() => {
+    if (!selectedLang) return
+    invoke<{ reviews_completed: number; new_cards_seen: number }>('db_get_study_limits', { language: selectedLang })
+      .then(limits => {
+        setReviewedToday(limits.reviews_completed)
+        setNewCardsToday(limits.new_cards_seen)
+      })
+      .catch(() => {})
+  }, [selectedLang])
+
   async function loadItems() {
     setLoading(true)
     try {
@@ -174,7 +130,7 @@ export default function Review() {
 
   async function loadDueItems(lang: string | null) {
     try {
-      const remaining = Math.max(0, maxNewCards - getNewCardsToday())
+      const remaining = Math.max(0, maxNewCards - newCardsTodayRef.current)
       const d = new Date()
       d.setHours(23, 59, 59, 999)
       const items = await invoke<ReviewItem[]>('db_get_due_review_items', {
@@ -182,6 +138,7 @@ export default function Review() {
         limit: maxReviews,
         newCardsRemaining: remaining,
         maxNextReview: Math.floor(d.getTime() / 1000),
+        maxNewCardsPerDay: maxNewCards,
       })
       // don't remove this line
       // console.log(items)
@@ -256,18 +213,26 @@ export default function Review() {
     return deckItems.filter((item: ReviewItem) => !item.next_review || item.next_review <= endOfDaySeconds).length
   })()
 
-  // Anki-style grade options with dynamic next-review preview
-  const gradeOptions: GradeOption[] = (() => {
-    if (!visibleCard) return []
-    const card = itemToCard(visibleCard)
-    const previews = previewGrades(card, DEFAULT_SRS_CONFIG)
-    return [
-      { grade: 'again', label: 'Again', nextLabel: formatNextReview(previews.again), color: 'bg-red-500' },
-      { grade: 'hard', label: 'Hard', nextLabel: formatNextReview(previews.hard), color: 'bg-orange-500' },
-      { grade: 'good', label: 'Good', nextLabel: formatNextReview(previews.good), color: 'bg-blue-500' },
-      { grade: 'easy', label: 'Easy', nextLabel: formatNextReview(previews.easy), color: 'bg-green-500' },
-    ]
-  })()
+  // Anki-style grade options with dynamic next-review preview (loaded from backend)
+  const [gradeOptions, setGradeOptions] = useState<GradeOption[]>([])
+
+  useEffect(() => {
+    if (!visibleCard) { setGradeOptions([]); return }
+    let cancelled = false
+    invoke<Array<{ grade: string; label: string; next_review_formatted: string; lapsed: boolean; graduated: boolean }>>('db_preview_srs_grades', { id: visibleCard.id })
+      .then(previews => {
+        if (cancelled) return
+        const colors: Record<string, string> = { again: 'bg-red-500', hard: 'bg-orange-500', good: 'bg-blue-500', easy: 'bg-green-500' }
+        setGradeOptions(previews.map(p => ({
+          grade: p.grade as Grade,
+          label: p.label,
+          nextLabel: p.next_review_formatted,
+          color: colors[p.grade] || 'bg-gray-500',
+        })))
+      })
+      .catch(() => { if (!cancelled) setGradeOptions([]) })
+    return () => { cancelled = true }
+  }, [visibleCard?.id])
 
   async function handleGrade(grade: Grade) {
     if (!visibleCard) return
@@ -277,32 +242,32 @@ export default function Review() {
 
     // Capture card ID upfront so the setSessionQueue closure never uses a stale visibleCard
     const cardId = visibleCard.id
+    const cardState = visibleCard.state || 'new'
 
-    // Compute new SRS state locally for immediate UI update
-    const card = itemToCard(visibleCard)
-    const { card: updated, lapsed } = scheduleCard(card, grade, DEFAULT_SRS_CONFIG)
+    let result: { EF: number; I: number; R: number; state: string; step: number; lapse_count: number; next_review: number; lapsed: boolean; graduated: boolean; fsrs_stability: number | null; fsrs_difficulty: number | null }
+    try {
+      result = await invoke<{ EF: number; I: number; R: number; state: string; step: number; lapse_count: number; next_review: number; lapsed: boolean; graduated: boolean; fsrs_stability: number | null; fsrs_difficulty: number | null }>('db_update_srs', { id: cardId, grade })
+    } catch {
+      isGrading.current = false
+      return
+    }
 
-    // Update SRS in DB (fire and forget)
-    invoke('db_update_srs', { id: cardId, grade }).catch(() => {})
-
-    // Only count as reviewed if card's new next_review is tomorrow or later
-    if (updated.nextReview && updated.nextReview > endOfDaySeconds * 1000) {
-      incrementReviewedToday()
+    // Only count as reviewed if card graduated (backend determines this)
+    if (result.graduated) {
+      invoke('db_increment_study_limit', { language: selectedLang, field: 'reviews' }).catch(() => {})
       setReviewedToday(prev => prev + 1)
     }
 
     // Track new cards introduced today
-    if (card.state === 'new') {
-      incrementNewCardsToday()
+    if (cardState === 'new') {
+      invoke('db_increment_study_limit', { language: selectedLang, field: 'new_cards' }).catch(() => {})
       setNewCardsToday(prev => prev + 1)
     }
 
     setRevealed(false)
+    setShowMnemonic(false)
 
-    // Determine if the card graduated (left learning/relearning into review)
-    const graduated = (updated.state === 'review') && (card.state === 'new' || card.state === 'learning' || card.state === 'relearning')
-
-    // Update session queue with locally computed new state.
+    // Update session queue with backend-computed SRS state.
     // Uses captured cardId instead of visibleCard from outer scope to avoid stale closures.
     setSessionQueue(prev => {
       const idx = prev.findIndex(item => item.id === cardId)
@@ -311,39 +276,38 @@ export default function Review() {
       const before = prev.slice(0, idx)
       const after = prev.slice(idx + 1)
 
-      // Map the updated card back to ReviewItem shape
       const updatedItem: ReviewItem = {
         ...prev[idx],
-        EF: updated.EF,
-        I: updated.I,
-        R: updated.R,
-        state: updated.state,
-        step: updated.step,
-        lapse_count: updated.lapseCount,
-        next_review: updated.nextReview ? Math.round(updated.nextReview / 1000) : null,
+        EF: result.EF,
+        I: result.I,
+        R: result.R,
+        state: result.state,
+        step: result.step,
+        lapse_count: result.lapse_count,
+        next_review: result.next_review,
+        fsrs_stability: result.fsrs_stability,
+        fsrs_difficulty: result.fsrs_difficulty,
       }
 
       let newQueue: ReviewItem[]
-      if (graduated && !lapsed) {
+      if (result.graduated && !result.lapsed) {
         // Card graduated to Review: remove from session queue entirely.
-        // It will reappear on a future day when its next_review arrives.
         newQueue = [...before, ...after]
       } else {
-        // All other cases (Again/Hard/Good on learning/relearning): move to back of queue.
-        // Even if next_review is still today, the card cycles to the end.
+        // All other cases: move to back of queue.
         newQueue = [...before, ...after, updatedItem]
       }
 
       // If new card limit reached, remove remaining new cards from the queue
-      const newSeenAfterGrade = card.state === 'new' ? newCardsToday + 1 : newCardsToday
+      const newSeenAfterGrade = cardState === 'new' ? newCardsToday + 1 : newCardsToday
       if (newSeenAfterGrade >= maxNewCards) {
-        newQueue = newQueue.filter(item => item.state !== 'new' && item.state !== null)
+        newQueue = newQueue.filter(item => item.state !== 'new' && item.state !== null && item.state !== '')
       }
 
       return newQueue
     })
 
-    if (graduated && !lapsed) {
+    if (result.graduated && !result.lapsed) {
       setSessionCompleted(prev => prev + 1)
     }
 
@@ -357,7 +321,7 @@ export default function Review() {
     if (!visibleCard) return
     const apiHost = localStorage.getItem('api_host') || ''
     const apiKey = localStorage.getItem('api_key') || ''
-    const model = localStorage.getItem('api_model') || 'gpt-3.5-turbo'
+    const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
     if (!apiHost || !apiKey) {
       alert('Please configure your API settings first (Settings page).')
       return
@@ -379,16 +343,33 @@ export default function Review() {
     setGeneratingDetail(false)
   }
 
-  async function saveDetail() {
-    if (!editingDetail) return
+  async function generateMnemonic() {
+    if (!visibleCard) return
+    const apiHost = localStorage.getItem('api_host') || ''
+    const apiKey = localStorage.getItem('api_key') || ''
+    const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
+    if (!apiHost || !apiKey) {
+      alert('Please configure your API settings first (Settings page).')
+      return
+    }
+    setGeneratingMnemonic(true)
     try {
-      await invoke('db_update_review_detail', { id: editingDetail, detail: editDetailText })
+      const lang = visibleCard.language || 'ja'
+      const result = await invoke<string>('db_generate_mnemonic', {
+        apiHost, apiKey, model,
+        id: visibleCard.id,
+        content: visibleCard.content,
+        language: lang,
+        detail: visibleCard.detail,
+      })
       setSessionQueue(prev => prev.map(item =>
-        item.id === editingDetail ? { ...item, detail: editDetailText } : item
+        item.id === visibleCard.id ? { ...item, mnemonic: result } : item
       ))
-    } catch {}
-    setEditingDetail(null)
-    setEditDetailText('')
+      setShowMnemonic(true)
+    } catch (e) {
+      alert(`Failed to generate mnemonic: ${e}`)
+    }
+    setGeneratingMnemonic(false)
   }
 
   async function handleImport() {
@@ -447,8 +428,7 @@ export default function Review() {
             </button>
             <button
               onClick={() => {
-                setEditingDetail(visibleCard?.id || null)
-                setEditDetailText('')
+                setEditingId(visibleCard?.id || null)
               }}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gray-200 text-gray-700 text-sm font-medium hover:bg-gray-300 active:bg-gray-400 transition-colors"
             >
@@ -490,10 +470,45 @@ export default function Review() {
               )}
             </div>
           )}
+          {/* Mnemonic section */}
+          <div className="mt-3 pt-2 border-t border-gray-100">
+            <div className="flex items-center justify-between mb-1">
+              <span className="text-xs text-gray-400">Mnemonic</span>
+              {!visibleCard?.mnemonic && (
+                <button
+                  onClick={generateMnemonic}
+                  disabled={generatingMnemonic}
+                  className="flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-50 text-amber-600 text-xs font-medium hover:bg-amber-100 transition-colors disabled:opacity-50"
+                >
+                  <BulbOutlined />
+                  {generatingMnemonic ? 'Creating...' : 'Create mnemonic'}
+                </button>
+              )}
+            </div>
+            {visibleCard?.mnemonic ? (
+              <div>
+                <button
+                  onClick={() => setShowMnemonic(!showMnemonic)}
+                  className="text-sm text-left w-full"
+                >
+                  {showMnemonic ? visibleCard.mnemonic : 'Tap to reveal mnemonic'}
+                </button>
+                <button
+                  onClick={generateMnemonic}
+                  disabled={generatingMnemonic}
+                  className="text-xs text-gray-400 hover:text-gray-600 mt-1"
+                >
+                  <ReloadOutlined className="mr-1" />
+                  {generatingMnemonic ? 'Regenerating...' : 'Regenerate'}
+                </button>
+              </div>
+            ) : (
+              <p className="text-xs text-gray-300">No mnemonic yet</p>
+            )}
+          </div>
           <button
             onClick={() => {
-              setEditingDetail(visibleCard?.id || null)
-              setEditDetailText(detail)
+              setEditingId(visibleCard?.id || null)
             }}
             className="text-xs text-gray-400 hover:text-gray-600 mt-1"
           >
@@ -508,8 +523,7 @@ export default function Review() {
         <p className="text-sm text-gray-600 whitespace-pre-wrap">{detail}</p>
         <button
           onClick={() => {
-            setEditingDetail(visibleCard?.id || null)
-            setEditDetailText(detail)
+            setEditingId(visibleCard?.id || null)
           }}
           className="text-xs text-gray-400 hover:text-gray-600 mt-2"
         >
@@ -520,33 +534,35 @@ export default function Review() {
   }
 
   // Edit detail modal
-  if (editingDetail) {
-    const card = sessionQueue.find(i => i.id === editingDetail) || allItems.find(i => i.id === editingDetail)
+  if (editingId) {
+    const card = sessionQueue.find(i => i.id === editingId) || allItems.find(i => i.id === editingId)
+    if (!card) {
+      setEditingId(null)
+      return null
+    }
     return (
-      <div className="flex flex-col h-full -m-4 p-4">
-        <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold">Edit Detail</h2>
-          <button
-            onClick={() => { setEditingDetail(null); setEditDetailText('') }}
-            className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100"
-          >
-            <CloseOutlined />
-          </button>
-        </div>
-        <div className="mb-2 text-xl font-semibold text-center">{card?.content}</div>
-        <textarea
-          value={editDetailText}
-          onChange={(e) => setEditDetailText(e.target.value)}
-          placeholder='Enter detail as JSON: {"reading":"...","meaning":"...","part_of_speech":"...","example":"...","example_meaning":"..."}'
-          className="flex-1 w-full p-3 bg-gray-50 rounded-xl border-none outline-none text-sm resize-none"
-        />
-        <button
-          onClick={saveDetail}
-          className="mt-3 w-full py-3 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600 active:bg-blue-700 transition-colors flex items-center justify-center gap-2"
-        >
-          <CheckOutlined /> Save
-        </button>
-      </div>
+      <EditWordForm
+        item={card}
+        title="Edit Detail"
+        onCancel={() => setEditingId(null)}
+        onSave={async (data) => {
+          if (data.content) {
+            await invoke('db_update_review_item', {
+              item: { id: editingId, content: data.content },
+            })
+          }
+          await invoke('db_update_review_detail', { id: editingId, detail: data.detail })
+          await invoke('db_update_mnemonic', { id: editingId, mnemonic: data.mnemonic })
+          // Update local state
+          setSessionQueue(prev => prev.map(item =>
+            item.id === editingId ? { ...item, content: data.content, detail: data.detail, mnemonic: data.mnemonic } : item
+          ))
+          setAllItems(prev => prev.map(item =>
+            item.id === editingId ? { ...item, content: data.content, detail: data.detail, mnemonic: data.mnemonic } : item
+          ))
+          setEditingId(null)
+        }}
+      />
     )
   }
 
@@ -715,11 +731,11 @@ export default function Review() {
             <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
               <div
                 className="h-full bg-blue-500 rounded-full transition-all duration-300"
-                style={{ width: `${(sessionCompleted + immediatelyDueCount) > 0 ? (sessionCompleted / (sessionCompleted + immediatelyDueCount)) * 100 : 0}%` }}
+                style={{ width: `${(reviewedToday + immediatelyDueCount) > 0 ? (reviewedToday / (reviewedToday + immediatelyDueCount)) * 100 : 0}%` }}
               />
             </div>
             <span className="text-xs text-gray-400 shrink-0">
-              {immediatelyDueCount} due
+              {reviewedToday}/{reviewedToday + immediatelyDueCount}
             </span>
           </div>
         )}
@@ -728,6 +744,7 @@ export default function Review() {
       {/* No due cards for selected language */}
       {!visibleCard ? (
         <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-3">
+          <SessionCompleteEffect sessionCompleted={sessionCompleted} />
           <>
             <div className="text-4xl">🎉</div>
             <p className="text-sm text-center">All done for {LANGUAGES[selectedLang || '']?.label || selectedLang}!</p>
@@ -746,10 +763,10 @@ export default function Review() {
       ) : (
         <>
           {/* Flashcard */}
-          <div className="flex-1 flex flex-col items-center justify-center pb-6">
+          <div className="flex-1 flex flex-col items-center justify-center pb-28 overflow-y-auto">
             <div
               onClick={() => setRevealed(true)}
-              className="w-full max-w-sm bg-white rounded-2xl shadow-md p-8 text-center cursor-pointer hover:shadow-lg active:shadow transition-shadow"
+              className="w-full max-w-sm bg-white rounded-2xl shadow-md p-8 text-center cursor-pointer hover:shadow-lg active:shadow transition-shadow my-auto"
             >
               {/* State badge & difficulty indicator */}
               <div className="flex items-center justify-center gap-2 mb-4">
@@ -759,17 +776,17 @@ export default function Review() {
                   visibleCard.state === 'relearning' ? 'bg-orange-500' :
                   'bg-green-500'
                 }`}>
-                  {stateLabel((visibleCard.state || 'new') as CardState)}
+                  {visibleCard.state_label}
                 </span>
                 <div
                   className="w-16 h-2 rounded-full"
-                  style={{ backgroundColor: difficultyColor(visibleCard.EF, visibleCard.R) }}
+                  style={{ backgroundColor: visibleCard.difficulty_color }}
                 />
               </div>
 
               <div className="text-2xl font-semibold mb-1">{visibleCard?.content || ''}</div>
               {visibleCard.tags && (
-                <span className={`inline-block text-xs px-2 py-0.5 rounded-full text-white ${difficultyBgClass(visibleCard.EF, visibleCard.R)} mt-1`}>
+                <span className={`inline-block text-xs px-2 py-0.5 rounded-full text-white ${visibleCard.difficulty_bg_class} mt-1`}>
                   {visibleCard.tags}
                 </span>
               )}
@@ -785,8 +802,8 @@ export default function Review() {
                   <div className="mt-4 pt-3 border-t border-gray-100">
                     <div className="flex items-center justify-center gap-4 text-xs text-gray-400">
                       <span>Reps: {visibleCard.R}</span>
-                      <span>Interval: {visibleCard.I}d</span>
-                      <span>EF: {visibleCard.EF.toFixed(2)}</span>
+                      <span>Stability: {visibleCard.fsrs_stability != null ? `${Math.round(visibleCard.fsrs_stability)}d` : `${visibleCard.I}d`}</span>
+                      <span>Difficulty: {visibleCard.fsrs_difficulty != null ? visibleCard.fsrs_difficulty.toFixed(1) : '—'}</span>
                       {visibleCard.lapse_count > 0 && (
                         <span>Lapses: {visibleCard.lapse_count}</span>
                       )}

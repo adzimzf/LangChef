@@ -383,67 +383,9 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
     private suspend fun refreshNative(invoke: Invoke, args: RefreshTokenArgs) {
         Log.d(TAG, "refreshNative: refreshToken_len=${args.refreshToken?.length ?: 0}, scopes=${args.scopes}")
 
-        // If we have a refresh token, try to use it first
-        if (!args.refreshToken.isNullOrEmpty()) {
-            Log.d(TAG, "refreshNative: using refresh_token flow")
-            try {
-                val tokenResponse = refreshAccessToken(args.refreshToken!!, args.clientId, args.clientSecret)
-                Log.d(TAG, "refreshNative: refreshAccessToken returned: accessToken_len=${(tokenResponse["access_token"] as? String)?.length ?: 0}, hasRefresh=${tokenResponse["refresh_token"] != null}, expiresIn=${tokenResponse["expires_in"]}")
-                val tokenObject = createTokenResponse(tokenResponse)
-                // The refreshed access_token only has OpenID scopes (openid, email).
-                // We still need a Drive-scoped access token from AuthorizationClient.
-                val authRequest = AuthorizationRequest.builder()
-                    .setRequestedScopes(args.scopes!!.map { Scope(it) })
-                    .build()
-                Log.d(TAG, "refreshNative: calling AuthorizationClient.authorize for Drive scope...")
-                val authResult = authorizationClient.authorize(authRequest).await()
-                val driveAccessToken = authResult.accessToken
-                Log.d(TAG, "refreshNative: AuthorizationClient succeeded, driveAccessToken_len=${driveAccessToken?.length ?: 0}")
-                if (!driveAccessToken.isNullOrEmpty()) {
-                    tokenObject.put("accessToken", driveAccessToken as Any)
-                    Log.d(TAG, "refreshNative: resolving with accessToken_len=${(tokenObject["accessToken"] as? String)?.length ?: 0}, refreshToken_len=${(tokenObject["refreshToken"] as? String)?.length ?: 0}, expiresAt=${tokenObject["expiresAt"]}")
-                    invoke.resolve(tokenObject)
-                    return
-                }
-            } catch (e: Exception) {
-                Log.w(TAG, "refresh_token flow failed, falling back to silent re-auth: ${e.message}")
-                // Don't reject here - fall through to silent re-auth below
-            }
-        }
-
         // Fallback: silent re-authorization via native APIs (no UI if previously authorized)
         Log.d(TAG, "refreshNative: attempting silent re-auth flow")
-
-        // Step 1: Try to get fresh ID token via CredentialManager (contains email in JWT payload)
-        // This can work silently if the user has previously authorized the app
-        var idToken = ""
-        var exchangedTokens: Map<String, Any?>? = null
-
-        try {
-            val googleIdOption = GetSignInWithGoogleOption.Builder(args.clientId)
-                .build()
-            val request = GetCredentialRequest.Builder()
-                .addCredentialOption(googleIdOption)
-                .build()
-            val result = credentialManager.getCredential(activity, request)
-            val credential = result.credential
-            val googleIdTokenCredential = GoogleIdTokenCredential.createFrom(credential.data)
-            idToken = googleIdTokenCredential.idToken
-
-            // Try to exchange server auth code for a refresh token
-            val serverAuthCode = extractServerAuthCode(credential.data)
-            if (serverAuthCode != null && args.clientSecret != null) {
-                try {
-                    exchangedTokens = exchangeAuthCodeForTokens(serverAuthCode, args.clientId, args.clientSecret, "")
-                    Log.d(TAG, "refreshNative: successfully exchanged server auth code, hasRefreshToken=${exchangedTokens?.get("refresh_token") != null}")
-                } catch (e: Exception) {
-                    Log.w(TAG, "Server auth code exchange during refresh failed: ${e.message}")
-                }
-            }
-        } catch (e: Exception) {
-            Log.w(TAG, "Silent credential fetch failed (user may need to re-login): ${e.message}")
-            // This is expected if the user needs to explicitly re-login
-        }
+      
 
         // Step 2: Get access token via AuthorizationClient for Drive scope
         // This can succeed silently if the user previously granted Drive permissions
@@ -456,21 +398,17 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
             val accessToken = authResult.accessToken
 
             if (!accessToken.isNullOrEmpty()) {
-                val finalIdToken = exchangedTokens?.get("id_token") as? String ?: idToken
-                val refreshToken = exchangedTokens?.get("refresh_token") as? String ?: ""
-                val expiresIn = (exchangedTokens?.get("expires_in") as? Number)?.toLong() ?: 3600L
-                val expiresAt = System.currentTimeMillis() + (expiresIn * 1000)
 
                 val tokenObject = JSObject().apply {
-                    put("idToken", finalIdToken as Any)
+                    put("idToken", "")
                     put("accessToken", accessToken as Any)
-                    put("refreshToken", refreshToken as Any)
-                    put("expiresAt", expiresAt as Any)
+                    put("refreshToken", args.refreshToken as Any)
+                    put("expiresAt", 3600)
                     put("scopes", JSArray().apply {
                         authResult.grantedScopes.forEach { scope -> put(scope.toString() as Any) }
                     })
                 }
-                Log.d(TAG, "refreshNative: silent re-auth succeeded, accessToken_len=${accessToken.length}, hasRefreshToken=${refreshToken.isNotEmpty()}")
+                Log.d(TAG, "refreshNative: silent re-auth succeeded, accessToken_len=${accessToken.length}")
                 invoke.resolve(tokenObject)
                 return
             }

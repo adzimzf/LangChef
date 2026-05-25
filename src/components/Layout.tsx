@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from 'react-router-dom'
-import { useMemo } from 'react'
+import { useMemo, useEffect, useState } from 'react'
 import {
   HomeOutlined,
   MessageOutlined,
@@ -7,7 +7,21 @@ import {
   BarChartOutlined,
   SettingOutlined,
   ReadOutlined,
+  LoadingOutlined,
+  CheckCircleOutlined,
+  WarningOutlined,
 } from '@ant-design/icons'
+import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import { useActiveTimeHeartbeat } from '../hooks/useActiveTimeHeartbeat'
+
+type LinderaStage = 'idle' | 'downloading' | 'extracting' | 'building' | 'ready' | 'error'
+
+interface LinderaProgress {
+  stage: string
+  message: string
+  percent: number
+}
 
 const NAV_ITEMS = [
   { key: 'home', label: 'Home', icon: HomeOutlined, path: '/' },
@@ -22,13 +36,43 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const navigate = useNavigate()
   const isChatPage = location.pathname === '/chat'
 
+  useActiveTimeHeartbeat(true)
+
+  const [linderaStage, setLinderaStage] = useState<LinderaStage>('idle')
+  const [linderaMessage, setLinderaMessage] = useState('')
+  const [linderaPercent, setLinderaPercent] = useState(0)
+
+  useEffect(() => {
+    // Listen for progress events emitted by Rust during download/build
+    const unlisten = listen<LinderaProgress>('lindera-progress', (event) => {
+      const { stage, message, percent } = event.payload
+      setLinderaStage(stage as LinderaStage)
+      setLinderaMessage(message)
+      setLinderaPercent(percent)
+    })
+
+    // Trigger init — no-op if dict already cached; otherwise starts download
+    invoke<string>('init_lindera_dict').catch((err) => {
+      setLinderaStage('error')
+      setLinderaMessage(String(err))
+    })
+
+    return () => {
+      unlisten.then((fn) => fn())
+    }
+  }, [])
+
+  const showBanner = linderaStage !== 'idle' && linderaStage !== 'ready'
+  const isActive = linderaStage === 'downloading' || linderaStage === 'extracting' || linderaStage === 'building'
+
   const activeKey = useMemo(() => {
     if (location.pathname.startsWith('/chats')) return 'chats'
-    if (location.pathname.startsWith('/chat')) return 'chats' // chat falls under chats tab
+    if (location.pathname.startsWith('/chat')) return 'chats'
     if (location.pathname.startsWith('/grammar')) return 'grammar'
     if (location.pathname.startsWith('/review')) return 'review'
     if (location.pathname.startsWith('/settings')) return 'settings'
-    if (location.pathname.startsWith('/telemetry')) return 'telemetry'
+    if (location.pathname.startsWith('/stats')) return 'home'
+    if (location.pathname.startsWith('/telemetry')) return 'home'
     if (location.pathname.startsWith('/words')) return 'home'
     return 'home'
   }, [location.pathname])
@@ -37,6 +81,24 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     <div className="h-dvh bg-gray-50 flex flex-col">
       {/* Content */}
       <main className={`flex-1 overflow-hidden ${isChatPage ? '' : 'px-4 pb-[50px]'}`}>{children}</main>
+
+      {/* Lindera dict download/build progress banner */}
+      {showBanner && (
+        <div className={`fixed bottom-14 left-0 right-0 z-40 px-3 py-2 text-xs flex items-center gap-2
+          ${linderaStage === 'error' ? 'bg-red-50 text-red-700 border-t border-red-200' : 'bg-blue-50 text-blue-700 border-t border-blue-200'}`}>
+          <span className="shrink-0">
+            {linderaStage === 'error'
+              ? <WarningOutlined />
+              : isActive
+                ? <LoadingOutlined spin />
+                : <CheckCircleOutlined />}
+          </span>
+          <span className="flex-1 truncate">{linderaMessage}</span>
+          {isActive && linderaPercent > 0 && (
+            <span className="shrink-0 font-medium">{linderaPercent}%</span>
+          )}
+        </div>
+      )}
 
       {/* Bottom navigation */}
       {!isChatPage && (

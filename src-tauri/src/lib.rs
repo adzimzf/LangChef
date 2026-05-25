@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use rusqlite::{Connection, params};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 mod google_auth;
 mod google_drive;
@@ -16,6 +16,8 @@ struct Message {
     role: String,
     content: String,
     created_at: i64,
+    parent_message_id: Option<i64>,
+    is_active_path: i64,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -35,19 +37,18 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn add_furigana(
-    state: tauri::State<'_, Option<Mutex<furigana::FuriganaAnnotator>>>,
+    state: tauri::State<'_, Mutex<Option<furigana::FuriganaAnnotator>>>,
     text: String,
     language: String,
 ) -> String {
     if language != "ja" {
         return text;
     }
-    let annotator = match state.inner() {
-        Some(mutex) => mutex,
-        None => return text,
-    };
-    match annotator.lock() {
-        Ok(mut annotator) => annotator.annotate(&text),
+    match state.lock() {
+        Ok(mut guard) => match guard.as_mut() {
+            Some(annotator) => annotator.annotate(&text),
+            None => text,
+        },
         Err(_) => text,
     }
 }
@@ -62,21 +63,64 @@ struct TokenWithBase {
 
 #[tauri::command]
 fn tokenize_japanese(
-    state: tauri::State<'_, Option<Mutex<furigana::FuriganaAnnotator>>>,
+    state: tauri::State<'_, Mutex<Option<furigana::FuriganaAnnotator>>>,
     text: String,
 ) -> Result<Vec<TokenWithBase>, String> {
-    let annotator = match state.inner() {
-        Some(mutex) => mutex,
-        None => return Err("Tokenizer not initialized".to_string()),
-    };
-
-    let mut annotator = annotator.lock().map_err(|e| e.to_string())?;
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    let annotator = guard.as_mut().ok_or("Tokenizer not initialized")?;
     let tokens = annotator.tokenize(&text);
-
     Ok(tokens
         .into_iter()
         .map(|(surface, base_form)| TokenWithBase { surface, base_form })
         .collect())
+}
+
+#[tauri::command]
+async fn init_lindera_dict(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Option<furigana::FuriganaAnnotator>>>,
+) -> Result<String, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let dict_dir = data_dir.join("ipadic");
+
+    if !furigana::is_dict_ready(&dict_dir) {
+        let dict_dir_clone = dict_dir.clone();
+        let app_clone = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            furigana::ensure_dict(&dict_dir_clone, |stage, message, percent| {
+                let _ = app_clone.emit(
+                    "lindera-progress",
+                    serde_json::json!({
+                        "stage": stage,
+                        "message": message,
+                        "percent": percent
+                    }),
+                );
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+    }
+
+    let annotator = furigana::FuriganaAnnotator::from_path(&dict_dir)?;
+    {
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        *guard = Some(annotator);
+    }
+    let _ = app.emit(
+        "lindera-progress",
+        serde_json::json!({"stage": "ready", "message": "Japanese dictionary ready", "percent": 100}),
+    );
+    eprintln!("[furigana] Lindera tokenizer initialized from {}", dict_dir.display());
+    Ok("initialized".to_string())
+}
+
+#[tauri::command]
+fn get_lindera_dict_status(app: tauri::AppHandle) -> bool {
+    app.path()
+        .app_data_dir()
+        .map(|d| furigana::is_dict_ready(&d.join("ipadic")))
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Deserialize)]
@@ -223,7 +267,10 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
           next_review INTEGER,
           tags TEXT,
           language TEXT,
-          detail TEXT
+          detail TEXT,
+          mnemonic TEXT,
+          fsrs_stability REAL,
+          fsrs_difficulty REAL
         );
         CREATE TABLE IF NOT EXISTS known_words(
           word TEXT PRIMARY KEY
@@ -231,6 +278,16 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
         CREATE TABLE IF NOT EXISTS telemetry_days(
           date TEXT PRIMARY KEY,
           sessions INTEGER NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS user_activity(
+          date TEXT NOT NULL,
+          activity_type TEXT NOT NULL,
+          count INTEGER NOT NULL DEFAULT 0,
+          PRIMARY KEY (date, activity_type)
+        );
+        CREATE TABLE IF NOT EXISTS daily_active_time(
+          date TEXT PRIMARY KEY,
+          total_seconds INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS chat_sessions(
           id TEXT PRIMARY KEY,
@@ -256,6 +313,13 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
             score INTEGER NOT NULL,
             feedback TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS study_limits(
+            date TEXT NOT NULL,
+            language TEXT NOT NULL DEFAULT '',
+            reviews_completed INTEGER NOT NULL DEFAULT 0,
+            new_cards_seen INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (date, language)
+        );
         "
     ).map_err(|e| e.to_string())?;
     // best-effort: add session_id column if missing
@@ -273,12 +337,169 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN state TEXT DEFAULT 'new'", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN step INTEGER DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN lapse_count INTEGER DEFAULT 0", []);
+    // best-effort: add mnemonic column if missing
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN mnemonic TEXT", []);
+    // best-effort: add FSRS columns if missing
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN fsrs_stability REAL", []);
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN fsrs_difficulty REAL", []);
+    // best-effort: add created_at and mastered_at timestamps for history charts
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN created_at INTEGER", []);
+    let _ = conn.execute(
+        "UPDATE review_items SET created_at = CAST(strftime('%s', 'now') * 1000 AS INTEGER)
+         WHERE created_at IS NULL",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN mastered_at INTEGER", []);
+    // backfill: existing review-state cards get today as mastered_at
+    let _ = conn.execute(
+        "UPDATE review_items SET mastered_at = CAST(strftime('%s', 'now') * 1000 AS INTEGER)
+         WHERE mastered_at IS NULL AND state = 'review'",
+        [],
+    );
+    // best-effort: add parent_message_id and is_active_path columns to messages if missing (for edit tree)
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN parent_message_id INTEGER", []);
+    let _ = conn.execute("ALTER TABLE messages ADD COLUMN is_active_path INTEGER DEFAULT 1", []);
     // Migrate existing cards that have NULL state to 'review' if they have R > 0
     let _ = conn.execute("UPDATE review_items SET state = 'review' WHERE state IS NULL OR state = ''", []);
     let _ = conn.execute("UPDATE review_items SET state = 'new' WHERE state IS NULL OR state = ''", []);
     // Auto-seed bundled grammar data if grammar_items is empty
     seed_bundled_grammar_if_empty(&conn);
+    // Migrate SM-2 data to FSRS (one-time)
+    migrate_sm2_to_fsrs(&conn);
+    // Migrate telemetry_days to user_activity (one-time)
+    migrate_telemetry_to_activity(&conn)?;
     Ok(conn)
+}
+
+fn migrate_telemetry_to_activity(conn: &Connection) -> Result<(), String> {
+    // Check if migration already happened
+    let count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM user_activity",
+        [],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if count > 0 {
+        return Ok(());
+    }
+    // Check if there's data to migrate
+    let telemetry_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM telemetry_days",
+        [],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+    if telemetry_count == 0 {
+        return Ok(());
+    }
+    // Atomic migration in a transaction
+    conn.execute("BEGIN TRANSACTION", []).map_err(|e| e.to_string())?;
+    let result = conn.execute(
+        "INSERT INTO user_activity (date, activity_type, count)
+         SELECT date, 'chat', sessions FROM telemetry_days",
+        [],
+    );
+    match result {
+        Ok(_) => {
+            conn.execute("COMMIT", []).map_err(|e| e.to_string())?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute("ROLLBACK", []);
+            Err(e.to_string())
+        }
+    }
+}
+
+fn migrate_sm2_to_fsrs(conn: &Connection) {
+    // Check if migration already happened: any row with EF = -1.0 means migration ran
+    let migrated_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM review_items WHERE EF = -1.0",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+    if migrated_count > 0 {
+        return;
+    }
+
+    // Check if there are rows to migrate
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM review_items WHERE EF != -1.0",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+    if total == 0 {
+        return;
+    }
+
+    let fsrs = match fsrs::FSRS::new(Some(&[])) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("[fsrs] Failed to create FSRS instance for migration: {}", e);
+            return;
+        }
+    };
+
+    let mut stmt = match conn.prepare("SELECT id, EF, I FROM review_items WHERE EF != -1.0") {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[fsrs] Failed to prepare migration query: {}", e);
+            return;
+        }
+    };
+
+    let rows = match stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?, row.get::<_, i64>(2)?))
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[fsrs] Failed to query cards for migration: {}", e);
+            return;
+        }
+    };
+
+    let mut update_stmt = match conn.prepare(
+        "UPDATE review_items SET EF = -1.0, fsrs_stability = ?1, fsrs_difficulty = ?2 WHERE id = ?3"
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[fsrs] Failed to prepare update statement: {}", e);
+            return;
+        }
+    };
+
+    let mut success = 0u32;
+    let mut failures = 0u32;
+
+    for row in rows {
+        let (id, ef, interval) = match row {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[fsrs] Error reading row: {}", e);
+                failures += 1;
+                continue;
+            }
+        };
+
+        match fsrs.memory_state_from_sm2(ef as f32, interval as f32, 0.9) {
+            Ok(memory_state) => {
+                if let Err(e) = update_stmt.execute(params![
+                    memory_state.stability,
+                    memory_state.difficulty,
+                    id,
+                ]) {
+                    eprintln!("[fsrs] Failed to update card {}: {}", id, e);
+                    failures += 1;
+                } else {
+                    success += 1;
+                }
+            }
+            Err(e) => {
+                eprintln!("[fsrs] Failed to convert card {} (EF={}, I={}): {}", id, ef, interval, e);
+                failures += 1;
+            }
+        }
+    }
+
+    eprintln!("[fsrs] Migration complete: {} succeeded, {} failed", success, failures);
 }
 
 // ─── Bundled Grammar Markdown Data ──────────────────────────────────────────
@@ -417,12 +638,12 @@ fn db_list_sessions(app: tauri::AppHandle) -> Result<Vec<ChatSession>, String> {
 }
 
 #[tauri::command]
-fn db_add_message_in_session(app: tauri::AppHandle, session_id: String, role: String, content: String) -> Result<i64, String> {
+fn db_add_message_in_session(app: tauri::AppHandle, session_id: String, role: String, content: String, parent_message_id: Option<i64>) -> Result<i64, String> {
     let conn = open_db(&app)?;
     let now = chrono::Utc::now().timestamp();
     conn.execute(
-        "INSERT INTO messages(role, content, created_at, session_id) VALUES (?1, ?2, ?3, ?4)",
-        params![role, content, now, session_id],
+        "INSERT INTO messages(role, content, created_at, session_id, parent_message_id, is_active_path) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
+        params![role, content, now, session_id, parent_message_id],
     ).map_err(|e| e.to_string())?;
     conn.execute("UPDATE chat_sessions SET last_activity=?1 WHERE id=?2", params![now, session_id])
         .map_err(|e| e.to_string())?;
@@ -432,7 +653,7 @@ fn db_add_message_in_session(app: tauri::AppHandle, session_id: String, role: St
 #[tauri::command]
 fn db_list_session_messages(app: tauri::AppHandle, session_id: String) -> Result<Vec<Message>, String> {
     let conn = open_db(&app)?;
-    let mut stmt = conn.prepare("SELECT id, role, content, created_at FROM messages WHERE session_id=?1 ORDER BY created_at ASC")
+    let mut stmt = conn.prepare("SELECT id, role, content, created_at, parent_message_id, is_active_path FROM messages WHERE session_id=?1 ORDER BY created_at ASC")
         .map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![session_id], |row| {
         Ok(Message {
@@ -440,6 +661,8 @@ fn db_list_session_messages(app: tauri::AppHandle, session_id: String) -> Result
             role: row.get(1)?,
             content: row.get(2)?,
             created_at: row.get(3)?,
+            parent_message_id: row.get(4)?,
+            is_active_path: row.get(5)?,
         })
     }).map_err(|e| e.to_string())?;
     let mut out = Vec::new();
@@ -449,7 +672,7 @@ fn db_list_session_messages(app: tauri::AppHandle, session_id: String) -> Result
     Ok(out)
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone)]
 struct ReviewItem {
     id: String,
     content: String,
@@ -463,12 +686,123 @@ struct ReviewItem {
     tags: Option<String>,
     language: Option<String>,
     detail: Option<String>,
+    mnemonic: Option<String>,
+    fsrs_stability: Option<f32>,
+    fsrs_difficulty: Option<f32>,
+    // Display-computed fields (set by helper functions on query)
+    difficulty_color: String,
+    difficulty_bg_class: String,
+    state_label: String,
+    next_review_formatted: String,
+}
+
+/// Map a rusqlite row (from a review_items query) to a ReviewItem with computed display fields.
+fn row_to_review_item(row: &rusqlite::Row) -> rusqlite::Result<ReviewItem> {
+    let ef: f64 = row.get(2)?;
+    let r: i64 = row.get(4)?;
+    let state: String = row.get(5)?;
+    let next_review: Option<i64> = row.get(8)?;
+    let fsrs_stability: Option<f32> = row.get(13).unwrap_or(None);
+    let fsrs_difficulty: Option<f32> = row.get(14).unwrap_or(None);
+
+    // Use FSRS difficulty for display if available, else fall back to EF-based
+    let (difficulty_color, difficulty_bg_class) = match fsrs_difficulty {
+        Some(d) => (
+            compute_difficulty_color_from_fsrs(d),
+            compute_difficulty_bg_class_from_fsrs(d),
+        ),
+        None => (
+            compute_difficulty_color(ef, r),
+            compute_difficulty_bg_class(ef, r).to_string(),
+        ),
+    };
+
+    Ok(ReviewItem {
+        id: row.get(0)?,
+        content: row.get(1)?,
+        EF: ef,
+        I: row.get(3)?,
+        R: r,
+        state: state.clone(),
+        step: row.get(6)?,
+        lapse_count: row.get(7)?,
+        next_review,
+        tags: row.get(9)?,
+        language: row.get(10)?,
+        detail: row.get(11)?,
+        mnemonic: row.get(12)?,
+        fsrs_stability,
+        fsrs_difficulty,
+        difficulty_color,
+        difficulty_bg_class,
+        state_label: compute_state_label(&state).to_string(),
+        next_review_formatted: compute_next_review_formatted(next_review),
+    })
 }
 
 #[derive(Serialize, Deserialize)]
 struct TelemetryDay {
     date: String,
     sessions: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct UserActivity {
+    date: String,
+    activity_type: String,
+    count: i64,
+}
+
+#[derive(Serialize, Deserialize)]
+struct DailyActiveTime {
+    date: String,
+    total_seconds: i64,
+}
+
+// ─── FSRS Helpers ────────────────────────────────────────────────────────────
+
+/// Get or create the global FSRS instance with default parameters.
+fn get_fsrs() -> std::sync::MutexGuard<'static, fsrs::FSRS> {
+    use std::sync::{Mutex, OnceLock};
+    static FSRS_INSTANCE: OnceLock<Mutex<fsrs::FSRS>> = OnceLock::new();
+    FSRS_INSTANCE.get_or_init(|| {
+        Mutex::new(fsrs::FSRS::new(Some(&[])).expect("Failed to create FSRS instance with default parameters"))
+    }).lock().expect("Failed to lock FSRS instance")
+}
+
+/// Desired retention rate for FSRS scheduling.
+const DESIRED_RETENTION: f32 = 0.9;
+
+/// Deserialize MemoryState from DB columns. Returns None if either is NULL.
+fn memory_state_from_db(stability: Option<f32>, difficulty: Option<f32>) -> Option<fsrs::MemoryState> {
+    match (stability, difficulty) {
+        (Some(s), Some(d)) => Some(fsrs::MemoryState { stability: s, difficulty: d }),
+        _ => None,
+    }
+}
+
+/// Compute days elapsed since the card's last review.
+fn compute_days_elapsed(next_review: Option<i64>) -> u32 {
+    match next_review {
+        Some(nr) => {
+            let now = chrono::Utc::now().timestamp();
+            let elapsed_secs = now.saturating_sub(nr);
+            if elapsed_secs <= 0 {
+                0
+            } else {
+                ((elapsed_secs as f64) / 86400.0).ceil() as u32
+            }
+        }
+        None => 0,
+    }
+}
+
+/// Compute an approximate EF value from FSRS difficulty for backward compatibility.
+/// Maps FSRS difficulty [1, 10] to EF [3.0, 1.3] (inverse relationship).
+fn fsrs_difficulty_to_ef(difficulty: f32) -> f64 {
+    let d = difficulty.clamp(1.0, 10.0);
+    let normalized = (d - 1.0) / 9.0; // 0 = easy, 1 = hard
+    (3.0 - normalized * 1.7) as f64
 }
 
 // ─── SRS Configuration ────────────────────────────────────────────────────────
@@ -514,9 +848,12 @@ struct SRSResult {
     state: String,
     step: i64,
     lapse_count: i64,
-    next_review: i64,       // unix timestamp (seconds)
-    next_minutes: i64,      // for display
+    next_review: i64,           // unix timestamp (seconds)
+    next_minutes: i64,          // for display
     lapsed: bool,
+    graduated: bool,            // card left learning/relearning into review
+    fsrs_stability: Option<f32>,
+    fsrs_difficulty: Option<f32>,
 }
 
 /// Compute new EF from current EF and quality (0–5).
@@ -539,20 +876,146 @@ fn grace_bonus(next_review: Option<i64>, now: i64, multiplier: f64) -> f64 {
     }
 }
 
+/// Format minutes to human-readable string for grade button labels.
+fn format_next_review_minutes(minutes: i64) -> String {
+    if minutes <= 0 { return "<1m".to_string(); }
+    if minutes < 60 { return format!("{}m", minutes); }
+    if minutes < 24 * 60 { return format!("{}h", minutes / 60); }
+    let days = (minutes as f64 / (24.0 * 60.0)).round() as i64;
+    if days < 30 { return format!("{}d", days); }
+    if days < 365 { return format!("{}mo", (days as f64 / 30.0).round() as i64); }
+    format!("{}y", (days as f64 / 365.0).round() as i64)
+}
+
+/// End of today as a Unix timestamp (seconds).
+fn end_of_today() -> i64 {
+    let now_local = chrono::Local::now();
+    now_local
+        .date_naive()
+        .and_hms_opt(23, 59, 59)
+        .unwrap()
+        .and_local_timezone(chrono::Local)
+        .unwrap()
+        .with_timezone(&chrono::Utc)
+        .timestamp()
+}
+
+/// Normalize EF (1.3–3.3+) to a 0..1 scale for color display.
+fn ef_normalized(ef: f64) -> f64 {
+    ((ef - 1.3) / 2.0).clamp(0.0, 1.0)
+}
+
 /// Compute a difficulty tag from EF and R values.
-/// Mirrors the frontend easeScore formula:
-///   ease = 0.6 * efNorm + 0.4 * rNorm
-/// Returns: "hard" (ease < 0.3), "medium" (0.3 <= ease < 0.7), "easy" (ease >= 0.7)
+/// - "hard":  EF < 2.0
+/// - "medium": EF >= 2.0 AND (EF < 2.7 OR R < 5)
+/// - "easy":  EF >= 2.7 AND R >= 5
 fn compute_tag_from_ef_r(ef: f64, r: i64) -> &'static str {
-    let ef_norm = ((ef - 1.3) / (3.0 - 1.3)).clamp(0.0, 1.0);
-    let r_norm = (r as f64 / 5.0).clamp(0.0, 1.0);
-    let ease = 0.6 * ef_norm + 0.4 * r_norm;
-    if ease < 0.3 {
+    if ef >= 2.7 && r >= 5 {
+        "easy"
+    } else if ef < 2.0 {
         "hard"
-    } else if ease < 0.7 {
+    } else {
+        "medium"
+    }
+}
+
+/// Compute a CSS HSL color string for difficulty display.
+fn compute_difficulty_color(ef: f64, _r: i64) -> String {
+    let hue = ef_normalized(ef) * 120.0;
+    format!("hsl({:.0}, 70%, 50%)", hue)
+}
+
+/// Compute a Tailwind background class for difficulty display.
+fn compute_difficulty_bg_class(ef: f64, _r: i64) -> &'static str {
+    let n = ef_normalized(ef);
+    if n < 0.15 { "bg-red-500" }
+    else if n < 0.30 { "bg-orange-500" }
+    else if n < 0.40 { "bg-amber-500" }
+    else if n < 0.50 { "bg-yellow-500" }
+    else if n < 0.65 { "bg-lime-500" }
+    else if n < 0.80 { "bg-green-500" }
+    else { "bg-emerald-500" }
+}
+
+/// Normalize FSRS difficulty (typically 1–10) to a 0..1 scale for color display.
+fn fsrs_difficulty_normalized(difficulty: f32) -> f64 {
+    ((difficulty.clamp(1.0, 10.0) - 1.0) / 9.0) as f64
+}
+
+/// Compute a CSS HSL color string from FSRS difficulty.
+fn compute_difficulty_color_from_fsrs(difficulty: f32) -> String {
+    let hue = (1.0 - fsrs_difficulty_normalized(difficulty)) * 120.0;
+    format!("hsl({:.0}, 70%, 50%)", hue)
+}
+
+/// Compute a Tailwind background class from FSRS difficulty.
+fn compute_difficulty_bg_class_from_fsrs(difficulty: f32) -> String {
+    let n = fsrs_difficulty_normalized(difficulty);
+    if n < 0.15 { "bg-emerald-500".to_string() }
+    else if n < 0.30 { "bg-green-500".to_string() }
+    else if n < 0.40 { "bg-lime-500".to_string() }
+    else if n < 0.50 { "bg-yellow-500".to_string() }
+    else if n < 0.65 { "bg-amber-500".to_string() }
+    else if n < 0.80 { "bg-orange-500".to_string() }
+    else { "bg-red-500".to_string() }
+}
+
+/// Compute a difficulty tag from FSRS difficulty.
+fn compute_tag_from_fsrs_difficulty(difficulty: f32) -> &'static str {
+    if difficulty < 3.0 {
+        "easy"
+    } else if difficulty < 7.0 {
         "medium"
     } else {
-        "easy"
+        "hard"
+    }
+}
+
+/// Compute a human-readable state label.
+fn compute_state_label(state: &str) -> &'static str {
+    match state {
+        "new" => "New",
+        "learning" => "Learning",
+        "review" => "Review",
+        "relearning" => "Relearning",
+        _ => "New",
+    }
+}
+
+/// Format next_review timestamp as relative time string (e.g. "in 3d", "overdue").
+fn compute_next_review_formatted(next_review: Option<i64>) -> String {
+    match next_review {
+        None => "Now".to_string(),
+        Some(nr) => {
+            let now = chrono::Utc::now().timestamp();
+            let diff_ms = (nr - now) * 1000;
+            let is_past = diff_ms < 0;
+            let abs_diff = diff_ms.abs() as f64;
+            let minute = 60.0 * 1000.0;
+            let hour = 60.0 * minute;
+            let day = 24.0 * hour;
+            let week = 7.0 * day;
+            let month = 30.0 * day;
+            let year = 365.0 * day;
+
+            if is_past { return "overdue".to_string(); }
+
+            if abs_diff < minute {
+                format!("in {}s", (abs_diff / 1000.0) as i64)
+            } else if abs_diff < hour {
+                format!("in {}m", (abs_diff / minute) as i64)
+            } else if abs_diff < day {
+                format!("in {}h", (abs_diff / hour) as i64)
+            } else if abs_diff < week {
+                format!("in {}d", (abs_diff / day) as i64)
+            } else if abs_diff < month {
+                format!("in {}w", (abs_diff / week) as i64)
+            } else if abs_diff < year {
+                format!("in {}mo", (abs_diff / month) as i64)
+            } else {
+                format!("in {}y", (abs_diff / year) as i64)
+            }
+        }
     }
 }
 
@@ -697,12 +1160,240 @@ fn schedule_card(
         EF: new_ef,
         I: new_i,
         R: new_r,
-        state: new_state,
+        state: new_state.clone(),
         step: new_step,
         lapse_count: new_lapse_count,
         next_review: next,
         next_minutes,
         lapsed,
+        graduated: (state == "new" || state == "learning" || state == "relearning")
+            && new_state == "review"
+            && next > end_of_today(),
+        fsrs_stability: None,
+        fsrs_difficulty: None,
+    }
+}
+
+/// Graduate a new card (memory=None) or re-graduate from relearning (memory=post-lapse state).
+/// grade should be "good" or "easy"; "hard" is treated as "good".
+fn graduate_with_fsrs(
+    memory: Option<fsrs::MemoryState>,
+    review_count: i64,
+    lapse_count: i64,
+    grade: &str,
+    now: i64,
+) -> Result<(SRSResult, Option<fsrs::MemoryState>), String> {
+    let fsrs = get_fsrs();
+    let next_states = fsrs.next_states(memory, DESIRED_RETENTION, 0)
+        .map_err(|e| e.to_string())?;
+    let chosen = match grade {
+        "easy" => &next_states.easy,
+        _ => &next_states.good,
+    };
+    let interval_days = chosen.interval;
+    let approx_ef = fsrs_difficulty_to_ef(chosen.memory.difficulty);
+    Ok((SRSResult {
+        EF: approx_ef,
+        I: interval_days.round() as i64,
+        R: review_count + 1,
+        state: "review".to_string(),
+        step: 0,
+        lapse_count,
+        next_review: now + (interval_days * 86400.0) as i64,
+        next_minutes: (interval_days * 24.0 * 60.0) as i64,
+        lapsed: false,
+        graduated: true,
+        fsrs_stability: Some(chosen.memory.stability),
+        fsrs_difficulty: Some(chosen.memory.difficulty),
+    }, Some(chosen.memory)))
+}
+
+/// Re-graduate a card from relearning using the post-lapse FSRS interval already stored in `stored_interval`.
+fn re_graduate_with_fsrs(
+    memory: Option<fsrs::MemoryState>,
+    stored_interval: i64,
+    review_count: i64,
+    lapse_count: i64,
+    now: i64,
+) -> Result<(SRSResult, Option<fsrs::MemoryState>), String> {
+    let interval_days = i64::max(1, stored_interval);
+    let (approx_ef, stab, diff) = match memory {
+        Some(m) => (fsrs_difficulty_to_ef(m.difficulty), Some(m.stability), Some(m.difficulty)),
+        None => (2.5, None, None),
+    };
+    Ok((SRSResult {
+        EF: approx_ef,
+        I: interval_days,
+        R: review_count + 1,
+        state: "review".to_string(),
+        step: 0,
+        lapse_count,
+        next_review: now + interval_days * 86400,
+        next_minutes: interval_days * 24 * 60,
+        lapsed: false,
+        graduated: true,
+        fsrs_stability: stab,
+        fsrs_difficulty: diff,
+    }, memory))
+}
+
+/// Anki-style FSRS scheduling:
+/// - new/learning: step-based (no FSRS memory) until graduation
+/// - review: full FSRS; "again" lapses into relearning with post-lapse memory stored
+/// - relearning: step-based until re-graduation using stored post-lapse interval
+fn schedule_fsrs(
+    state: &str,
+    step: i64,
+    current_memory: Option<fsrs::MemoryState>,
+    stored_interval: i64,
+    review_count: i64,
+    lapse_count: i64,
+    next_review: Option<i64>,
+    grade: &str,
+    config: &SRSConfig,
+) -> Result<(SRSResult, Option<fsrs::MemoryState>), String> {
+    let now = chrono::Utc::now().timestamp();
+
+    match state {
+        "new" | "learning" => {
+            let steps = &config.learning_steps;
+            match grade {
+                "again" => {
+                    let nm = steps.get(0).copied().unwrap_or(1);
+                    Ok((SRSResult {
+                        EF: -1.0, I: 0, R: 0, state: "learning".to_string(),
+                        step: 0, lapse_count, next_review: now + nm * 60,
+                        next_minutes: nm, lapsed: false, graduated: false,
+                        fsrs_stability: None, fsrs_difficulty: None,
+                    }, None))
+                }
+                "hard" => {
+                    let ns = i64::max(0, step);
+                    let nm = steps.get(ns as usize).copied().unwrap_or(1);
+                    Ok((SRSResult {
+                        EF: -1.0, I: 0, R: 0, state: "learning".to_string(),
+                        step: ns, lapse_count, next_review: now + nm * 60,
+                        next_minutes: nm, lapsed: false, graduated: false,
+                        fsrs_stability: None, fsrs_difficulty: None,
+                    }, None))
+                }
+                "good" => {
+                    let next_step = step + 1;
+                    if (next_step as usize) >= steps.len() {
+                        graduate_with_fsrs(None, review_count, lapse_count, "good", now)
+                    } else {
+                        let nm = steps.get(next_step as usize).copied().unwrap_or(1);
+                        Ok((SRSResult {
+                            EF: -1.0, I: 0, R: 0, state: "learning".to_string(),
+                            step: next_step, lapse_count, next_review: now + nm * 60,
+                            next_minutes: nm, lapsed: false, graduated: false,
+                            fsrs_stability: None, fsrs_difficulty: None,
+                        }, None))
+                    }
+                }
+                _ => {
+                    // easy: immediate graduation
+                    graduate_with_fsrs(None, review_count, lapse_count, "easy", now)
+                }
+            }
+        }
+        "review" => {
+            let fsrs = get_fsrs();
+            let days_elapsed = compute_days_elapsed(next_review);
+            let next_states = fsrs.next_states(current_memory, DESIRED_RETENTION, days_elapsed)
+                .unwrap_or_else(|e| {
+                    eprintln!("[fsrs] next_states error: {}; treating as new card", e);
+                    fsrs.next_states(None, DESIRED_RETENTION, 0).unwrap()
+                });
+
+            if grade == "again" {
+                let post_lapse = next_states.again.memory;
+                let relearning_steps = &config.relearning_steps;
+                let nm = relearning_steps.get(0).copied().unwrap_or(10);
+                Ok((SRSResult {
+                    EF: fsrs_difficulty_to_ef(post_lapse.difficulty),
+                    I: next_states.again.interval.round() as i64,
+                    R: 0,
+                    state: "relearning".to_string(),
+                    step: 0,
+                    lapse_count: lapse_count + 1,
+                    next_review: now + nm * 60,
+                    next_minutes: nm,
+                    lapsed: true,
+                    graduated: false,
+                    fsrs_stability: Some(post_lapse.stability),
+                    fsrs_difficulty: Some(post_lapse.difficulty),
+                }, Some(post_lapse)))
+            } else {
+                let chosen = match grade {
+                    "hard" => &next_states.hard,
+                    "easy" => &next_states.easy,
+                    _ => &next_states.good,
+                };
+                let interval_days = chosen.interval;
+                Ok((SRSResult {
+                    EF: fsrs_difficulty_to_ef(chosen.memory.difficulty),
+                    I: interval_days.round() as i64,
+                    R: review_count + 1,
+                    state: "review".to_string(),
+                    step: 0,
+                    lapse_count,
+                    next_review: now + (interval_days * 86400.0) as i64,
+                    next_minutes: (interval_days * 24.0 * 60.0) as i64,
+                    lapsed: false,
+                    graduated: true,
+                    fsrs_stability: Some(chosen.memory.stability),
+                    fsrs_difficulty: Some(chosen.memory.difficulty),
+                }, Some(chosen.memory)))
+            }
+        }
+        "relearning" => {
+            let steps = &config.relearning_steps;
+            let (stab, diff) = (current_memory.map(|m| m.stability), current_memory.map(|m| m.difficulty));
+            match grade {
+                "again" => {
+                    let nm = steps.get(0).copied().unwrap_or(10);
+                    Ok((SRSResult {
+                        EF: -1.0, I: stored_interval, R: 0,
+                        state: "relearning".to_string(),
+                        step: 0, lapse_count, next_review: now + nm * 60,
+                        next_minutes: nm, lapsed: false, graduated: false,
+                        fsrs_stability: stab, fsrs_difficulty: diff,
+                    }, current_memory))
+                }
+                "hard" => {
+                    let ns = i64::max(0, step);
+                    let nm = steps.get(ns as usize).copied().unwrap_or(10);
+                    Ok((SRSResult {
+                        EF: -1.0, I: stored_interval, R: 0,
+                        state: "relearning".to_string(),
+                        step: ns, lapse_count, next_review: now + nm * 60,
+                        next_minutes: nm, lapsed: false, graduated: false,
+                        fsrs_stability: stab, fsrs_difficulty: diff,
+                    }, current_memory))
+                }
+                "good" => {
+                    let next_step = step + 1;
+                    if (next_step as usize) >= steps.len() {
+                        re_graduate_with_fsrs(current_memory, stored_interval, review_count, lapse_count, now)
+                    } else {
+                        let nm = steps.get(next_step as usize).copied().unwrap_or(10);
+                        Ok((SRSResult {
+                            EF: -1.0, I: stored_interval, R: 0,
+                            state: "relearning".to_string(),
+                            step: next_step, lapse_count, next_review: now + nm * 60,
+                            next_minutes: nm, lapsed: false, graduated: false,
+                            fsrs_stability: stab, fsrs_difficulty: diff,
+                        }, current_memory))
+                    }
+                }
+                _ => {
+                    // easy: immediate re-graduation
+                    re_graduate_with_fsrs(current_memory, stored_interval, review_count, lapse_count, now)
+                }
+            }
+        }
+        _ => graduate_with_fsrs(None, review_count, lapse_count, grade, now),
     }
 }
 
@@ -710,10 +1401,10 @@ fn schedule_card(
 fn db_upsert_review_item(app: tauri::AppHandle, content: String, tag: Option<String>, language: Option<String>) -> Result<(), String> {
     let conn = open_db(&app)?;
     let id = uuid::Uuid::new_v4().to_string();
-    let tags = tag.unwrap_or_else(|| compute_tag_from_ef_r(2.5, 0).to_string());
+    let tags = tag.unwrap_or_else(|| "new".to_string());
     conn.execute(
-        "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language)
-         VALUES (?1, ?2, 2.5, 1, 0, 'new', 0, 0, NULL, ?3, ?4)
+        "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, fsrs_stability, fsrs_difficulty, created_at)
+         VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, ?4, NULL, NULL, CAST(strftime('%s', 'now') * 1000 AS INTEGER))
          ON CONFLICT(content) DO UPDATE SET tags=excluded.tags, language=COALESCE(excluded.language, review_items.language)",
         params![id, content, tags, language],
     ).map_err(|e| e.to_string())?;
@@ -725,24 +1416,9 @@ fn db_get_review_items(app: tauri::AppHandle) -> Result<Vec<ReviewItem>, String>
     let conn = open_db(&app)?;
     let mut stmt = conn.prepare(
         "SELECT
-            id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail
+            id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
         FROM review_items").map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([], |row| {
-        Ok(ReviewItem {
-            id: row.get(0)?,
-            content: row.get(1)?,
-            EF: row.get(2)?,
-            I: row.get(3)?,
-            R: row.get(4)?,
-            state: row.get(5)?,
-            step: row.get(6)?,
-            lapse_count: row.get(7)?,
-            next_review: row.get(8)?,
-            tags: row.get(9)?,
-            language: row.get(10)?,
-            detail: row.get(11)?,
-        })
-    }).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], row_to_review_item).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
     for r in rows {
         items.push(r.map_err(|e| e.to_string())?);
@@ -759,29 +1435,14 @@ fn db_get_review_items_by_words(app: tauri::AppHandle, words: Vec<String>) -> Re
     let conn = open_db(&app)?;
     let placeholders: Vec<String> = words.iter().map(|_| "?".to_string()).collect();
     let sql = format!(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail FROM review_items WHERE content IN ({})",
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE content IN ({})",
         placeholders.join(", ")
     );
 
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let params: Vec<&dyn rusqlite::ToSql> = words.iter().map(|w| w as &dyn rusqlite::ToSql).collect();
 
-    let rows = stmt.query_map(params.as_slice(), |row| {
-        Ok(ReviewItem {
-            id: row.get(0)?,
-            content: row.get(1)?,
-            EF: row.get(2)?,
-            I: row.get(3)?,
-            R: row.get(4)?,
-            state: row.get(5)?,
-            step: row.get(6)?,
-            lapse_count: row.get(7)?,
-            next_review: row.get(8)?,
-            tags: row.get(9)?,
-            language: row.get(10)?,
-            detail: row.get(11)?,
-        })
-    }).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params.as_slice(), row_to_review_item).map_err(|e| e.to_string())?;
 
     let mut items = Vec::new();
     for r in rows {
@@ -793,36 +1454,129 @@ fn db_get_review_items_by_words(app: tauri::AppHandle, words: Vec<String>) -> Re
 #[tauri::command]
 fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRSResult, String> {
     let conn = open_db(&app)?;
-    let (ef, i, r, state, step, lapse_count, next_review): (f64, i64, i64, String, i64, i64, Option<i64>) = conn.query_row(
-        "SELECT EF, I, R, state, step, lapse_count, next_review FROM review_items WHERE id=?1",
+
+    // Read card state including FSRS columns
+    let row: (f64, i64, i64, String, i64, i64, Option<i64>, Option<f32>, Option<f32>) = conn.query_row(
+        "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty
+         FROM review_items WHERE id=?1",
         params![id.clone()],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+        |row| Ok((
+            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
+        )),
     ).map_err(|e| e.to_string())?;
+
+    let (ef, i, r, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty) = row;
+
+    // Determine current memory state
+    let current_memory = if ef == -1.0 {
+        memory_state_from_db(fsrs_stability, fsrs_difficulty)
+    } else {
+        // On-the-fly SM-2 migration
+        let fsrs = get_fsrs();
+        match fsrs.memory_state_from_sm2(ef as f32, i as f32, DESIRED_RETENTION) {
+            Ok(ms) => Some(ms),
+            Err(e) => {
+                eprintln!("[fsrs] On-the-fly migration failed for card {}: {}", id, e);
+                let config = SRSConfig::default();
+                let result = schedule_card(ef, i, r, &state, step, lapse_count, next_review, &grade, &config);
+                let new_tag = compute_tag_from_ef_r(result.EF, result.R);
+                conn.execute(
+                    "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7, tags=?8 WHERE id=?9",
+                    params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, new_tag, id],
+                ).map_err(|e| e.to_string())?;
+                return Ok(result);
+            }
+        }
+    };
 
     let config = SRSConfig::default();
-    let result = schedule_card(ef, i, r, &state, step, lapse_count, next_review, &grade, &config);
+    let (result, new_memory_opt) = schedule_fsrs(&state, step, current_memory, i, r, lapse_count, next_review, &grade, &config)?;
 
-    // Compute dynamic tag from newly scheduled EF/R values
-    let new_tag = compute_tag_from_ef_r(result.EF, result.R);
+    let new_tag = match result.fsrs_difficulty {
+        Some(d) => compute_tag_from_fsrs_difficulty(d),
+        None => compute_tag_from_ef_r(result.EF, result.R),
+    };
 
     conn.execute(
-        "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7, tags=?8 WHERE id=?9",
-        params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, new_tag, id],
+        "UPDATE review_items SET EF=-1.0, I=?1, R=?2, state=?3, step=?4, lapse_count=?5, next_review=?6, tags=?7, fsrs_stability=?8, fsrs_difficulty=?9 WHERE id=?10",
+        params![
+            result.I, result.R, result.state, result.step, result.lapse_count,
+            result.next_review, new_tag,
+            new_memory_opt.map(|m| m.stability),
+            new_memory_opt.map(|m| m.difficulty),
+            id
+        ],
     ).map_err(|e| e.to_string())?;
+
+    // set mastered_at on first graduation to review state
+    if result.state == "review" && state != "review" {
+        let _ = conn.execute(
+            "UPDATE review_items SET mastered_at = CAST(strftime('%s', 'now') * 1000 AS INTEGER)
+             WHERE id = ?1 AND mastered_at IS NULL",
+            params![id],
+        );
+    }
 
     Ok(result)
 }
 
+#[derive(Serialize)]
+struct GradePreview {
+    grade: String,
+    label: String,
+    next_minutes: i64,
+    next_review_formatted: String,
+    state: String,
+    lapsed: bool,
+    graduated: bool,
+}
+
+#[tauri::command]
+fn db_preview_srs_grades(app: tauri::AppHandle, id: String) -> Result<Vec<GradePreview>, String> {
+    let conn = open_db(&app)?;
+    let row: (f64, i64, i64, String, i64, i64, Option<i64>, Option<f32>, Option<f32>) = conn.query_row(
+        "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty
+         FROM review_items WHERE id=?1",
+        params![id],
+        |row| Ok((
+            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
+        )),
+    ).map_err(|e| e.to_string())?;
+
+    let (ef, i, r, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty) = row;
+
+    let current_memory = if ef == -1.0 {
+        memory_state_from_db(fsrs_stability, fsrs_difficulty)
+    } else {
+        let fsrs = get_fsrs();
+        fsrs.memory_state_from_sm2(ef as f32, i as f32, DESIRED_RETENTION).ok()
+    };
+
+    let config = SRSConfig::default();
+    let grades = ["again", "hard", "good", "easy"];
+    let labels = ["Again", "Hard", "Good", "Easy"];
+
+    let mut previews = Vec::new();
+    for idx in 0..grades.len() {
+        let (result, _) = schedule_fsrs(&state, step, current_memory, i, r, lapse_count, next_review, grades[idx], &config)?;
+        previews.push(GradePreview {
+            grade: grades[idx].to_string(),
+            label: labels[idx].to_string(),
+            next_minutes: result.next_minutes,
+            next_review_formatted: format_next_review_minutes(result.next_minutes),
+            state: result.state,
+            lapsed: result.lapsed,
+            graduated: result.graduated,
+        });
+    }
+    Ok(previews)
+}
+
 #[tauri::command]
 fn db_increment_session_today(app: tauri::AppHandle) -> Result<(), String> {
-    let conn = open_db(&app)?;
-    let today = chrono::Local::now().date_naive().to_string();
-    conn.execute(
-        "INSERT INTO telemetry_days(date, sessions) VALUES (?1, 1)
-         ON CONFLICT(date) DO UPDATE SET sessions=sessions+1",
-        params![today],
-    ).map_err(|e| e.to_string())?;
-    Ok(())
+    db_record_activity(app, "chat".to_string())
 }
 
 #[tauri::command]
@@ -839,6 +1593,181 @@ fn db_get_telemetry_days(app: tauri::AppHandle) -> Result<Vec<TelemetryDay>, Str
     let mut out = Vec::new();
     for r in rows {
         out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+fn db_record_activity(app: tauri::AppHandle, activity_type: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let today = chrono::Local::now().date_naive().to_string();
+    conn.execute(
+        "INSERT INTO user_activity(date, activity_type, count) VALUES (?1, ?2, 1)
+         ON CONFLICT(date, activity_type) DO UPDATE SET count = count + 1",
+        params![today, activity_type],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn db_get_user_activity(app: tauri::AppHandle, date_from: String, date_to: String) -> Result<Vec<UserActivity>, String> {
+    let conn = open_db(&app)?;
+    let mut stmt = conn.prepare(
+        "SELECT date, activity_type, count FROM user_activity
+         WHERE date >= ?1 AND date <= ?2
+         ORDER BY date ASC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![date_from, date_to], |row| {
+        Ok(UserActivity {
+            date: row.get(0)?,
+            activity_type: row.get(1)?,
+            count: row.get(2)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+#[tauri::command]
+fn db_record_active_time(app: tauri::AppHandle) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let today = chrono::Local::now().date_naive().to_string();
+    conn.execute(
+        "INSERT INTO daily_active_time(date, total_seconds) VALUES (?1, 30)
+         ON CONFLICT(date) DO UPDATE SET total_seconds = MIN(total_seconds + 30, 57600)",
+        params![today],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn db_get_active_time(app: tauri::AppHandle, date_from: String, date_to: String) -> Result<Vec<DailyActiveTime>, String> {
+    let conn = open_db(&app)?;
+    let mut stmt = conn.prepare(
+        "SELECT date, total_seconds FROM daily_active_time
+         WHERE date >= ?1 AND date <= ?2
+         ORDER BY date ASC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![date_from, date_to], |row| {
+        Ok(DailyActiveTime {
+            date: row.get(0)?,
+            total_seconds: row.get(1)?,
+        })
+    }).map_err(|e| e.to_string())?;
+    let mut out = Vec::new();
+    for r in rows {
+        out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+#[derive(Serialize)]
+struct MasteryDay {
+    date: String,
+    mastered: i64,
+}
+
+#[tauri::command]
+fn db_get_mastery_history(app: tauri::AppHandle, date_from: String, date_to: String) -> Result<Vec<MasteryDay>, String> {
+    let conn = open_db(&app)?;
+    // per-day count of newly mastered cards within the window
+    let mut stmt = conn.prepare(
+        "SELECT date(mastered_at / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as cnt
+         FROM review_items
+         WHERE mastered_at IS NOT NULL
+         GROUP BY day
+         ORDER BY day ASC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    }).map_err(|e| e.to_string())?;
+
+    use std::collections::HashMap;
+    let mut daily_map: HashMap<String, i64> = HashMap::new();
+    for r in rows {
+        let (day, cnt) = r.map_err(|e| e.to_string())?;
+        daily_map.insert(day, cnt);
+    }
+
+    let start = chrono::NaiveDate::parse_from_str(&date_from, "%Y-%m-%d")
+        .map_err(|e| e.to_string())?;
+    let end = chrono::NaiveDate::parse_from_str(&date_to, "%Y-%m-%d")
+        .map_err(|e| e.to_string())?;
+
+    // baseline: cards mastered before date_from
+    let baseline: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM review_items
+         WHERE mastered_at IS NOT NULL
+           AND date(mastered_at / 1000, 'unixepoch', 'localtime') < ?1",
+        params![date_from],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    let mut out = Vec::new();
+    let mut cumulative = baseline;
+    let mut d = start;
+    while d <= end {
+        let ds = d.to_string();
+        cumulative += daily_map.get(&ds).copied().unwrap_or(0);
+        out.push(MasteryDay { date: ds, mastered: cumulative });
+        d = d.succ_opt().unwrap_or(end);
+    }
+    Ok(out)
+}
+
+#[derive(Serialize)]
+struct CardsAddedDay {
+    date: String,
+    total: i64,
+}
+
+#[tauri::command]
+fn db_get_cards_added_history(app: tauri::AppHandle, date_from: String, date_to: String) -> Result<Vec<CardsAddedDay>, String> {
+    let conn = open_db(&app)?;
+    // per-day count of newly created cards using created_at
+    let mut stmt = conn.prepare(
+        "SELECT date(created_at / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as cnt
+         FROM review_items
+         WHERE created_at IS NOT NULL
+         GROUP BY day
+         ORDER BY day ASC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    }).map_err(|e| e.to_string())?;
+
+    use std::collections::HashMap;
+    let mut daily_map: HashMap<String, i64> = HashMap::new();
+    for r in rows {
+        let (day, cnt) = r.map_err(|e| e.to_string())?;
+        daily_map.insert(day, cnt);
+    }
+
+    let start = chrono::NaiveDate::parse_from_str(&date_from, "%Y-%m-%d")
+        .map_err(|e| e.to_string())?;
+    let end = chrono::NaiveDate::parse_from_str(&date_to, "%Y-%m-%d")
+        .map_err(|e| e.to_string())?;
+
+    // baseline: cards created before date_from
+    let baseline: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM review_items
+         WHERE created_at IS NOT NULL
+           AND date(created_at / 1000, 'unixepoch', 'localtime') < ?1",
+        params![date_from],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    let mut out = Vec::new();
+    let mut cumulative = baseline;
+    let mut d = start;
+    while d <= end {
+        let ds = d.to_string();
+        cumulative += daily_map.get(&ds).copied().unwrap_or(0);
+        out.push(CardsAddedDay { date: ds, total: cumulative });
+        d = d.succ_opt().unwrap_or(end);
     }
     Ok(out)
 }
@@ -861,6 +1790,399 @@ fn db_add_known_word(app: tauri::AppHandle, word: String) -> Result<(), String> 
     conn.execute("INSERT OR IGNORE INTO known_words(word) VALUES (?1)", params![word.to_lowercase()])
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// A known word with its reading and meaning
+struct KnownWord {
+    word: String,
+    reading: String,
+    meaning: String,
+}
+
+/// Find known words that have a REAL sound or kanji overlap with the target.
+/// Returns (matched_words, all_known_words_for_fallback)
+fn find_mnemonic_matches(
+    app: &tauri::AppHandle,
+    language: &str,
+    target_content: &str,
+    target_reading: &str,
+) -> Result<(Vec<KnownWord>, Vec<KnownWord>), String> {
+    let conn = open_db(app)?;
+
+    // Collect all known words with readings
+    let mut all_words: Vec<KnownWord> = Vec::new();
+
+    // Source: review_items with ease >= 0.7
+    let mut stmt = conn.prepare(
+        "SELECT content, EF, R, detail, fsrs_difficulty FROM review_items WHERE language=?1"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![language], |row| {
+        let content: String = row.get(0)?;
+        let ef: f64 = row.get(1)?;
+        let r_val: i64 = row.get(2)?;
+        let detail: Option<String> = row.get(3)?;
+        let fsrs_diff: Option<f32> = row.get(4).unwrap_or(None);
+        Ok((content, ef, r_val, detail, fsrs_diff))
+    }).map_err(|e| e.to_string())?;
+    for r in rows {
+        let (content, ef, r_val, detail, fsrs_diff) = r.map_err(|e| e.to_string())?;
+        // Known = easy cards. For FSRS: difficulty < 3.0. For SM-2: EF >= 2.7 AND R >= 5
+        let is_known = if ef == -1.0 {
+            fsrs_diff.unwrap_or(5.0) < 3.0
+        } else {
+            ef >= 2.7 && r_val >= 5
+        };
+        if !is_known { continue; }
+        // Don't match the word with itself
+        if content == target_content { continue; }
+
+        let v = detail.as_ref().and_then(|d| serde_json::from_str::<serde_json::Value>(d).ok());
+        let reading = v.as_ref()
+            .and_then(|v| v.get("reading").and_then(|r| r.as_str()))
+            .unwrap_or("")
+            .to_string();
+        let meaning = v.as_ref()
+            .and_then(|v| v.get("meaning").and_then(|m| m.as_str()))
+            .unwrap_or("")
+            .to_string();
+
+        all_words.push(KnownWord { word: content, reading, meaning });
+    }
+
+    // Find matches: shared kanji or shared reading syllables
+    let mut matched: Vec<KnownWord> = Vec::new();
+
+    for kw in &all_words {
+        let mut is_match = false;
+
+        // Check 1: shared kanji (any CJK character in common)
+        let target_chars: std::collections::HashSet<char> = target_content.chars()
+            .filter(|c| is_cjk(*c))
+            .collect();
+        let kw_chars: std::collections::HashSet<char> = kw.word.chars()
+            .filter(|c| is_cjk(*c))
+            .collect();
+        if !target_chars.is_disjoint(&kw_chars) {
+            is_match = true;
+        }
+
+        // Check 2: shared reading mora (at least 2 consecutive mora overlap)
+        if !target_reading.is_empty() && !kw.reading.is_empty() {
+            let t_mora = split_mora(&target_reading.to_lowercase());
+            let k_mora = split_mora(&kw.reading.to_lowercase());
+            // Check all 2-mora substrings of the shorter against the longer
+            let (shorter, longer) = if t_mora.len() <= k_mora.len() {
+                (&t_mora, &k_mora)
+            } else {
+                (&k_mora, &t_mora)
+            };
+            if shorter.len() >= 2 {
+                for i in 0..=shorter.len()-2 {
+                    let sub = &shorter[i..i+2];
+                    // Check if this 2-mora sequence appears in longer
+                    for j in 0..=longer.len().saturating_sub(2) {
+                        if longer[j] == sub[0] && longer[j+1] == sub[1] {
+                            is_match = true;
+                            break;
+                        }
+                    }
+                    if is_match { break; }
+                }
+            }
+        }
+
+        if is_match {
+            matched.push(KnownWord {
+                word: kw.word.clone(),
+                reading: kw.reading.clone(),
+                meaning: kw.meaning.clone(),
+            });
+        }
+    }
+
+    // Limit matches to top 10
+    matched.truncate(10);
+    // Limit all_words to 30 for fallback context
+    all_words.truncate(30);
+
+    Ok((matched, all_words))
+}
+
+/// Split a kana string into mora (syllable units).
+/// Each mora is one kana, except small kana (ゃゅょぁぃぅぇぉ) which combine with the previous.
+/// e.g. "しょくどう" → ["しょ", "く", "ど", "う"]
+/// e.g. "きゃった" → ["きゃ", "っ", "た"]
+fn split_mora(reading: &str) -> Vec<String> {
+    let chars: Vec<char> = reading.chars().collect();
+    let mut mora: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if is_small_kana(c) {
+            // Attach to previous mora if exists, otherwise standalone
+            if let Some(last) = mora.last_mut() {
+                last.push(c);
+            } else {
+                mora.push(c.to_string());
+            }
+        } else {
+            mora.push(c.to_string());
+        }
+        i += 1;
+    }
+    mora
+}
+
+fn is_small_kana(c: char) -> bool {
+    matches!(c, 'ゃ' | 'ゅ' | 'ょ' | 'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'ャ' | 'ュ' | 'ョ' | 'ァ' | 'ィ' | 'ゥ' | 'ェ' | 'ォ')
+}
+
+/// Check if a character is a CJK ideograph
+fn is_cjk(c: char) -> bool {
+    matches!(c,
+        '\u{4E00}'..='\u{9FFF}' |   // CJK Unified Ideographs
+        '\u{3400}'..='\u{4DBF}' |   // CJK Unified Ideographs Extension A
+        '\u{F900}'..='\u{FAFF}'     // CJK Compatibility Ideographs
+    )
+}
+
+#[tauri::command]
+async fn db_generate_mnemonic(
+    app: tauri::AppHandle,
+    api_host: String,
+    api_key: String,
+    model: String,
+    id: String,
+    content: String,
+    language: String,
+    detail: Option<String>,
+) -> Result<String, String> {
+    // 1. Extract target reading and meaning
+    let (target_reading, target_meaning) = detail.as_ref().map(|d| {
+        let v = serde_json::from_str::<serde_json::Value>(d).ok();
+        let reading = v.as_ref().and_then(|v| v.get("reading").and_then(|r| r.as_str())).unwrap_or("").to_string();
+        let meaning = v.as_ref().and_then(|v| v.get("meaning").and_then(|m| m.as_str())).unwrap_or("").to_string();
+        (reading, meaning)
+    }).unwrap_or_default();
+
+    let target_info = format!(
+        "{}{}{}",
+        content,
+        if target_reading.is_empty() { String::new() } else { format!(" (reading: {})", target_reading) },
+        if target_meaning.is_empty() { String::new() } else { format!(" — meaning: {}", target_meaning) },
+    );
+
+    // 2. Find known words with REAL overlaps
+    let (matched, _all_known) = find_mnemonic_matches(
+        &app, &language, &content, &target_reading
+    )?;
+
+    // 3. Build prompt based on whether we found matches
+    let lang_name = match language.as_str() {
+        "ja" => "Japanese",
+        "id" => "Indonesian",
+        _ => &language,
+    };
+
+    let prompt = if matched.is_empty() {
+        // No known word shares sounds or kanji — use sound-alike
+        format!(
+            "Create a mnemonic to help remember the {} word: \"{}\"\n\n\
+            No known words share sounds or kanji with this word.\n\
+            Use a sound-alike from English or another familiar word that sounds like the reading.\n\n\
+            Example: 公式 (こうしき, formula) — sounds like \"COZY-sheeki\" — imagine a COZY formula you can solve in bed.\n\n\
+            RULES:\n\
+            - Base the mnemonic on how the reading SOUNDS — find an English word or phrase that sounds similar\n\
+            - Always show the target word's reading in the mnemonic\n\
+            - Keep it to 1-2 short sentences — natural and easy to recall\n\
+            - Write in English\n\
+            - Return ONLY the mnemonic text. No JSON, no labels, no quotes, no explanation.",
+            lang_name, target_info
+        )
+    } else {
+        // We found real overlaps — list them explicitly
+        let matches_str: Vec<String> = matched.iter().map(|kw| {
+            if kw.reading.is_empty() {
+                format!("{} (meaning: {})", kw.word, kw.meaning)
+            } else {
+                format!("{} (reading: {}, meaning: {})", kw.word, kw.reading, kw.meaning)
+            }
+        }).collect();
+
+        format!(
+            "Create a mnemonic to help remember the {} word: \"{}\"\n\n\
+            The following known words share sounds or kanji with the target:\n{}\n\n\
+            Pick the BEST match from the list above and build a mnemonic that explains the connection.\n\
+            The connection must be based on the REAL overlap — shared kanji or shared reading syllables.\n\n\
+            Example: Target 食堂 (しょくどう, canteen). Match: 食べる (reading: たべる, meaning: to eat).\n\
+            Mnemonic: \"You already know 食べる (たべる). The kanji 食 can also be read as しょ (onyomi). So 食堂 しょくどう is a HALL where you EAT — a canteen!\"\n\n\
+            RULES:\n\
+            - You MUST use one of the matched words listed above — explain the shared kanji or reading\n\
+            - Always show both the target's reading and the matched word's reading in the mnemonic\n\
+            - Keep it to 1-2 short sentences — natural and easy to recall\n\
+            - Write in English\n\
+            - Return ONLY the mnemonic text. No JSON, no labels, no quotes, no explanation.",
+            lang_name, target_info,
+            matches_str.join("\n")
+        )
+    };
+
+    // 3. Call LLM (same pattern as db_generate_detail)
+    let url = build_url(&api_host, "chat/completions");
+    let client = Client::new();
+    let req = ChatRequest {
+        model: &model,
+        messages: &vec![ChatMessage { role: "user".to_string(), content: prompt }],
+    };
+    let resp = client
+        .post(&url)
+        .header("Authorization", format!("Bearer {}", api_key))
+        .json(&req)
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {}", e))?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(format!("API error: {} — {}", status, body.trim()));
+    }
+    let parsed: ChatResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
+    let mnemonic = parsed.choices.get(0).map(|c| c.message.content.clone()).unwrap_or_default();
+
+    // 4. Save to DB
+    let conn = open_db(&app)?;
+    conn.execute("UPDATE review_items SET mnemonic=?1 WHERE id=?2", params![mnemonic, id])
+        .map_err(|e| e.to_string())?;
+
+    Ok(mnemonic)
+}
+
+#[tauri::command]
+fn db_update_mnemonic(app: tauri::AppHandle, id: String, mnemonic: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    conn.execute("UPDATE review_items SET mnemonic=?1 WHERE id=?2", params![mnemonic, id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+fn db_update_message_content(app: tauri::AppHandle, message_id: i64, content: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    conn.execute(
+        "UPDATE messages SET content=?1 WHERE id=?2",
+        params![content, message_id],
+    ).map_err(|e| e.to_string())?;
+    // Clear cached feedback so re-evaluation works cleanly
+    conn.execute(
+        "DELETE FROM user_message_feedback WHERE message_id=?1",
+        params![message_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Deactivate a message and all its descendants (mark is_active_path = 0).
+/// Used when a user edits a message — the old branch becomes inactive.
+#[tauri::command]
+fn db_deactivate_message_branch(app: tauri::AppHandle, message_id: i64) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    // BFS: collect all descendant message IDs, then mark them inactive
+    let mut to_deactivate = vec![message_id];
+    let mut idx = 0;
+    while idx < to_deactivate.len() {
+        let current = to_deactivate[idx];
+        let mut stmt = conn.prepare("SELECT id FROM messages WHERE parent_message_id=?1")
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map(params![current], |row| row.get::<_, i64>(0))
+            .map_err(|e| e.to_string())?;
+        for r in rows {
+            to_deactivate.push(r.map_err(|e| e.to_string())?);
+        }
+        idx += 1;
+    }
+    for id in to_deactivate {
+        conn.execute("UPDATE messages SET is_active_path=0 WHERE id=?1", params![id])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+/// Get sibling user messages that share the same parent_message_id.
+/// Used for arrow navigation between edit versions.
+#[derive(Serialize)]
+struct SiblingMessage {
+    id: i64,
+    content: String,
+    is_active_path: i64,
+}
+
+#[tauri::command]
+fn db_get_message_siblings(app: tauri::AppHandle, message_id: i64) -> Result<Vec<SiblingMessage>, String> {
+    let conn = open_db(&app)?;
+    // Get the parent of the given message
+    let parent_id: Option<i64> = conn.query_row(
+        "SELECT parent_message_id FROM messages WHERE id=?1",
+        params![message_id],
+        |row| row.get(0),
+    ).map_err(|e| e.to_string())?;
+
+    // Find all user messages with the same parent
+    let mut stmt = conn.prepare(
+        "SELECT id, content, is_active_path FROM messages WHERE parent_message_id=?1 AND role='user' ORDER BY created_at ASC"
+    ).map_err(|e| e.to_string())?;
+
+    let parent_param = match parent_id {
+        Some(id) => id as i64,
+        None => 0i64, // Won't match any parent_message_id since they're non-zero
+    };
+
+    // Handle NULL parent (first messages in conversation)
+    let rows = if parent_id.is_none() {
+        let mut stmt2 = conn.prepare(
+            "SELECT id, content, is_active_path FROM messages WHERE parent_message_id IS NULL AND role='user' AND session_id=(SELECT session_id FROM messages WHERE id=?1) ORDER BY created_at ASC"
+        ).map_err(|e| e.to_string())?;
+        let mapped = stmt2.query_map(params![message_id], |row| {
+            Ok(SiblingMessage {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                is_active_path: row.get(2)?,
+            })
+        }).map_err(|e| e.to_string())?;
+        mapped.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    } else {
+        let mapped = stmt.query_map(params![parent_param], |row| {
+            Ok(SiblingMessage {
+                id: row.get(0)?,
+                content: row.get(1)?,
+                is_active_path: row.get(2)?,
+            })
+        }).map_err(|e| e.to_string())?;
+        mapped.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())?
+    };
+
+    Ok(rows)
+}
+
+/// Get the bot response child of a user message (any, including inactive for arrow navigation).
+#[tauri::command]
+fn db_get_bot_response_for_user(app: tauri::AppHandle, user_message_id: i64) -> Result<Option<Message>, String> {
+    let conn = open_db(&app)?;
+    let result = conn.query_row(
+        "SELECT id, role, content, created_at, parent_message_id, is_active_path FROM messages WHERE parent_message_id=?1 AND role='assistant' ORDER BY created_at DESC LIMIT 1",
+        params![user_message_id],
+        |row| Ok(Message {
+            id: row.get(0)?,
+            role: row.get(1)?,
+            content: row.get(2)?,
+            created_at: row.get(3)?,
+            parent_message_id: row.get(4)?,
+            is_active_path: row.get(5)?,
+        }),
+    );
+    match result {
+        Ok(msg) => Ok(Some(msg)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
 }
 
 #[tauri::command]
@@ -900,28 +2222,104 @@ fn db_update_review_detail(app: tauri::AppHandle, id: String, detail: String) ->
 #[tauri::command]
 fn db_get_review_items_by_language(app: tauri::AppHandle, language: String) -> Result<Vec<ReviewItem>, String> {
     let conn = open_db(&app)?;
-    let mut stmt = conn.prepare("SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail FROM review_items WHERE language=?1").map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![language], |row| {
-        Ok(ReviewItem {
-            id: row.get(0)?,
-            content: row.get(1)?,
-            EF: row.get(2)?,
-            I: row.get(3)?,
-            R: row.get(4)?,
-            state: row.get(5)?,
-            step: row.get(6)?,
-            lapse_count: row.get(7)?,
-            next_review: row.get(8)?,
-            tags: row.get(9)?,
-            language: row.get(10)?,
-            detail: row.get(11)?,
-        })
-    }).map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare("SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE language=?1").map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![language], row_to_review_item).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
     for r in rows {
         items.push(r.map_err(|e| e.to_string())?);
     }
     Ok(items)
+}
+
+#[derive(Serialize)]
+struct SearchResult {
+    items: Vec<ReviewItem>,
+    total: i64,
+}
+
+#[tauri::command]
+fn db_search_review_items(
+    app: tauri::AppHandle,
+    query: Option<String>,
+    language: Option<String>,
+    state: Option<String>,
+    difficulty: Option<String>,
+    sort: Option<String>,
+    offset: Option<i64>,
+    limit: Option<i64>,
+) -> Result<SearchResult, String> {
+    use rusqlite::types::ToSql;
+    let conn = open_db(&app)?;
+
+    let mut conditions: Vec<String> = Vec::new();
+    let mut params: Vec<String> = Vec::new();
+
+    if let Some(ref lang) = language {
+        conditions.push(format!("language = ?{}", params.len() + 1));
+        params.push(lang.clone());
+    }
+    if let Some(ref s) = state {
+        conditions.push(format!("state = ?{}", params.len() + 1));
+        params.push(s.clone());
+    }
+    if let Some(ref q) = query {
+        let q = q.trim().to_string();
+        if !q.is_empty() {
+            conditions.push(format!("LOWER(content) LIKE '%' || LOWER(?{}) || '%'", params.len() + 1));
+            params.push(q);
+        }
+    }
+    if let Some(ref d) = difficulty {
+        match d.as_str() {
+            "hard" => conditions.push("((EF = -1.0 AND fsrs_difficulty >= 7.0) OR (EF != -1.0 AND EF < 2.0))".to_string()),
+            "medium" => conditions.push("((EF = -1.0 AND fsrs_difficulty >= 3.0 AND fsrs_difficulty < 7.0) OR (EF != -1.0 AND EF >= 2.0 AND (EF < 2.7 OR R < 5)))".to_string()),
+            "easy" => conditions.push("((EF = -1.0 AND fsrs_difficulty < 3.0) OR (EF != -1.0 AND EF >= 2.7 AND R >= 5))".to_string()),
+            _ => {}
+        }
+    }
+
+    let where_clause = if conditions.is_empty() {
+        String::new()
+    } else {
+        format!(" WHERE {}", conditions.join(" AND "))
+    };
+
+    let order_clause = match sort.as_deref() {
+        Some("next_review") => " ORDER BY next_review ASC NULLS LAST".to_string(),
+        Some("hardest") => " ORDER BY COALESCE(fsrs_difficulty, (11.0 - EF)) DESC, lapse_count DESC".to_string(),
+        _ => " ORDER BY COALESCE(fsrs_difficulty, (11.0 - EF)) ASC, lapse_count ASC".to_string(),
+    };
+
+    // Count total matching rows
+    let count_sql = format!("SELECT COUNT(*) FROM review_items{}", where_clause);
+    let param_refs: Vec<&dyn ToSql> = params.iter().map(|s| s as &dyn ToSql).collect();
+    let total: i64 = conn.query_row(&count_sql, param_refs.as_slice(), |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+
+    // Fetch page
+    let data_sql = format!(
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items{}{} LIMIT ?{} OFFSET ?{}",
+        where_clause, order_clause,
+        params.len() + 1, params.len() + 2,
+    );
+
+    let limit_val = limit.unwrap_or(20).max(1);
+    let offset_val = offset.unwrap_or(0).max(0);
+
+    let mut all_params: Vec<Box<dyn ToSql>> = params.into_iter().map(|s| Box::new(s) as Box<dyn ToSql>).collect();
+    all_params.push(Box::new(limit_val));
+    all_params.push(Box::new(offset_val));
+    let all_refs: Vec<&dyn ToSql> = all_params.iter().map(|p| p.as_ref()).collect();
+
+    let mut stmt = conn.prepare(&data_sql).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(all_refs.as_slice(), row_to_review_item).map_err(|e| e.to_string())?;
+
+    let mut items = Vec::new();
+    for r in rows {
+        items.push(r.map_err(|e| e.to_string())?);
+    }
+
+    Ok(SearchResult { items, total })
 }
 
 #[tauri::command]
@@ -931,8 +2329,31 @@ fn db_get_due_review_items(
     limit: Option<i64>,
     new_cards_remaining: Option<i64>,
     max_next_review: Option<i64>,
+    max_new_cards_per_day: Option<i64>,
 ) -> Result<Vec<ReviewItem>, String> {
     let conn = open_db(&app)?;
+    let today = chrono::Local::now().date_naive().to_string();
+
+    // Read study_limits as authoritative source for daily counts (safety net
+    // against stale frontend state when buildQueue is called via refresh).
+    let limits_row = conn.query_row(
+        "SELECT reviews_completed, new_cards_seen FROM study_limits WHERE date = ?1 AND language = ?2",
+        params![today, language.clone().unwrap_or_default()],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    );
+    let (_backend_reviews_done, backend_new_seen) = limits_row.unwrap_or((0, 0));
+
+    // Compute authoritative remaining: frontend hint vs. what study_limits says
+    let authoritative_new_remaining = match max_new_cards_per_day {
+        Some(max_new) => {
+            let backend_remaining = i64::max(0, max_new - backend_new_seen);
+            match new_cards_remaining {
+                Some(frontend_rem) => Some(i64::min(frontend_rem, backend_remaining)),
+                None => Some(backend_remaining),
+            }
+        }
+        None => new_cards_remaining,
+    };
     // Use provided cutoff, or default to end of today (23:59:59 local)
     let end_of_day = match max_next_review {
         Some(ts) => ts,
@@ -951,7 +2372,7 @@ fn db_get_due_review_items(
     let limit_val = limit.unwrap_or(200);
 
     let mut sql = String::from(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
          FROM review_items
          WHERE (next_review IS NULL OR next_review <= ?1)"
     );
@@ -966,35 +2387,18 @@ fn db_get_due_review_items(
     let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
 
-    fn map_row(row: &rusqlite::Row) -> rusqlite::Result<ReviewItem> {
-        Ok(ReviewItem {
-            id: row.get(0)?,
-            content: row.get(1)?,
-            EF: row.get(2)?,
-            I: row.get(3)?,
-            R: row.get(4)?,
-            state: row.get(5)?,
-            step: row.get(6)?,
-            lapse_count: row.get(7)?,
-            next_review: row.get(8)?,
-            tags: row.get(9)?,
-            language: row.get(10)?,
-            detail: row.get(11)?,
-        })
-    }
-
     let rows = if let Some(ref lang) = language {
-        stmt.query_map(params![end_of_day, lang, limit_val], map_row).map_err(|e| e.to_string())?
+        stmt.query_map(params![end_of_day, lang, limit_val], row_to_review_item).map_err(|e| e.to_string())?
     } else {
-        stmt.query_map(params![end_of_day, limit_val], map_row).map_err(|e| e.to_string())?
+        stmt.query_map(params![end_of_day, limit_val], row_to_review_item).map_err(|e| e.to_string())?
     };
 
     for r in rows {
         items.push(r.map_err(|e| e.to_string())?);
     }
 
-    // Apply new card cap on the Rust side
-    if let Some(new_cap) = new_cards_remaining {
+    // Apply new card cap using authoritative value from study_limits
+    if let Some(new_cap) = authoritative_new_remaining {
         if new_cap <= 0 {
             items.retain(|item| item.state != "new" && item.state != "");
         } else {
@@ -1012,6 +2416,151 @@ fn db_get_due_review_items(
     }
 
     Ok(items)
+}
+
+// ─── Study Limits ─────────────────────────────────────────────────────────────
+
+#[derive(Serialize)]
+struct StudyLimits {
+    reviews_completed: i64,
+    new_cards_seen: i64,
+}
+
+#[tauri::command]
+fn db_get_study_limits(app: tauri::AppHandle, language: String) -> Result<StudyLimits, String> {
+    let conn = open_db(&app)?;
+    let today = chrono::Local::now().date_naive().to_string();
+    let result = conn.query_row(
+        "SELECT reviews_completed, new_cards_seen FROM study_limits WHERE date=?1 AND language=?2",
+        params![today, language],
+        |row| Ok(StudyLimits {
+            reviews_completed: row.get(0)?,
+            new_cards_seen: row.get(1)?,
+        }),
+    );
+    match result {
+        Ok(limits) => Ok(limits),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(StudyLimits {
+            reviews_completed: 0,
+            new_cards_seen: 0,
+        }),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
+fn db_increment_study_limit(app: tauri::AppHandle, language: String, field: String) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    let today = chrono::Local::now().date_naive().to_string();
+    let column = match field.as_str() {
+        "reviews" => "reviews_completed",
+        "new_cards" => "new_cards_seen",
+        _ => return Err(format!("Invalid field: {}", field)),
+    };
+    conn.execute(
+        &format!(
+            "INSERT INTO study_limits(date, language, reviews_completed, new_cards_seen) VALUES (?1, ?2, 0, 0)
+             ON CONFLICT(date, language) DO UPDATE SET {} = {} + 1",
+            column, column
+        ),
+        params![today, language],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct WordInfo {
+    content: String,
+    ef: f64,
+    r: i64,
+    is_new: bool,
+    difficulty_color: String,
+}
+
+#[derive(Serialize)]
+struct WordClassification {
+    difficult: Vec<WordInfo>,
+    known: Vec<String>,
+}
+
+/// Pre-classify review items as difficult or known, sorted hardest-first.
+/// Merges with known_words table for additional known words.
+#[tauri::command]
+fn db_get_difficult_and_known_words(
+    app: tauri::AppHandle,
+    language: Option<String>,
+) -> Result<WordClassification, String> {
+    let conn = open_db(&app)?;
+
+    // Fetch review items (filtered by language if provided)
+    let sql = if language.is_some() {
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE language=?1"
+    } else {
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items"
+    };
+    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
+    let rows = if let Some(ref lang) = language {
+        stmt.query_map(params![lang], row_to_review_item)
+    } else {
+        stmt.query_map([], row_to_review_item)
+    }
+    .map_err(|e| e.to_string())?;
+    let mut items = Vec::new();
+    for r in rows {
+        items.push(r.map_err(|e| e.to_string())?);
+    }
+
+    // Sort hardest-first (by EF ascending for SM-2, by fsrs_difficulty descending for FSRS)
+    items.sort_by(|a, b| {
+        let a_hardness = a.fsrs_difficulty.unwrap_or_else(|| (3.3 - a.EF) as f32);
+        let b_hardness = b.fsrs_difficulty.unwrap_or_else(|| (3.3 - b.EF) as f32);
+        b_hardness.partial_cmp(&a_hardness).unwrap_or(std::cmp::Ordering::Equal)
+    });
+
+    let mut difficult = Vec::new();
+    let mut known: Vec<String> = Vec::new();
+
+    for item in &items {
+        let is_difficult = if item.EF == -1.0 {
+            // FSRS card: difficult if difficulty >= 5.0 or R < 3
+            item.fsrs_difficulty.unwrap_or(5.0) >= 5.0 || item.R < 3
+        } else {
+            // SM-2 card: keep existing logic
+            item.EF < 2.7 || item.R < 5
+        };
+        if is_difficult {
+            let is_new = item.state == "new" || item.state.is_empty();
+            difficult.push(WordInfo {
+                content: item.content.clone(),
+                ef: item.EF,
+                r: item.R,
+                is_new,
+                difficulty_color: item.difficulty_color.clone(),
+            });
+        } else {
+            known.push(item.content.to_lowercase());
+        }
+    }
+
+    // Merge words from known_words table
+    if let Ok(mut stmt2) =
+        conn.prepare("SELECT word FROM known_words WHERE language IS NULL OR language=?1")
+    {
+        let lang = language.unwrap_or_default();
+        let rows2 = stmt2
+            .query_map(params![lang], |row| row.get::<_, String>(0))
+            .map_err(|e| e.to_string())?;
+        for r in rows2 {
+            if let Ok(w) = r {
+                let lower = w.to_lowercase();
+                if !known.contains(&lower) {
+                    known.push(lower);
+                }
+            }
+        }
+    }
+
+    Ok(WordClassification { difficult, known })
 }
 
 #[tauri::command]
@@ -1065,8 +2614,8 @@ fn db_import_review_items(app: tauri::AppHandle, items: Vec<ImportItem>) -> Resu
         let id = uuid::Uuid::new_v4().to_string();
         let tags = item.tags.unwrap_or_default();
         let result = conn.execute(
-            "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail)
-             VALUES (?1, ?2, 2.5, 1, 0, 'new', 0, 0, NULL, ?3, ?4, ?5)
+            "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, fsrs_stability, fsrs_difficulty, created_at)
+             VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, ?4, ?5, NULL, NULL, CAST(strftime('%s', 'now') * 1000 AS INTEGER))
              ON CONFLICT(content) DO NOTHING",
             params![id, item.content, tags, item.language, item.detail],
         );
@@ -1086,7 +2635,7 @@ async fn db_generate_detail(app: tauri::AppHandle, api_host: String, api_key: St
     };
     let prompt = format!(
         "You are a language learning assistant. For the {} word/phrase \"{}\", provide a detailed vocabulary card in this exact JSON format:\n\
-        {{\"reading\": \"pronunciation in IPA or romaji\", \"meaning\": \"English translation\", \"part_of_speech\": \"noun/verb/adj/etc\", \"example\": \"a natural example sentence in {}\", \"example_meaning\": \"English translation of the example\"}}\n\
+        {{\"reading\": \"hiragana reading for Japanese (e.g., たべる for 食べる, しょくどう for 食堂), or IPA/romaji for non-Japanese\", \"meaning\": \"English translation\", \"part_of_speech\": \"noun/verb/adj/etc\", \"example\": \"a natural example sentence in {}\", \"example_meaning\": \"English translation of the example\"}}\n\
         Return ONLY the JSON object, nothing else.",
         lang_name, content, lang_name
     );
@@ -1448,6 +2997,7 @@ async fn db_evaluate_user_message(
     language: String,
     level: String,
     context_messages: Vec<ChatMessage>,
+    target_words: Vec<String>,
 ) -> Result<UserMessageFeedback, String> {
     // Check cache first
     let conn = open_db(&app)?;
@@ -1478,78 +3028,37 @@ async fn db_evaluate_user_message(
         format!("\nJLPT/Level context: {}", level)
     };
 
-    let mut context_block = String::new();
-    if !context_messages.is_empty() {
-        context_block = "\n\n## Conversation Context\nHere is the recent conversation for reference:\n".to_string();
-        for cm in &context_messages {
-            let role_label = if cm.role == "user" { "Learner" } else { "Partner" };
-            context_block.push_str(&format!("- **{}**: {}\n", role_label, cm.content));
-        }
-        context_block.push_str("\nEvaluate the learner's latest message above in the context of this conversation.\n");
-    }
+    let target_words_json = if target_words.is_empty() {
+        "[]".to_string()
+    } else {
+        serde_json::to_string(&target_words).unwrap_or_else(|_| "[]".to_string())
+    };
+
+    let context_json = if context_messages.is_empty() {
+        "[]".to_string()
+    } else {
+        serde_json::to_string(&context_messages).unwrap_or_else(|_| "[]".to_string())
+    };
 
     let prompt = format!(
-        "You are a language learning evaluator. Evaluate the following {} learner's message.{}\n\
-         {}\n\
-         Rate the message on a scale of 1-5:\n\
-         - 1 = Many errors, hard to understand\n\
-         - 2 = Frequent errors but meaning is clear\n\
-         - 3 = Some errors, generally understandable\n\
-         - 4 = Minor issues, mostly correct\n\
-         - 5 = Natural, no errors\n\n\
-         Provide your evaluation in Markdown with these sections:\n\
-         ## Score: X/5\n\
-         ## Vocabulary\n\
-         - List words that are appropriate/good ✓\n\
-         - List words that should be replaced or removed ✗ (with better alternatives)\n\
-         ## Grammar\n\
-         - List any grammar mistakes with corrections\n\
-         - Note good grammar usage\n\n\
-         Be concise and encouraging. If the message is perfect, say so!\n\n\
-         Message to evaluate:\n\"{}\"\n\n\n
-         BELOW is the EXPECTED RESPONSE:
-
-         **Overall Score**
-         [ `★☆☆☆☆` ] **1 / 5**
-
-         > ⚠️ Response is incomplete and does not appropriately address the partner's comment about health.
-
-         ---
-
-         ### 🔤 Vocabulary Analysis
-
-         | Status | Word | Reading / Meaning | Diagnosis & Suggestion |
-         |:---:|:---|:---|:---|
-         | ❌ | **何** | *nani* / \"what\" | Fragment used incorrectly. A single question word does not constitute a proper response to a statement of concern. |
-
-         ---
-
-         ### 📝 Grammar Correction
-
-         **Issue:** Incomplete Sentence / Fragment
-         The message `何` is not a grammatically complete response to the previous statement.
-
-         **Recommended Alternatives:**
-
-         > ✅ **はい、気をつけます。**
-         > *(Hai, ki o tsukemasu.)* — \"Yes, I will be careful.\"
-
-         > ✅ **わかりました。**
-         > *(Wakarimashita.)* — \"I understand.\"
-
-         > ✅ **ありがとうございます。**
-         > *(Arigatou gozaimasu.)* — \"Thank you.\"
-
-         ---
-
-         ### 🛠️ Styling Guide for Markdown
-         To achieve clean visual hierarchy, apply the following rules when rendering this feedback:
-
-         - **Headings:** Use `#` and `##` with emoji prefixes for immediate context recognition.
-         - **Tables:** Use tables for error logging (Status, Word, Meaning, Fix) for quick scanning.
-         - **Callouts:** Use blockquotes (`>`) for the score banner and warnings.
-         - **Positive Examples:** Use green check emoji (`✅`) in a distinct block to clearly separate the **Error** from the **Fix**.",
-        lang_name, level_context, context_block, message_content
+        "Evaluate this {lang_name} learner's message.{level_context}\n\
+         Message: \"{message_content}\"\n\n\
+         Target words: {target_words_json}\n\
+         Context: {context_json}\n\n\
+         Return ONLY a JSON object (no markdown, no explanation):\n\
+         {{\"score\":1-5,\"summary\":\"...\",\"vocab\":[...],\"grammar\":[...],\"target_words\":[...],\"suggestion\":\"...\"}}\n\n\
+         - \"vocab\": analyze words the learner ACTUALLY WROTE — check spelling, usage, word choice errors.\n\
+         - \"target_words\": check whether each assigned target word was used in the message.\n\
+         - Do NOT put target word usage in \"vocab\". These are separate concerns.\n\n\
+         Example — if the learner wrote \"何？\" and target words were [\"気をつける\", \"はい\"]:\n\
+         {{\"score\":1,\"summary\":\"Incomplete response with a single question word.\",\"vocab\":[{{\"word\":\"何\",\"reading_meaning\":\"nani / what\",\"ok\":false,\"note\":\"Fragment used incorrectly; a single question word is not a proper response.\"}}],\"grammar\":[{{\"pattern\":\"何\",\"ok\":false,\"note\":\"Not a grammatically complete response.\"}}],\"target_words\":[{{\"word\":\"気をつける\",\"used\":false,\"note\":\"Expected but not used. Try: はい、気をつけます。\"}},{{\"word\":\"はい\",\"used\":false,\"note\":\"Expected but not used. Try: はい、気をつけます。\"}}],\"suggestion\":\"はい、気をつけます。\"}}\n\n\
+         Score: 1=many errors, 2=frequent errors, 3=some errors, 4=minor issues, 5=natural.\n\
+         Be concise. Omit empty arrays.",
+        lang_name = lang_name,
+        level_context = level_context,
+        message_content = message_content,
+        target_words_json = target_words_json,
+        context_json = context_json,
     );
 
     let url = build_url(&api_host, "chat/completions");
@@ -1573,8 +3082,8 @@ async fn db_evaluate_user_message(
     let parsed: ChatResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
     let feedback = parsed.choices.get(0).map(|c| c.message.content.clone()).unwrap_or_default();
 
-    // Extract score from the response (look for "Score: X/5" pattern)
-    let score = extract_score_from_feedback(&feedback);
+    // Extract score from JSON response
+    let score = extract_score_from_json(&feedback);
 
     // Save to DB
     conn.execute(
@@ -1591,13 +3100,28 @@ async fn db_evaluate_user_message(
     Ok(UserMessageFeedback { message_id, score, feedback, created_at: msg_created_at })
 }
 
-/// Extract a score (1-5) from the LLM's markdown feedback by looking for patterns like "Score: X/5"
-fn extract_score_from_feedback(feedback: &str) -> i64 {
-    // Try common patterns
+/// Extract a score (1-5) from the LLM's JSON feedback response.
+fn extract_score_from_json(feedback: &str) -> i64 {
+    // Strip markdown code fences if present
+    let cleaned = feedback
+        .trim()
+        .trim_start_matches("```json")
+        .trim_start_matches("```")
+        .trim_end_matches("```")
+        .trim();
+
+    if let Ok(val) = serde_json::from_str::<serde_json::Value>(cleaned) {
+        if let Some(score) = val.get("score").and_then(|s| s.as_i64()) {
+            if (1..=5).contains(&score) {
+                return score;
+            }
+        }
+    }
+
+    // Fallback: try old markdown patterns for cached entries
     for pattern in &["Score: ", "score: ", "**Score:** ", "# Score: "] {
         if let Some(idx) = feedback.find(pattern) {
             let after = &feedback[idx + pattern.len()..];
-            // Take up to 3 chars and parse as number before "/"
             let num_str: String = after.chars().take_while(|c| c.is_ascii_digit()).collect();
             if let Ok(n) = num_str.parse::<i64>() {
                 if (1..=5).contains(&n) {
@@ -1629,22 +3153,31 @@ pub fn run() {
 
     app
         .setup(|app| {
-            match furigana::FuriganaAnnotator::new() {
-                Ok(annotator) => {
-                    app.manage(Some(Mutex::new(annotator)));
-                    eprintln!("[furigana] Lindera tokenizer initialized");
-                }
-                Err(e) => {
-                    eprintln!("[furigana] WARNING: Failed to initialize Lindera tokenizer: {}. Furigana will be unavailable.", e);
-                    app.manage::<Option<Mutex<furigana::FuriganaAnnotator>>>(None);
-                }
+            // Try to load the tokenizer from the local cache. If the dict has not been
+            // downloaded yet, the frontend should call `init_lindera_dict` to trigger
+            // the one-time download+build.
+            let initial = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .and_then(|d| {
+                    let dict_dir = d.join("ipadic");
+                    furigana::FuriganaAnnotator::from_path(&dict_dir).ok()
+                });
+            if initial.is_some() {
+                eprintln!("[furigana] Lindera tokenizer loaded from cache");
+            } else {
+                eprintln!("[furigana] Dict not cached — call init_lindera_dict from frontend");
             }
+            app.manage(Mutex::new(initial));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             greet,
             add_furigana,
             tokenize_japanese,
+            init_lindera_dict,
+            get_lindera_dict_status,
             test_provider,
             list_models,
             llm_chat,
@@ -1657,19 +3190,32 @@ pub fn run() {
             db_get_review_items,
             db_get_review_items_by_words,
             db_update_srs,
+            db_preview_srs_grades,
             db_increment_session_today,
             db_get_telemetry_days,
+            db_record_activity,
+            db_get_user_activity,
+            db_record_active_time,
+            db_get_active_time,
+            db_get_mastery_history,
+            db_get_cards_added_history,
             db_list_known_words,
             db_add_known_word,
+            db_generate_mnemonic,
+            db_update_mnemonic,
             db_rename_session,
             db_delete_session,
             db_update_review_detail,
             db_get_review_items_by_language,
+            db_search_review_items,
             db_get_due_review_items,
             db_import_review_items,
             db_generate_detail,
             db_delete_review_item,
             db_update_review_item,
+            db_get_study_limits,
+            db_increment_study_limit,
+            db_get_difficult_and_known_words,
             db_list_grammar_items,
             db_add_grammar_item,
             db_update_grammar_item,
@@ -1684,6 +3230,10 @@ pub fn run() {
             db_get_user_feedback,
             db_list_all_feedback,
             db_evaluate_user_message,
+            db_update_message_content,
+            db_deactivate_message_branch,
+            db_get_message_siblings,
+            db_get_bot_response_for_user,
             // Google Auth
             google_auth::google_sign_in,
             google_auth::google_sign_out,
