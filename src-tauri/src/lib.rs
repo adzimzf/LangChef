@@ -300,6 +300,20 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     // best-effort: add FSRS columns if missing
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN fsrs_stability REAL", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN fsrs_difficulty REAL", []);
+    // best-effort: add created_at and mastered_at timestamps for history charts
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN created_at INTEGER", []);
+    let _ = conn.execute(
+        "UPDATE review_items SET created_at = CAST(strftime('%s', 'now') * 1000 AS INTEGER)
+         WHERE created_at IS NULL",
+        [],
+    );
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN mastered_at INTEGER", []);
+    // backfill: existing review-state cards get today as mastered_at
+    let _ = conn.execute(
+        "UPDATE review_items SET mastered_at = CAST(strftime('%s', 'now') * 1000 AS INTEGER)
+         WHERE mastered_at IS NULL AND state = 'review'",
+        [],
+    );
     // best-effort: add parent_message_id and is_active_path columns to messages if missing (for edit tree)
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN parent_message_id INTEGER", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN is_active_path INTEGER DEFAULT 1", []);
@@ -1347,8 +1361,8 @@ fn db_upsert_review_item(app: tauri::AppHandle, content: String, tag: Option<Str
     let id = uuid::Uuid::new_v4().to_string();
     let tags = tag.unwrap_or_else(|| "new".to_string());
     conn.execute(
-        "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, fsrs_stability, fsrs_difficulty)
-         VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, ?4, NULL, NULL)
+        "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, fsrs_stability, fsrs_difficulty, created_at)
+         VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, ?4, NULL, NULL, CAST(strftime('%s', 'now') * 1000 AS INTEGER))
          ON CONFLICT(content) DO UPDATE SET tags=excluded.tags, language=COALESCE(excluded.language, review_items.language)",
         params![id, content, tags, language],
     ).map_err(|e| e.to_string())?;
@@ -1452,6 +1466,15 @@ fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRS
             id
         ],
     ).map_err(|e| e.to_string())?;
+
+    // set mastered_at on first graduation to review state
+    if result.state == "review" && state != "review" {
+        let _ = conn.execute(
+            "UPDATE review_items SET mastered_at = CAST(strftime('%s', 'now') * 1000 AS INTEGER)
+             WHERE id = ?1 AND mastered_at IS NULL",
+            params![id],
+        );
+    }
 
     Ok(result)
 }
@@ -1595,6 +1618,114 @@ fn db_get_active_time(app: tauri::AppHandle, date_from: String, date_to: String)
     let mut out = Vec::new();
     for r in rows {
         out.push(r.map_err(|e| e.to_string())?);
+    }
+    Ok(out)
+}
+
+#[derive(Serialize)]
+struct MasteryDay {
+    date: String,
+    mastered: i64,
+}
+
+#[tauri::command]
+fn db_get_mastery_history(app: tauri::AppHandle, date_from: String, date_to: String) -> Result<Vec<MasteryDay>, String> {
+    let conn = open_db(&app)?;
+    // per-day count of newly mastered cards within the window
+    let mut stmt = conn.prepare(
+        "SELECT date(mastered_at / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as cnt
+         FROM review_items
+         WHERE mastered_at IS NOT NULL
+         GROUP BY day
+         ORDER BY day ASC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    }).map_err(|e| e.to_string())?;
+
+    use std::collections::HashMap;
+    let mut daily_map: HashMap<String, i64> = HashMap::new();
+    for r in rows {
+        let (day, cnt) = r.map_err(|e| e.to_string())?;
+        daily_map.insert(day, cnt);
+    }
+
+    let start = chrono::NaiveDate::parse_from_str(&date_from, "%Y-%m-%d")
+        .map_err(|e| e.to_string())?;
+    let end = chrono::NaiveDate::parse_from_str(&date_to, "%Y-%m-%d")
+        .map_err(|e| e.to_string())?;
+
+    // baseline: cards mastered before date_from
+    let baseline: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM review_items
+         WHERE mastered_at IS NOT NULL
+           AND date(mastered_at / 1000, 'unixepoch', 'localtime') < ?1",
+        params![date_from],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    let mut out = Vec::new();
+    let mut cumulative = baseline;
+    let mut d = start;
+    while d <= end {
+        let ds = d.to_string();
+        cumulative += daily_map.get(&ds).copied().unwrap_or(0);
+        out.push(MasteryDay { date: ds, mastered: cumulative });
+        d = d.succ_opt().unwrap_or(end);
+    }
+    Ok(out)
+}
+
+#[derive(Serialize)]
+struct CardsAddedDay {
+    date: String,
+    total: i64,
+}
+
+#[tauri::command]
+fn db_get_cards_added_history(app: tauri::AppHandle, date_from: String, date_to: String) -> Result<Vec<CardsAddedDay>, String> {
+    let conn = open_db(&app)?;
+    // per-day count of newly created cards using created_at
+    let mut stmt = conn.prepare(
+        "SELECT date(created_at / 1000, 'unixepoch', 'localtime') as day, COUNT(*) as cnt
+         FROM review_items
+         WHERE created_at IS NOT NULL
+         GROUP BY day
+         ORDER BY day ASC"
+    ).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, i64>(1)?))
+    }).map_err(|e| e.to_string())?;
+
+    use std::collections::HashMap;
+    let mut daily_map: HashMap<String, i64> = HashMap::new();
+    for r in rows {
+        let (day, cnt) = r.map_err(|e| e.to_string())?;
+        daily_map.insert(day, cnt);
+    }
+
+    let start = chrono::NaiveDate::parse_from_str(&date_from, "%Y-%m-%d")
+        .map_err(|e| e.to_string())?;
+    let end = chrono::NaiveDate::parse_from_str(&date_to, "%Y-%m-%d")
+        .map_err(|e| e.to_string())?;
+
+    // baseline: cards created before date_from
+    let baseline: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM review_items
+         WHERE created_at IS NOT NULL
+           AND date(created_at / 1000, 'unixepoch', 'localtime') < ?1",
+        params![date_from],
+        |row| row.get(0),
+    ).unwrap_or(0);
+
+    let mut out = Vec::new();
+    let mut cumulative = baseline;
+    let mut d = start;
+    while d <= end {
+        let ds = d.to_string();
+        cumulative += daily_map.get(&ds).copied().unwrap_or(0);
+        out.push(CardsAddedDay { date: ds, total: cumulative });
+        d = d.succ_opt().unwrap_or(end);
     }
     Ok(out)
 }
@@ -2441,8 +2572,8 @@ fn db_import_review_items(app: tauri::AppHandle, items: Vec<ImportItem>) -> Resu
         let id = uuid::Uuid::new_v4().to_string();
         let tags = item.tags.unwrap_or_default();
         let result = conn.execute(
-            "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, fsrs_stability, fsrs_difficulty)
-             VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, ?4, ?5, NULL, NULL)
+            "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, fsrs_stability, fsrs_difficulty, created_at)
+             VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, ?4, ?5, NULL, NULL, CAST(strftime('%s', 'now') * 1000 AS INTEGER))
              ON CONFLICT(content) DO NOTHING",
             params![id, item.content, tags, item.language, item.detail],
         );
@@ -3015,6 +3146,8 @@ pub fn run() {
             db_get_user_activity,
             db_record_active_time,
             db_get_active_time,
+            db_get_mastery_history,
+            db_get_cards_added_history,
             db_list_known_words,
             db_add_known_word,
             db_generate_mnemonic,

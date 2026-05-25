@@ -44,6 +44,8 @@ export default function UserStats() {
   const [activeTime, setActiveTime] = useState<ActiveTimeRow[]>([])
   const [reviewItems, setReviewItems] = useState<ReviewItem[]>([])
   const [feedbackList, setFeedbackList] = useState<Feedback[]>([])
+  const [masteryHistory, setMasteryHistory] = useState<{ date: string; mastered: number }[]>([])
+  const [cardsAddedHistory, setCardsAddedHistory] = useState<{ date: string; total: number }[]>([])
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -55,16 +57,20 @@ export default function UserStats() {
     async function load() {
       setLoading(true)
       try {
-        const [act, time, items, fb] = await Promise.all([
+        const [act, time, items, fb, mh, cah] = await Promise.all([
           invoke<ActivityRow[]>('db_get_user_activity', { dateFrom, dateTo }),
           invoke<ActiveTimeRow[]>('db_get_active_time', { dateFrom, dateTo }),
           invoke<ReviewItem[]>('db_get_review_items'),
           invoke<Feedback[]>('db_list_all_feedback'),
+          invoke<{ date: string; mastered: number }[]>('db_get_mastery_history', { dateFrom, dateTo }),
+          invoke<{ date: string; total: number }[]>('db_get_cards_added_history', { dateFrom, dateTo }),
         ])
         setActivity(act)
         setActiveTime(time)
         setReviewItems(items)
         setFeedbackList(fb)
+        setMasteryHistory(mh)
+        setCardsAddedHistory(cah)
       } catch (e) {
         console.error('Failed to load stats:', e)
       }
@@ -185,19 +191,16 @@ export default function UserStats() {
   }, [reviewItems])
 
   const masteryChartData = useMemo(() => {
-    if (reviewItems.length === 0 || activityChartData.length === 0) return []
-    const total = reviewItems.length
-    const mastered = reviewItems.filter(c => c.R >= 3).length
-    return activityChartData.map((d, i) => {
-      const progress = (i + 1) / activityChartData.length
-      return {
-        date: d.date,
-        label: d.label,
-        total: Math.round(total * progress),
-        mastered: Math.round(mastered * progress),
-      }
-    })
-  }, [reviewItems, activityChartData])
+    if (activityChartData.length === 0) return []
+    const masteryByDate = Object.fromEntries(masteryHistory.map(m => [m.date, m.mastered]))
+    const totalByDate = Object.fromEntries(cardsAddedHistory.map(c => [c.date, c.total]))
+    return activityChartData.map(d => ({
+      date: d.date,
+      label: d.label,
+      total: totalByDate[d.date] ?? null,
+      mastered: masteryByDate[d.date] ?? null,
+    }))
+  }, [reviewItems, activityChartData, masteryHistory, cardsAddedHistory])
 
   // ── Chat Proficiency ──────────────────────────────────────────────
   const avgScore = useMemo(() => {

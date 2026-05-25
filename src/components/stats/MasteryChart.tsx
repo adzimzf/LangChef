@@ -9,7 +9,7 @@ import {
 } from 'recharts'
 
 interface Props {
-  data: { date: string; label: string; mastered: number; total: number }[]
+  data: { date: string; label: string; mastered: number | null; total: number | null }[]
 }
 
 export default function MasteryChart({ data }: Props) {
@@ -31,7 +31,7 @@ export default function MasteryChart({ data }: Props) {
             <span className="w-2 h-2 rounded-full bg-green-500 inline-block" /> Mastered
           </span>
           <span className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-green-200 inline-block" /> Total
+            <span className="w-2 h-2 rounded-full bg-green-200 inline-block" /> Total cards
           </span>
         </div>
       </div>
@@ -41,8 +41,8 @@ export default function MasteryChart({ data }: Props) {
           <XAxis dataKey="label" tick={{ fontSize: 10 }} stroke="#9ca3af" />
           <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" allowDecimals={false} />
           <Tooltip contentStyle={{ fontSize: 12, borderRadius: 8 }} />
-          <Line type="monotone" dataKey="total" stroke="#bbf7d0" strokeWidth={2} dot={false} />
-          <Line type="monotone" dataKey="mastered" stroke="#22c55e" strokeWidth={2} dot={{ r: 3, fill: '#dcfce7', stroke: '#22c55e', strokeWidth: 1.5 }} />
+          <Line type="monotone" dataKey="total" stroke="#bbf7d0" strokeWidth={2} dot={false} connectNulls={false} />
+          <Line type="monotone" dataKey="mastered" stroke="#22c55e" strokeWidth={2} dot={{ r: 3, fill: '#dcfce7', stroke: '#22c55e', strokeWidth: 1.5 }} connectNulls={false} />
         </LineChart>
       </ResponsiveContainer>
     </div>
