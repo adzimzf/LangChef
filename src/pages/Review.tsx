@@ -731,11 +731,11 @@ export default function Review() {
             <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
               <div
                 className="h-full bg-blue-500 rounded-full transition-all duration-300"
-                style={{ width: `${(sessionCompleted + immediatelyDueCount) > 0 ? (sessionCompleted / (sessionCompleted + immediatelyDueCount)) * 100 : 0}%` }}
+                style={{ width: `${(reviewedToday + immediatelyDueCount) > 0 ? (reviewedToday / (reviewedToday + immediatelyDueCount)) * 100 : 0}%` }}
               />
             </div>
             <span className="text-xs text-gray-400 shrink-0">
-              {immediatelyDueCount} due
+              {reviewedToday}/{reviewedToday + immediatelyDueCount}
             </span>
           </div>
         )}
