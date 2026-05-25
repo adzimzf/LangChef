@@ -276,8 +276,8 @@ export default function WordsList() {
             <div className="mt-4 pt-3 border-t border-gray-100">
               <div className="flex items-center justify-center gap-4 text-xs text-gray-400">
                 <span>Reps: {selectedItem.R}</span>
-                <span>Interval: {selectedItem.I}d</span>
-                <span>EF: {selectedItem.EF.toFixed(2)}</span>
+                <span>Stability: {selectedItem.fsrs_stability != null ? `${selectedItem.fsrs_stability.toFixed(1)}d` : `${selectedItem.I}d`}</span>
+                <span>Difficulty: {selectedItem.fsrs_difficulty != null ? selectedItem.fsrs_difficulty.toFixed(1) : '—'}</span>
                 {selectedItem.lapse_count > 0 && <span>Lapses: {selectedItem.lapse_count}</span>}
               </div>
               {selectedItem.next_review && (
@@ -563,7 +563,7 @@ export default function WordsList() {
                         </span>
                       )}
                       <span className="text-[10px] text-gray-300">
-                        EF {item.EF.toFixed(2)} &middot; R {item.R}
+                        S {item.fsrs_stability != null ? `${Math.round(item.fsrs_stability)}d` : `${item.I}d`} &middot; D {item.fsrs_difficulty != null ? item.fsrs_difficulty.toFixed(1) : '—'} &middot; R {item.R}
                         {item.lapse_count > 0 && ` \u00B7 ${item.lapse_count} lapse${item.lapse_count > 1 ? 's' : ''}`}
                       </span>
                       {item.next_review && (

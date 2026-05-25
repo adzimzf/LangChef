@@ -12,6 +12,9 @@ export type ReviewItem = {
   language: string | null
   detail: string | null
   mnemonic: string | null
+  // FSRS fields
+  fsrs_stability?: number | null
+  fsrs_difficulty?: number | null
   // Pre-computed display fields from backend
   difficulty_color: string
   difficulty_bg_class: string

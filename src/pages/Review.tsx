@@ -244,9 +244,9 @@ export default function Review() {
     const cardId = visibleCard.id
     const cardState = visibleCard.state || 'new'
 
-    let result: { EF: number; I: number; R: number; state: string; step: number; lapse_count: number; next_review: number; lapsed: boolean; graduated: boolean }
+    let result: { EF: number; I: number; R: number; state: string; step: number; lapse_count: number; next_review: number; lapsed: boolean; graduated: boolean; fsrs_stability: number | null; fsrs_difficulty: number | null }
     try {
-      result = await invoke<{ EF: number; I: number; R: number; state: string; step: number; lapse_count: number; next_review: number; lapsed: boolean; graduated: boolean }>('db_update_srs', { id: cardId, grade })
+      result = await invoke<{ EF: number; I: number; R: number; state: string; step: number; lapse_count: number; next_review: number; lapsed: boolean; graduated: boolean; fsrs_stability: number | null; fsrs_difficulty: number | null }>('db_update_srs', { id: cardId, grade })
     } catch {
       isGrading.current = false
       return
@@ -285,6 +285,8 @@ export default function Review() {
         step: result.step,
         lapse_count: result.lapse_count,
         next_review: result.next_review,
+        fsrs_stability: result.fsrs_stability,
+        fsrs_difficulty: result.fsrs_difficulty,
       }
 
       let newQueue: ReviewItem[]
@@ -800,8 +802,8 @@ export default function Review() {
                   <div className="mt-4 pt-3 border-t border-gray-100">
                     <div className="flex items-center justify-center gap-4 text-xs text-gray-400">
                       <span>Reps: {visibleCard.R}</span>
-                      <span>Interval: {visibleCard.I}d</span>
-                      <span>EF: {visibleCard.EF.toFixed(2)}</span>
+                      <span>Stability: {visibleCard.fsrs_stability != null ? `${Math.round(visibleCard.fsrs_stability)}d` : `${visibleCard.I}d`}</span>
+                      <span>Difficulty: {visibleCard.fsrs_difficulty != null ? visibleCard.fsrs_difficulty.toFixed(1) : '—'}</span>
                       {visibleCard.lapse_count > 0 && (
                         <span>Lapses: {visibleCard.lapse_count}</span>
                       )}

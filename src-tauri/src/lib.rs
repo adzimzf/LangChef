@@ -225,7 +225,10 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
           next_review INTEGER,
           tags TEXT,
           language TEXT,
-          detail TEXT
+          detail TEXT,
+          mnemonic TEXT,
+          fsrs_stability REAL,
+          fsrs_difficulty REAL
         );
         CREATE TABLE IF NOT EXISTS known_words(
           word TEXT PRIMARY KEY
@@ -294,6 +297,9 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN lapse_count INTEGER DEFAULT 0", []);
     // best-effort: add mnemonic column if missing
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN mnemonic TEXT", []);
+    // best-effort: add FSRS columns if missing
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN fsrs_stability REAL", []);
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN fsrs_difficulty REAL", []);
     // best-effort: add parent_message_id and is_active_path columns to messages if missing (for edit tree)
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN parent_message_id INTEGER", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN is_active_path INTEGER DEFAULT 1", []);
@@ -302,6 +308,8 @@ fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let _ = conn.execute("UPDATE review_items SET state = 'new' WHERE state IS NULL OR state = ''", []);
     // Auto-seed bundled grammar data if grammar_items is empty
     seed_bundled_grammar_if_empty(&conn);
+    // Migrate SM-2 data to FSRS (one-time)
+    migrate_sm2_to_fsrs(&conn);
     // Migrate telemetry_days to user_activity (one-time)
     migrate_telemetry_to_activity(&conn)?;
     Ok(conn)
@@ -343,6 +351,99 @@ fn migrate_telemetry_to_activity(conn: &Connection) -> Result<(), String> {
             Err(e.to_string())
         }
     }
+}
+
+fn migrate_sm2_to_fsrs(conn: &Connection) {
+    // Check if migration already happened: any row with EF = -1.0 means migration ran
+    let migrated_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM review_items WHERE EF = -1.0",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+    if migrated_count > 0 {
+        return;
+    }
+
+    // Check if there are rows to migrate
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM review_items WHERE EF != -1.0",
+        [],
+        |row| row.get(0),
+    ).unwrap_or(0);
+    if total == 0 {
+        return;
+    }
+
+    let fsrs = match fsrs::FSRS::new(Some(&[])) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("[fsrs] Failed to create FSRS instance for migration: {}", e);
+            return;
+        }
+    };
+
+    let mut stmt = match conn.prepare("SELECT id, EF, I FROM review_items WHERE EF != -1.0") {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[fsrs] Failed to prepare migration query: {}", e);
+            return;
+        }
+    };
+
+    let rows = match stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, f64>(1)?, row.get::<_, i64>(2)?))
+    }) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("[fsrs] Failed to query cards for migration: {}", e);
+            return;
+        }
+    };
+
+    let mut update_stmt = match conn.prepare(
+        "UPDATE review_items SET EF = -1.0, fsrs_stability = ?1, fsrs_difficulty = ?2 WHERE id = ?3"
+    ) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[fsrs] Failed to prepare update statement: {}", e);
+            return;
+        }
+    };
+
+    let mut success = 0u32;
+    let mut failures = 0u32;
+
+    for row in rows {
+        let (id, ef, interval) = match row {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("[fsrs] Error reading row: {}", e);
+                failures += 1;
+                continue;
+            }
+        };
+
+        match fsrs.memory_state_from_sm2(ef as f32, interval as f32, 0.9) {
+            Ok(memory_state) => {
+                if let Err(e) = update_stmt.execute(params![
+                    memory_state.stability,
+                    memory_state.difficulty,
+                    id,
+                ]) {
+                    eprintln!("[fsrs] Failed to update card {}: {}", id, e);
+                    failures += 1;
+                } else {
+                    success += 1;
+                }
+            }
+            Err(e) => {
+                eprintln!("[fsrs] Failed to convert card {} (EF={}, I={}): {}", id, ef, interval, e);
+                failures += 1;
+            }
+        }
+    }
+
+    eprintln!("[fsrs] Migration complete: {} succeeded, {} failed", success, failures);
 }
 
 // ─── Bundled Grammar Markdown Data ──────────────────────────────────────────
@@ -530,6 +631,8 @@ struct ReviewItem {
     language: Option<String>,
     detail: Option<String>,
     mnemonic: Option<String>,
+    fsrs_stability: Option<f32>,
+    fsrs_difficulty: Option<f32>,
     // Display-computed fields (set by helper functions on query)
     difficulty_color: String,
     difficulty_bg_class: String,
@@ -543,6 +646,21 @@ fn row_to_review_item(row: &rusqlite::Row) -> rusqlite::Result<ReviewItem> {
     let r: i64 = row.get(4)?;
     let state: String = row.get(5)?;
     let next_review: Option<i64> = row.get(8)?;
+    let fsrs_stability: Option<f32> = row.get(13).unwrap_or(None);
+    let fsrs_difficulty: Option<f32> = row.get(14).unwrap_or(None);
+
+    // Use FSRS difficulty for display if available, else fall back to EF-based
+    let (difficulty_color, difficulty_bg_class) = match fsrs_difficulty {
+        Some(d) => (
+            compute_difficulty_color_from_fsrs(d),
+            compute_difficulty_bg_class_from_fsrs(d),
+        ),
+        None => (
+            compute_difficulty_color(ef, r),
+            compute_difficulty_bg_class(ef, r).to_string(),
+        ),
+    };
+
     Ok(ReviewItem {
         id: row.get(0)?,
         content: row.get(1)?,
@@ -557,8 +675,10 @@ fn row_to_review_item(row: &rusqlite::Row) -> rusqlite::Result<ReviewItem> {
         language: row.get(10)?,
         detail: row.get(11)?,
         mnemonic: row.get(12)?,
-        difficulty_color: compute_difficulty_color(ef, r),
-        difficulty_bg_class: compute_difficulty_bg_class(ef, r).to_string(),
+        fsrs_stability,
+        fsrs_difficulty,
+        difficulty_color,
+        difficulty_bg_class,
         state_label: compute_state_label(&state).to_string(),
         next_review_formatted: compute_next_review_formatted(next_review),
     })
@@ -581,6 +701,52 @@ struct UserActivity {
 struct DailyActiveTime {
     date: String,
     total_seconds: i64,
+}
+
+// ─── FSRS Helpers ────────────────────────────────────────────────────────────
+
+/// Get or create the global FSRS instance with default parameters.
+fn get_fsrs() -> std::sync::MutexGuard<'static, fsrs::FSRS> {
+    use std::sync::{Mutex, OnceLock};
+    static FSRS_INSTANCE: OnceLock<Mutex<fsrs::FSRS>> = OnceLock::new();
+    FSRS_INSTANCE.get_or_init(|| {
+        Mutex::new(fsrs::FSRS::new(Some(&[])).expect("Failed to create FSRS instance with default parameters"))
+    }).lock().expect("Failed to lock FSRS instance")
+}
+
+/// Desired retention rate for FSRS scheduling.
+const DESIRED_RETENTION: f32 = 0.9;
+
+/// Deserialize MemoryState from DB columns. Returns None if either is NULL.
+fn memory_state_from_db(stability: Option<f32>, difficulty: Option<f32>) -> Option<fsrs::MemoryState> {
+    match (stability, difficulty) {
+        (Some(s), Some(d)) => Some(fsrs::MemoryState { stability: s, difficulty: d }),
+        _ => None,
+    }
+}
+
+/// Compute days elapsed since the card's last review.
+fn compute_days_elapsed(next_review: Option<i64>) -> u32 {
+    match next_review {
+        Some(nr) => {
+            let now = chrono::Utc::now().timestamp();
+            let elapsed_secs = now.saturating_sub(nr);
+            if elapsed_secs <= 0 {
+                0
+            } else {
+                ((elapsed_secs as f64) / 86400.0).ceil() as u32
+            }
+        }
+        None => 0,
+    }
+}
+
+/// Compute an approximate EF value from FSRS difficulty for backward compatibility.
+/// Maps FSRS difficulty [1, 10] to EF [3.0, 1.3] (inverse relationship).
+fn fsrs_difficulty_to_ef(difficulty: f32) -> f64 {
+    let d = difficulty.clamp(1.0, 10.0);
+    let normalized = (d - 1.0) / 9.0; // 0 = easy, 1 = hard
+    (3.0 - normalized * 1.7) as f64
 }
 
 // ─── SRS Configuration ────────────────────────────────────────────────────────
@@ -626,10 +792,12 @@ struct SRSResult {
     state: String,
     step: i64,
     lapse_count: i64,
-    next_review: i64,       // unix timestamp (seconds)
-    next_minutes: i64,      // for display
+    next_review: i64,           // unix timestamp (seconds)
+    next_minutes: i64,          // for display
     lapsed: bool,
-    graduated: bool,        // card left learning/relearning into review
+    graduated: bool,            // card left learning/relearning into review
+    fsrs_stability: Option<f32>,
+    fsrs_difficulty: Option<f32>,
 }
 
 /// Compute new EF from current EF and quality (0–5).
@@ -654,15 +822,13 @@ fn grace_bonus(next_review: Option<i64>, now: i64, multiplier: f64) -> f64 {
 
 /// Format minutes to human-readable string for grade button labels.
 fn format_next_review_minutes(minutes: i64) -> String {
-    if minutes <= 0 { return "soon".to_string(); }
+    if minutes <= 0 { return "<1m".to_string(); }
     if minutes < 60 { return format!("{}m", minutes); }
-    if minutes < 24 * 60 { return format!("{}h", (minutes / 60)); }
+    if minutes < 24 * 60 { return format!("{}h", minutes / 60); }
     let days = (minutes as f64 / (24.0 * 60.0)).round() as i64;
-    if days == 1 { return "1d".to_string(); }
-    if days < 7 { return format!("{}d", days); }
-    if days < 30 { return format!("{}w", (days as f64 / 7.0).round()); }
-    if days < 365 { return format!("{}mo", (days as f64 / 30.0).round()); }
-    format!("{}y", (days as f64 / 365.0).round())
+    if days < 30 { return format!("{}d", days); }
+    if days < 365 { return format!("{}mo", (days as f64 / 30.0).round() as i64); }
+    format!("{}y", (days as f64 / 365.0).round() as i64)
 }
 
 /// End of today as a Unix timestamp (seconds).
@@ -713,6 +879,40 @@ fn compute_difficulty_bg_class(ef: f64, _r: i64) -> &'static str {
     else if n < 0.65 { "bg-lime-500" }
     else if n < 0.80 { "bg-green-500" }
     else { "bg-emerald-500" }
+}
+
+/// Normalize FSRS difficulty (typically 1–10) to a 0..1 scale for color display.
+fn fsrs_difficulty_normalized(difficulty: f32) -> f64 {
+    ((difficulty.clamp(1.0, 10.0) - 1.0) / 9.0) as f64
+}
+
+/// Compute a CSS HSL color string from FSRS difficulty.
+fn compute_difficulty_color_from_fsrs(difficulty: f32) -> String {
+    let hue = (1.0 - fsrs_difficulty_normalized(difficulty)) * 120.0;
+    format!("hsl({:.0}, 70%, 50%)", hue)
+}
+
+/// Compute a Tailwind background class from FSRS difficulty.
+fn compute_difficulty_bg_class_from_fsrs(difficulty: f32) -> String {
+    let n = fsrs_difficulty_normalized(difficulty);
+    if n < 0.15 { "bg-emerald-500".to_string() }
+    else if n < 0.30 { "bg-green-500".to_string() }
+    else if n < 0.40 { "bg-lime-500".to_string() }
+    else if n < 0.50 { "bg-yellow-500".to_string() }
+    else if n < 0.65 { "bg-amber-500".to_string() }
+    else if n < 0.80 { "bg-orange-500".to_string() }
+    else { "bg-red-500".to_string() }
+}
+
+/// Compute a difficulty tag from FSRS difficulty.
+fn compute_tag_from_fsrs_difficulty(difficulty: f32) -> &'static str {
+    if difficulty < 3.0 {
+        "easy"
+    } else if difficulty < 7.0 {
+        "medium"
+    } else {
+        "hard"
+    }
 }
 
 /// Compute a human-readable state label.
@@ -913,6 +1113,231 @@ fn schedule_card(
         graduated: (state == "new" || state == "learning" || state == "relearning")
             && new_state == "review"
             && next > end_of_today(),
+        fsrs_stability: None,
+        fsrs_difficulty: None,
+    }
+}
+
+/// Graduate a new card (memory=None) or re-graduate from relearning (memory=post-lapse state).
+/// grade should be "good" or "easy"; "hard" is treated as "good".
+fn graduate_with_fsrs(
+    memory: Option<fsrs::MemoryState>,
+    review_count: i64,
+    lapse_count: i64,
+    grade: &str,
+    now: i64,
+) -> Result<(SRSResult, Option<fsrs::MemoryState>), String> {
+    let fsrs = get_fsrs();
+    let next_states = fsrs.next_states(memory, DESIRED_RETENTION, 0)
+        .map_err(|e| e.to_string())?;
+    let chosen = match grade {
+        "easy" => &next_states.easy,
+        _ => &next_states.good,
+    };
+    let interval_days = chosen.interval;
+    let approx_ef = fsrs_difficulty_to_ef(chosen.memory.difficulty);
+    Ok((SRSResult {
+        EF: approx_ef,
+        I: interval_days.round() as i64,
+        R: review_count + 1,
+        state: "review".to_string(),
+        step: 0,
+        lapse_count,
+        next_review: now + (interval_days * 86400.0) as i64,
+        next_minutes: (interval_days * 24.0 * 60.0) as i64,
+        lapsed: false,
+        graduated: true,
+        fsrs_stability: Some(chosen.memory.stability),
+        fsrs_difficulty: Some(chosen.memory.difficulty),
+    }, Some(chosen.memory)))
+}
+
+/// Re-graduate a card from relearning using the post-lapse FSRS interval already stored in `stored_interval`.
+fn re_graduate_with_fsrs(
+    memory: Option<fsrs::MemoryState>,
+    stored_interval: i64,
+    review_count: i64,
+    lapse_count: i64,
+    now: i64,
+) -> Result<(SRSResult, Option<fsrs::MemoryState>), String> {
+    let interval_days = i64::max(1, stored_interval);
+    let (approx_ef, stab, diff) = match memory {
+        Some(m) => (fsrs_difficulty_to_ef(m.difficulty), Some(m.stability), Some(m.difficulty)),
+        None => (2.5, None, None),
+    };
+    Ok((SRSResult {
+        EF: approx_ef,
+        I: interval_days,
+        R: review_count + 1,
+        state: "review".to_string(),
+        step: 0,
+        lapse_count,
+        next_review: now + interval_days * 86400,
+        next_minutes: interval_days * 24 * 60,
+        lapsed: false,
+        graduated: true,
+        fsrs_stability: stab,
+        fsrs_difficulty: diff,
+    }, memory))
+}
+
+/// Anki-style FSRS scheduling:
+/// - new/learning: step-based (no FSRS memory) until graduation
+/// - review: full FSRS; "again" lapses into relearning with post-lapse memory stored
+/// - relearning: step-based until re-graduation using stored post-lapse interval
+fn schedule_fsrs(
+    state: &str,
+    step: i64,
+    current_memory: Option<fsrs::MemoryState>,
+    stored_interval: i64,
+    review_count: i64,
+    lapse_count: i64,
+    next_review: Option<i64>,
+    grade: &str,
+    config: &SRSConfig,
+) -> Result<(SRSResult, Option<fsrs::MemoryState>), String> {
+    let now = chrono::Utc::now().timestamp();
+
+    match state {
+        "new" | "learning" => {
+            let steps = &config.learning_steps;
+            match grade {
+                "again" => {
+                    let nm = steps.get(0).copied().unwrap_or(1);
+                    Ok((SRSResult {
+                        EF: -1.0, I: 0, R: 0, state: "learning".to_string(),
+                        step: 0, lapse_count, next_review: now + nm * 60,
+                        next_minutes: nm, lapsed: false, graduated: false,
+                        fsrs_stability: None, fsrs_difficulty: None,
+                    }, None))
+                }
+                "hard" => {
+                    let ns = i64::max(0, step);
+                    let nm = steps.get(ns as usize).copied().unwrap_or(1);
+                    Ok((SRSResult {
+                        EF: -1.0, I: 0, R: 0, state: "learning".to_string(),
+                        step: ns, lapse_count, next_review: now + nm * 60,
+                        next_minutes: nm, lapsed: false, graduated: false,
+                        fsrs_stability: None, fsrs_difficulty: None,
+                    }, None))
+                }
+                "good" => {
+                    let next_step = step + 1;
+                    if (next_step as usize) >= steps.len() {
+                        graduate_with_fsrs(None, review_count, lapse_count, "good", now)
+                    } else {
+                        let nm = steps.get(next_step as usize).copied().unwrap_or(1);
+                        Ok((SRSResult {
+                            EF: -1.0, I: 0, R: 0, state: "learning".to_string(),
+                            step: next_step, lapse_count, next_review: now + nm * 60,
+                            next_minutes: nm, lapsed: false, graduated: false,
+                            fsrs_stability: None, fsrs_difficulty: None,
+                        }, None))
+                    }
+                }
+                _ => {
+                    // easy: immediate graduation
+                    graduate_with_fsrs(None, review_count, lapse_count, "easy", now)
+                }
+            }
+        }
+        "review" => {
+            let fsrs = get_fsrs();
+            let days_elapsed = compute_days_elapsed(next_review);
+            let next_states = fsrs.next_states(current_memory, DESIRED_RETENTION, days_elapsed)
+                .unwrap_or_else(|e| {
+                    eprintln!("[fsrs] next_states error: {}; treating as new card", e);
+                    fsrs.next_states(None, DESIRED_RETENTION, 0).unwrap()
+                });
+
+            if grade == "again" {
+                let post_lapse = next_states.again.memory;
+                let relearning_steps = &config.relearning_steps;
+                let nm = relearning_steps.get(0).copied().unwrap_or(10);
+                Ok((SRSResult {
+                    EF: fsrs_difficulty_to_ef(post_lapse.difficulty),
+                    I: next_states.again.interval.round() as i64,
+                    R: 0,
+                    state: "relearning".to_string(),
+                    step: 0,
+                    lapse_count: lapse_count + 1,
+                    next_review: now + nm * 60,
+                    next_minutes: nm,
+                    lapsed: true,
+                    graduated: false,
+                    fsrs_stability: Some(post_lapse.stability),
+                    fsrs_difficulty: Some(post_lapse.difficulty),
+                }, Some(post_lapse)))
+            } else {
+                let chosen = match grade {
+                    "hard" => &next_states.hard,
+                    "easy" => &next_states.easy,
+                    _ => &next_states.good,
+                };
+                let interval_days = chosen.interval;
+                Ok((SRSResult {
+                    EF: fsrs_difficulty_to_ef(chosen.memory.difficulty),
+                    I: interval_days.round() as i64,
+                    R: review_count + 1,
+                    state: "review".to_string(),
+                    step: 0,
+                    lapse_count,
+                    next_review: now + (interval_days * 86400.0) as i64,
+                    next_minutes: (interval_days * 24.0 * 60.0) as i64,
+                    lapsed: false,
+                    graduated: true,
+                    fsrs_stability: Some(chosen.memory.stability),
+                    fsrs_difficulty: Some(chosen.memory.difficulty),
+                }, Some(chosen.memory)))
+            }
+        }
+        "relearning" => {
+            let steps = &config.relearning_steps;
+            let (stab, diff) = (current_memory.map(|m| m.stability), current_memory.map(|m| m.difficulty));
+            match grade {
+                "again" => {
+                    let nm = steps.get(0).copied().unwrap_or(10);
+                    Ok((SRSResult {
+                        EF: -1.0, I: stored_interval, R: 0,
+                        state: "relearning".to_string(),
+                        step: 0, lapse_count, next_review: now + nm * 60,
+                        next_minutes: nm, lapsed: false, graduated: false,
+                        fsrs_stability: stab, fsrs_difficulty: diff,
+                    }, current_memory))
+                }
+                "hard" => {
+                    let ns = i64::max(0, step);
+                    let nm = steps.get(ns as usize).copied().unwrap_or(10);
+                    Ok((SRSResult {
+                        EF: -1.0, I: stored_interval, R: 0,
+                        state: "relearning".to_string(),
+                        step: ns, lapse_count, next_review: now + nm * 60,
+                        next_minutes: nm, lapsed: false, graduated: false,
+                        fsrs_stability: stab, fsrs_difficulty: diff,
+                    }, current_memory))
+                }
+                "good" => {
+                    let next_step = step + 1;
+                    if (next_step as usize) >= steps.len() {
+                        re_graduate_with_fsrs(current_memory, stored_interval, review_count, lapse_count, now)
+                    } else {
+                        let nm = steps.get(next_step as usize).copied().unwrap_or(10);
+                        Ok((SRSResult {
+                            EF: -1.0, I: stored_interval, R: 0,
+                            state: "relearning".to_string(),
+                            step: next_step, lapse_count, next_review: now + nm * 60,
+                            next_minutes: nm, lapsed: false, graduated: false,
+                            fsrs_stability: stab, fsrs_difficulty: diff,
+                        }, current_memory))
+                    }
+                }
+                _ => {
+                    // easy: immediate re-graduation
+                    re_graduate_with_fsrs(current_memory, stored_interval, review_count, lapse_count, now)
+                }
+            }
+        }
+        _ => graduate_with_fsrs(None, review_count, lapse_count, grade, now),
     }
 }
 
@@ -920,10 +1345,10 @@ fn schedule_card(
 fn db_upsert_review_item(app: tauri::AppHandle, content: String, tag: Option<String>, language: Option<String>) -> Result<(), String> {
     let conn = open_db(&app)?;
     let id = uuid::Uuid::new_v4().to_string();
-    let tags = tag.unwrap_or_else(|| compute_tag_from_ef_r(2.5, 0).to_string());
+    let tags = tag.unwrap_or_else(|| "new".to_string());
     conn.execute(
-        "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language)
-         VALUES (?1, ?2, 2.5, 1, 0, 'new', 0, 0, NULL, ?3, ?4)
+        "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, fsrs_stability, fsrs_difficulty)
+         VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, ?4, NULL, NULL)
          ON CONFLICT(content) DO UPDATE SET tags=excluded.tags, language=COALESCE(excluded.language, review_items.language)",
         params![id, content, tags, language],
     ).map_err(|e| e.to_string())?;
@@ -935,7 +1360,7 @@ fn db_get_review_items(app: tauri::AppHandle) -> Result<Vec<ReviewItem>, String>
     let conn = open_db(&app)?;
     let mut stmt = conn.prepare(
         "SELECT
-            id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic
+            id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
         FROM review_items").map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], row_to_review_item).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
@@ -954,7 +1379,7 @@ fn db_get_review_items_by_words(app: tauri::AppHandle, words: Vec<String>) -> Re
     let conn = open_db(&app)?;
     let placeholders: Vec<String> = words.iter().map(|_| "?".to_string()).collect();
     let sql = format!(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic FROM review_items WHERE content IN ({})",
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE content IN ({})",
         placeholders.join(", ")
     );
 
@@ -973,21 +1398,59 @@ fn db_get_review_items_by_words(app: tauri::AppHandle, words: Vec<String>) -> Re
 #[tauri::command]
 fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRSResult, String> {
     let conn = open_db(&app)?;
-    let (ef, i, r, state, step, lapse_count, next_review): (f64, i64, i64, String, i64, i64, Option<i64>) = conn.query_row(
-        "SELECT EF, I, R, state, step, lapse_count, next_review FROM review_items WHERE id=?1",
+
+    // Read card state including FSRS columns
+    let row: (f64, i64, i64, String, i64, i64, Option<i64>, Option<f32>, Option<f32>) = conn.query_row(
+        "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty
+         FROM review_items WHERE id=?1",
         params![id.clone()],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+        |row| Ok((
+            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
+        )),
     ).map_err(|e| e.to_string())?;
 
-    let config = SRSConfig::default();
-    let result = schedule_card(ef, i, r, &state, step, lapse_count, next_review, &grade, &config);
+    let (ef, i, r, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty) = row;
 
-    // Compute dynamic tag from newly scheduled EF/R values
-    let new_tag = compute_tag_from_ef_r(result.EF, result.R);
+    // Determine current memory state
+    let current_memory = if ef == -1.0 {
+        memory_state_from_db(fsrs_stability, fsrs_difficulty)
+    } else {
+        // On-the-fly SM-2 migration
+        let fsrs = get_fsrs();
+        match fsrs.memory_state_from_sm2(ef as f32, i as f32, DESIRED_RETENTION) {
+            Ok(ms) => Some(ms),
+            Err(e) => {
+                eprintln!("[fsrs] On-the-fly migration failed for card {}: {}", id, e);
+                let config = SRSConfig::default();
+                let result = schedule_card(ef, i, r, &state, step, lapse_count, next_review, &grade, &config);
+                let new_tag = compute_tag_from_ef_r(result.EF, result.R);
+                conn.execute(
+                    "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7, tags=?8 WHERE id=?9",
+                    params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, new_tag, id],
+                ).map_err(|e| e.to_string())?;
+                return Ok(result);
+            }
+        }
+    };
+
+    let config = SRSConfig::default();
+    let (result, new_memory_opt) = schedule_fsrs(&state, step, current_memory, i, r, lapse_count, next_review, &grade, &config)?;
+
+    let new_tag = match result.fsrs_difficulty {
+        Some(d) => compute_tag_from_fsrs_difficulty(d),
+        None => compute_tag_from_ef_r(result.EF, result.R),
+    };
 
     conn.execute(
-        "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7, tags=?8 WHERE id=?9",
-        params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, new_tag, id],
+        "UPDATE review_items SET EF=-1.0, I=?1, R=?2, state=?3, step=?4, lapse_count=?5, next_review=?6, tags=?7, fsrs_stability=?8, fsrs_difficulty=?9 WHERE id=?10",
+        params![
+            result.I, result.R, result.state, result.step, result.lapse_count,
+            result.next_review, new_tag,
+            new_memory_opt.map(|m| m.stability),
+            new_memory_opt.map(|m| m.difficulty),
+            id
+        ],
     ).map_err(|e| e.to_string())?;
 
     Ok(result)
@@ -1007,20 +1470,32 @@ struct GradePreview {
 #[tauri::command]
 fn db_preview_srs_grades(app: tauri::AppHandle, id: String) -> Result<Vec<GradePreview>, String> {
     let conn = open_db(&app)?;
-    let (ef, i, r, state, step, lapse_count, next_review): (f64, i64, i64, String, i64, i64, Option<i64>) = conn.query_row(
-        "SELECT EF, I, R, state, step, lapse_count, next_review FROM review_items WHERE id=?1",
+    let row: (f64, i64, i64, String, i64, i64, Option<i64>, Option<f32>, Option<f32>) = conn.query_row(
+        "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty
+         FROM review_items WHERE id=?1",
         params![id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?)),
+        |row| Ok((
+            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
+            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
+        )),
     ).map_err(|e| e.to_string())?;
+
+    let (ef, i, r, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty) = row;
+
+    let current_memory = if ef == -1.0 {
+        memory_state_from_db(fsrs_stability, fsrs_difficulty)
+    } else {
+        let fsrs = get_fsrs();
+        fsrs.memory_state_from_sm2(ef as f32, i as f32, DESIRED_RETENTION).ok()
+    };
 
     let config = SRSConfig::default();
     let grades = ["again", "hard", "good", "easy"];
     let labels = ["Again", "Hard", "Good", "Easy"];
-    let colors = ["bg-red-500", "bg-orange-500", "bg-blue-500", "bg-green-500"];
 
     let mut previews = Vec::new();
     for idx in 0..grades.len() {
-        let result = schedule_card(ef, i, r, &state, step, lapse_count, next_review, grades[idx], &config);
+        let (result, _) = schedule_fsrs(&state, step, current_memory, i, r, lapse_count, next_review, grades[idx], &config)?;
         previews.push(GradePreview {
             grade: grades[idx].to_string(),
             label: labels[idx].to_string(),
@@ -1166,18 +1641,25 @@ fn find_mnemonic_matches(
 
     // Source: review_items with ease >= 0.7
     let mut stmt = conn.prepare(
-        "SELECT content, EF, R, detail FROM review_items WHERE language=?1"
+        "SELECT content, EF, R, detail, fsrs_difficulty FROM review_items WHERE language=?1"
     ).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![language], |row| {
         let content: String = row.get(0)?;
         let ef: f64 = row.get(1)?;
         let r_val: i64 = row.get(2)?;
         let detail: Option<String> = row.get(3)?;
-        Ok((content, ef, r_val, detail))
+        let fsrs_diff: Option<f32> = row.get(4).unwrap_or(None);
+        Ok((content, ef, r_val, detail, fsrs_diff))
     }).map_err(|e| e.to_string())?;
     for r in rows {
-        let (content, ef, r_val, detail) = r.map_err(|e| e.to_string())?;
-        if ef < 2.7 || r_val < 5 { continue; }
+        let (content, ef, r_val, detail, fsrs_diff) = r.map_err(|e| e.to_string())?;
+        // Known = easy cards. For FSRS: difficulty < 3.0. For SM-2: EF >= 2.7 AND R >= 5
+        let is_known = if ef == -1.0 {
+            fsrs_diff.unwrap_or(5.0) < 3.0
+        } else {
+            ef >= 2.7 && r_val >= 5
+        };
+        if !is_known { continue; }
         // Don't match the word with itself
         if content == target_content { continue; }
 
@@ -1567,7 +2049,7 @@ fn db_update_review_detail(app: tauri::AppHandle, id: String, detail: String) ->
 #[tauri::command]
 fn db_get_review_items_by_language(app: tauri::AppHandle, language: String) -> Result<Vec<ReviewItem>, String> {
     let conn = open_db(&app)?;
-    let mut stmt = conn.prepare("SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic FROM review_items WHERE language=?1").map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare("SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE language=?1").map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![language], row_to_review_item).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
     for r in rows {
@@ -1616,9 +2098,9 @@ fn db_search_review_items(
     }
     if let Some(ref d) = difficulty {
         match d.as_str() {
-            "hard" => conditions.push("EF < 2.0".to_string()),
-            "medium" => conditions.push("EF >= 2.0 AND (EF < 2.7 OR R < 5)".to_string()),
-            "easy" => conditions.push("EF >= 2.7 AND R >= 5".to_string()),
+            "hard" => conditions.push("((EF = -1.0 AND fsrs_difficulty >= 7.0) OR (EF != -1.0 AND EF < 2.0))".to_string()),
+            "medium" => conditions.push("((EF = -1.0 AND fsrs_difficulty >= 3.0 AND fsrs_difficulty < 7.0) OR (EF != -1.0 AND EF >= 2.0 AND (EF < 2.7 OR R < 5)))".to_string()),
+            "easy" => conditions.push("((EF = -1.0 AND fsrs_difficulty < 3.0) OR (EF != -1.0 AND EF >= 2.7 AND R >= 5))".to_string()),
             _ => {}
         }
     }
@@ -1631,8 +2113,8 @@ fn db_search_review_items(
 
     let order_clause = match sort.as_deref() {
         Some("next_review") => " ORDER BY next_review ASC NULLS LAST".to_string(),
-        Some("hardest") => " ORDER BY EF ASC".to_string(),
-        _ => " ORDER BY EF DESC".to_string(), // default: easiest first
+        Some("hardest") => " ORDER BY COALESCE(fsrs_difficulty, (11.0 - EF)) DESC, lapse_count DESC".to_string(),
+        _ => " ORDER BY COALESCE(fsrs_difficulty, (11.0 - EF)) ASC, lapse_count ASC".to_string(),
     };
 
     // Count total matching rows
@@ -1643,7 +2125,7 @@ fn db_search_review_items(
 
     // Fetch page
     let data_sql = format!(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic FROM review_items{}{} LIMIT ?{} OFFSET ?{}",
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items{}{} LIMIT ?{} OFFSET ?{}",
         where_clause, order_clause,
         params.len() + 1, params.len() + 2,
     );
@@ -1717,7 +2199,7 @@ fn db_get_due_review_items(
     let limit_val = limit.unwrap_or(200);
 
     let mut sql = String::from(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
          FROM review_items
          WHERE (next_review IS NULL OR next_review <= ?1)"
     );
@@ -1839,9 +2321,9 @@ fn db_get_difficult_and_known_words(
 
     // Fetch review items (filtered by language if provided)
     let sql = if language.is_some() {
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic FROM review_items WHERE language=?1"
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE language=?1"
     } else {
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic FROM review_items"
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items"
     };
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
     let rows = if let Some(ref lang) = language {
@@ -1855,18 +2337,25 @@ fn db_get_difficult_and_known_words(
         items.push(r.map_err(|e| e.to_string())?);
     }
 
-    // Sort hardest-first (by EF ascending)
+    // Sort hardest-first (by EF ascending for SM-2, by fsrs_difficulty descending for FSRS)
     items.sort_by(|a, b| {
-        a.EF
-            .partial_cmp(&b.EF)
-            .unwrap_or(std::cmp::Ordering::Equal)
+        let a_hardness = a.fsrs_difficulty.unwrap_or_else(|| (3.3 - a.EF) as f32);
+        let b_hardness = b.fsrs_difficulty.unwrap_or_else(|| (3.3 - b.EF) as f32);
+        b_hardness.partial_cmp(&a_hardness).unwrap_or(std::cmp::Ordering::Equal)
     });
 
     let mut difficult = Vec::new();
     let mut known: Vec<String> = Vec::new();
 
     for item in &items {
-        if item.EF < 2.7 || item.R < 5 {
+        let is_difficult = if item.EF == -1.0 {
+            // FSRS card: difficult if difficulty >= 5.0 or R < 3
+            item.fsrs_difficulty.unwrap_or(5.0) >= 5.0 || item.R < 3
+        } else {
+            // SM-2 card: keep existing logic
+            item.EF < 2.7 || item.R < 5
+        };
+        if is_difficult {
             let is_new = item.state == "new" || item.state.is_empty();
             difficult.push(WordInfo {
                 content: item.content.clone(),
@@ -1952,8 +2441,8 @@ fn db_import_review_items(app: tauri::AppHandle, items: Vec<ImportItem>) -> Resu
         let id = uuid::Uuid::new_v4().to_string();
         let tags = item.tags.unwrap_or_default();
         let result = conn.execute(
-            "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail)
-             VALUES (?1, ?2, 2.5, 1, 0, 'new', 0, 0, NULL, ?3, ?4, ?5)
+            "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, fsrs_stability, fsrs_difficulty)
+             VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, ?4, ?5, NULL, NULL)
              ON CONFLICT(content) DO NOTHING",
             params![id, item.content, tags, item.language, item.detail],
         );
