@@ -20,6 +20,7 @@ uuid = { version = "1", features = ["v4"] }
 urlencoding = "2.1"
 rand = "0.8"
 lindera = { path = "../../lindera/lindera", features = ["embed-ipadic"] }
+fsrs = "5.2.0"
 
 [target.'cfg(not(any(target_os = "android", target_os = "ios")))'.dependencies]
 oauth2 = { version = "5", features = ["reqwest-blocking"] }
