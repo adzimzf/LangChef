@@ -31,3 +31,8 @@ open = "5"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+
+[patch.crates-io]
+# systemstat 0.2.6 includes linux.rs for Android but gates procfs for Linux only.
+# This local copy extends the procfs cfg to include android.
+systemstat = { path = "patches/systemstat" }
