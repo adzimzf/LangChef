@@ -1,29 +1,33 @@
 use lindera::mode::Mode;
 use lindera::tokenizer::{Tokenizer, TokenizerBuilder};
+use std::path::Path;
 
-/// Furigana annotator using lindera morphological analysis.
+const IPADIC_SOURCE_URL: &str =
+    "https://Lindera.dev/mecab-ipadic-2.7.0-20250920.tar.gz";
+const IPADIC_SOURCE_DIR: &str = "mecab-ipadic-2.7.0-20250920";
+const IPADIC_METADATA: &str =
+    include_str!("../../../lindera/lindera-ipadic/metadata.json");
+
 pub struct FuriganaAnnotator {
     tokenizer: Tokenizer,
 }
 
 impl FuriganaAnnotator {
-    /// Create a new annotator with embedded IPADIC dictionary.
-    pub fn new() -> Result<Self, String> {
+    pub fn from_path(dict_dir: &Path) -> Result<Self, String> {
+        #[cfg(windows)]
+        let uri = format!("file:///{}", dict_dir.display()).replace('\\', "/");
+        #[cfg(not(windows))]
+        let uri = format!("file://{}", dict_dir.display());
+
         let mut builder = TokenizerBuilder::new()
-            .map_err(|e| format!("Failed to create TokenizerBuilder: {}", e))?;
-        builder.set_segmenter_dictionary("embedded://ipadic");
+            .map_err(|e| format!("TokenizerBuilder: {e}"))?;
+        builder.set_segmenter_dictionary(&uri);
         builder.set_segmenter_mode(&Mode::Normal);
-        let tokenizer = builder
-            .build()
-            .map_err(|e| format!("Failed to build tokenizer: {}", e))?;
+        let tokenizer = builder.build().map_err(|e| format!("build tokenizer: {e}"))?;
         Ok(Self { tokenizer })
     }
 
-    /// Annotate Japanese text with furigana readings.
-    /// Produces `{kanji|reading}` format compatible with the frontend rendering pipeline.
-    /// Only annotates kanji characters, leaving okurigana (trailing hiragana) unannotated.
     pub fn annotate(&mut self, text: &str) -> String {
-        // Strip any existing annotations (safety measure)
         let plain = strip_existing_furigana(text);
 
         let tokens = match self.tokenizer.tokenize(&plain) {
@@ -36,7 +40,6 @@ impl FuriganaAnnotator {
         for mut token in tokens {
             let surface = token.surface.to_string();
 
-            // Get reading field from IPADIC
             let reading_kata = token
                 .get("reading")
                 .filter(|r| *r != "*" && !r.is_empty());
@@ -49,15 +52,12 @@ impl FuriganaAnnotator {
                 }
             }
 
-            // No annotation needed: pure kana, punctuation, numbers, unknown words
             result.push_str(&surface);
         }
 
         result
     }
 
-    /// Tokenize text and return token data (surface and base form).
-    /// Returns owned strings to avoid lifetime issues.
     pub fn tokenize(&mut self, text: &str) -> Vec<(String, String)> {
         let plain = strip_existing_furigana(text);
         match self.tokenizer.tokenize(&plain) {
@@ -78,13 +78,134 @@ impl FuriganaAnnotator {
     }
 }
 
-/// Annotate only the kanji portions of a surface form, preserving okurigana.
-///
-/// Examples:
-/// - `食べ物` + `たべもの` → `{食|た}べ{物|もの}`
-/// - `先生` + `せんせい` → `{先生|せんせい}`
-/// - `行きました` + `いきました` → `{行|い}きました`
-/// - `日本語` + `にほんご` → `{日本語|にほんご}`
+/// Returns true if the dict binary files already exist at `dir`.
+pub fn is_dict_ready(dir: &Path) -> bool {
+    dir.join("metadata.json").exists()
+}
+
+/// Ensures the IPADIC binary dict is present at `dir`.
+/// Downloads the MeCab source from Lindera.dev and compiles it on first run.
+/// `progress` is called with (stage, message, percent 0-100) throughout.
+/// Subsequent calls return immediately via the `progress("ready", ...)` path.
+pub fn ensure_dict(
+    dir: &Path,
+    progress: impl Fn(&str, &str, u8),
+) -> Result<(), String> {
+    if is_dict_ready(dir) {
+        return Ok(());
+    }
+    download_and_build(dir, progress)
+}
+
+fn download_and_build(
+    output_dir: &Path,
+    progress: impl Fn(&str, &str, u8),
+) -> Result<(), String> {
+    use std::fs;
+    use std::io::Read;
+
+    let parent = output_dir.parent().ok_or("Invalid dict output path")?;
+    let build_dir = parent.join("ipadic_build");
+
+    if build_dir.exists() {
+        fs::remove_dir_all(&build_dir).map_err(|e| e.to_string())?;
+    }
+    fs::create_dir_all(&build_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(output_dir).map_err(|e| e.to_string())?;
+
+    // Download source tar.gz with streaming progress (0–70%)
+    progress("downloading", "Downloading Japanese dictionary…", 0);
+    let mut response = reqwest::blocking::get(IPADIC_SOURCE_URL)
+        .map_err(|e| format!("Download failed: {e}"))?;
+    if !response.status().is_success() {
+        return Err(format!("Download HTTP {}", response.status()));
+    }
+    let content_length = response.content_length();
+    let mut raw: Vec<u8> = match content_length {
+        Some(len) => Vec::with_capacity(len as usize),
+        None => Vec::new(),
+    };
+    let mut buf = [0u8; 65536];
+    let mut downloaded = 0u64;
+    loop {
+        let n = response.read(&mut buf).map_err(|e| format!("Download read: {e}"))?;
+        if n == 0 {
+            break;
+        }
+        raw.extend_from_slice(&buf[..n]);
+        downloaded += n as u64;
+        if let Some(total) = content_length {
+            let pct = (downloaded.saturating_mul(70) / total).min(70) as u8;
+            let mb_done = downloaded / 1_048_576;
+            let mb_total = total / 1_048_576;
+            progress(
+                "downloading",
+                &format!("Downloading… {mb_done} / {mb_total} MB"),
+                pct,
+            );
+        }
+    }
+
+    // Extract tar.gz (70–80%)
+    progress("extracting", "Extracting archive…", 71);
+    let gz = flate2::read::GzDecoder::new(raw.as_slice());
+    let mut archive = tar::Archive::new(gz);
+    archive
+        .unpack(&build_dir)
+        .map_err(|e| format!("Extract failed: {e}"))?;
+    progress("extracting", "Extracted.", 80);
+
+    // Find the extracted source directory (could be named differently than expected)
+    let input_dir = {
+        let mut found = None;
+        for entry in fs::read_dir(&build_dir).map_err(|e| e.to_string())? {
+            let entry = entry.map_err(|e| e.to_string())?;
+            if entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+                found = Some(entry.path());
+                break;
+            }
+        }
+        found.ok_or_else(|| {
+            format!(
+                "No directory found in extracted archive at {}",
+                build_dir.display()
+            )
+        })?
+    };
+
+    // Sanity-check that char.def exists before kicking off the slow build
+    if !input_dir.join("char.def").exists() {
+        let contents: Vec<_> = fs::read_dir(&input_dir)
+            .map(|rd| rd.filter_map(|e| e.ok()).map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        return Err(format!(
+            "char.def not found in {}. Contents: {:?}",
+            input_dir.display(),
+            &contents[..contents.len().min(10)]
+        ));
+    }
+
+    // Build binary dict (80–99%) — this is CPU-bound and takes 30–120s
+    progress("building", "Compiling dictionary (30–120 s)…", 81);
+    let tmp_out = build_dir.join("out");
+    let metadata: lindera::dictionary::Metadata = serde_json::from_str(IPADIC_METADATA)
+        .map_err(|e| format!("Parse metadata: {e}"))?;
+    let builder = lindera::dictionary::DictionaryBuilder::new(metadata);
+    builder
+        .build_dictionary(&input_dir, &tmp_out)
+        .map_err(|e| format!("Build dict: {e}"))?;
+    progress("building", "Dictionary compiled.", 99);
+
+    // Move built files into output_dir
+    for entry in fs::read_dir(&tmp_out).map_err(|e| e.to_string())? {
+        let entry = entry.map_err(|e| e.to_string())?;
+        fs::copy(entry.path(), output_dir.join(entry.file_name()))
+            .map_err(|e| e.to_string())?;
+    }
+    fs::remove_dir_all(&build_dir).ok();
+    Ok(())
+}
+
 fn annotate_kanji_only(surface: &str, reading: &str) -> String {
     let surface_chars: Vec<char> = surface.chars().collect();
     let reading_chars: Vec<char> = reading.chars().collect();
@@ -96,24 +217,20 @@ fn annotate_kanji_only(surface: &str, reading: &str) -> String {
         let ch = surface_chars[si];
 
         if is_kanji(ch) {
-            // Collect consecutive kanji run
             let kanji_start = si;
             while si < surface_chars.len() && is_kanji(surface_chars[si]) {
                 si += 1;
             }
             let kanji: String = surface_chars[kanji_start..si].iter().collect();
 
-            // Collect trailing okurigana (hiragana after kanji)
             let okuri_start = si;
             while si < surface_chars.len() && is_hiragana(surface_chars[si]) {
                 si += 1;
             }
             let okuri_len = si - okuri_start;
 
-            // Determine the reading for the kanji portion
             let kanji_reading = if okuri_len > 0 {
                 let okuri: String = surface_chars[okuri_start..si].iter().collect();
-                // Find okurigana in reading to split between kanji reading and okurigana
                 match find_substring_in_reading(&reading_chars[ri..], &okuri) {
                     Some(offset) => {
                         let kr: String = reading_chars[ri..ri + offset].iter().collect();
@@ -121,15 +238,16 @@ fn annotate_kanji_only(surface: &str, reading: &str) -> String {
                         kr
                     }
                     None => {
-                        // Fallback: remaining reading minus okurigana length
-                        let kr_len = reading_chars.len().saturating_sub(ri).saturating_sub(okuri.chars().count());
+                        let kr_len = reading_chars
+                            .len()
+                            .saturating_sub(ri)
+                            .saturating_sub(okuri.chars().count());
                         let kr: String = reading_chars[ri..ri + kr_len].iter().collect();
                         ri += kr_len;
                         kr
                     }
                 }
             } else {
-                // No okurigana — entire remaining reading belongs to this kanji run
                 let kr: String = reading_chars[ri..].iter().collect();
                 ri = reading_chars.len();
                 kr
@@ -141,21 +259,18 @@ fn annotate_kanji_only(surface: &str, reading: &str) -> String {
                 result.push_str(&kanji);
             }
 
-            // Append okurigana without annotation
             if okuri_len > 0 {
                 let okuri: String = surface_chars[okuri_start..si].iter().collect();
                 result.push_str(&okuri);
                 ri += okuri.chars().count();
             }
         } else if is_hiragana(ch) {
-            // Standalone hiragana (e.g., particles) — no annotation
             result.push(ch);
             if ri < reading_chars.len() {
                 ri += 1;
             }
             si += 1;
         } else {
-            // Katakana, punctuation, latin, digits — no annotation
             result.push(ch);
             si += 1;
         }
@@ -164,7 +279,6 @@ fn annotate_kanji_only(surface: &str, reading: &str) -> String {
     result
 }
 
-/// Find the position of `substr` chars within `reading` chars.
 fn find_substring_in_reading(reading: &[char], substr: &str) -> Option<usize> {
     let substr_chars: Vec<char> = substr.chars().collect();
     if substr_chars.is_empty() || reading.len() < substr_chars.len() {
@@ -193,8 +307,6 @@ fn has_kanji(text: &str) -> bool {
     text.chars().any(is_kanji)
 }
 
-/// Convert katakana to hiragana.
-/// Range 0x30A1-0x30F6 → 0x3041-0x3096 (subtract 0x60).
 fn katakana_to_hiragana(katakana: &str) -> String {
     katakana
         .chars()
@@ -208,7 +320,6 @@ fn katakana_to_hiragana(katakana: &str) -> String {
         .collect()
 }
 
-/// Strip existing `{kanji|reading}` annotations, returning plain text.
 fn strip_existing_furigana(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
@@ -264,15 +375,10 @@ mod tests {
 
     #[test]
     fn test_annotate_kanji_only() {
-        // Kanji + okurigana split
         assert_eq!(annotate_kanji_only("食べ物", "たべもの"), "{食|た}べ{物|もの}");
-        // Consecutive kanji as one unit
         assert_eq!(annotate_kanji_only("先生", "せんせい"), "{先生|せんせい}");
-        // Single kanji with okurigana
         assert_eq!(annotate_kanji_only("行きました", "いきました"), "{行|い}きました");
-        // Consecutive kanji, no okurigana
         assert_eq!(annotate_kanji_only("日本語", "にほんご"), "{日本語|にほんご}");
-        // Pure kana — no annotation
         assert_eq!(annotate_kanji_only("おいしい", "おいしい"), "おいしい");
     }
 

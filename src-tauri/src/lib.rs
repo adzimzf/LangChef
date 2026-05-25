@@ -4,7 +4,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::sync::Mutex;
 use rusqlite::{Connection, params};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 mod google_auth;
 mod google_drive;
@@ -37,19 +37,18 @@ fn greet(name: &str) -> String {
 
 #[tauri::command]
 fn add_furigana(
-    state: tauri::State<'_, Option<Mutex<furigana::FuriganaAnnotator>>>,
+    state: tauri::State<'_, Mutex<Option<furigana::FuriganaAnnotator>>>,
     text: String,
     language: String,
 ) -> String {
     if language != "ja" {
         return text;
     }
-    let annotator = match state.inner() {
-        Some(mutex) => mutex,
-        None => return text,
-    };
-    match annotator.lock() {
-        Ok(mut annotator) => annotator.annotate(&text),
+    match state.lock() {
+        Ok(mut guard) => match guard.as_mut() {
+            Some(annotator) => annotator.annotate(&text),
+            None => text,
+        },
         Err(_) => text,
     }
 }
@@ -64,21 +63,64 @@ struct TokenWithBase {
 
 #[tauri::command]
 fn tokenize_japanese(
-    state: tauri::State<'_, Option<Mutex<furigana::FuriganaAnnotator>>>,
+    state: tauri::State<'_, Mutex<Option<furigana::FuriganaAnnotator>>>,
     text: String,
 ) -> Result<Vec<TokenWithBase>, String> {
-    let annotator = match state.inner() {
-        Some(mutex) => mutex,
-        None => return Err("Tokenizer not initialized".to_string()),
-    };
-
-    let mut annotator = annotator.lock().map_err(|e| e.to_string())?;
+    let mut guard = state.lock().map_err(|e| e.to_string())?;
+    let annotator = guard.as_mut().ok_or("Tokenizer not initialized")?;
     let tokens = annotator.tokenize(&text);
-
     Ok(tokens
         .into_iter()
         .map(|(surface, base_form)| TokenWithBase { surface, base_form })
         .collect())
+}
+
+#[tauri::command]
+async fn init_lindera_dict(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Option<furigana::FuriganaAnnotator>>>,
+) -> Result<String, String> {
+    let data_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+    let dict_dir = data_dir.join("ipadic");
+
+    if !furigana::is_dict_ready(&dict_dir) {
+        let dict_dir_clone = dict_dir.clone();
+        let app_clone = app.clone();
+        tauri::async_runtime::spawn_blocking(move || {
+            furigana::ensure_dict(&dict_dir_clone, |stage, message, percent| {
+                let _ = app_clone.emit(
+                    "lindera-progress",
+                    serde_json::json!({
+                        "stage": stage,
+                        "message": message,
+                        "percent": percent
+                    }),
+                );
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+    }
+
+    let annotator = furigana::FuriganaAnnotator::from_path(&dict_dir)?;
+    {
+        let mut guard = state.lock().map_err(|e| e.to_string())?;
+        *guard = Some(annotator);
+    }
+    let _ = app.emit(
+        "lindera-progress",
+        serde_json::json!({"stage": "ready", "message": "Japanese dictionary ready", "percent": 100}),
+    );
+    eprintln!("[furigana] Lindera tokenizer initialized from {}", dict_dir.display());
+    Ok("initialized".to_string())
+}
+
+#[tauri::command]
+fn get_lindera_dict_status(app: tauri::AppHandle) -> bool {
+    app.path()
+        .app_data_dir()
+        .map(|d| furigana::is_dict_ready(&d.join("ipadic")))
+        .unwrap_or(false)
 }
 
 #[derive(Debug, Deserialize)]
@@ -3111,22 +3153,31 @@ pub fn run() {
 
     app
         .setup(|app| {
-            match furigana::FuriganaAnnotator::new() {
-                Ok(annotator) => {
-                    app.manage(Some(Mutex::new(annotator)));
-                    eprintln!("[furigana] Lindera tokenizer initialized");
-                }
-                Err(e) => {
-                    eprintln!("[furigana] WARNING: Failed to initialize Lindera tokenizer: {}. Furigana will be unavailable.", e);
-                    app.manage::<Option<Mutex<furigana::FuriganaAnnotator>>>(None);
-                }
+            // Try to load the tokenizer from the local cache. If the dict has not been
+            // downloaded yet, the frontend should call `init_lindera_dict` to trigger
+            // the one-time download+build.
+            let initial = app
+                .path()
+                .app_data_dir()
+                .ok()
+                .and_then(|d| {
+                    let dict_dir = d.join("ipadic");
+                    furigana::FuriganaAnnotator::from_path(&dict_dir).ok()
+                });
+            if initial.is_some() {
+                eprintln!("[furigana] Lindera tokenizer loaded from cache");
+            } else {
+                eprintln!("[furigana] Dict not cached — call init_lindera_dict from frontend");
             }
+            app.manage(Mutex::new(initial));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             greet,
             add_furigana,
             tokenize_japanese,
+            init_lindera_dict,
+            get_lindera_dict_status,
             test_provider,
             list_models,
             llm_chat,
