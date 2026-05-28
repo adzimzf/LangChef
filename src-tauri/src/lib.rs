@@ -856,6 +856,16 @@ struct SRSResult {
     fsrs_difficulty: Option<f32>,
 }
 
+/// Wraps an SRSResult with the authoritative daily counters after the grade is applied.
+/// Frontend should use these counters as the source of truth instead of tracking locally.
+#[derive(Debug, Serialize)]
+struct SRSResultWithLimits {
+    #[serde(flatten)]
+    result: SRSResult,
+    reviews_completed: i64,
+    new_cards_seen: i64,
+}
+
 /// Compute new EF from current EF and quality (0–5).
 /// Formula: EF' = EF + (0.1 - (5-q)*(0.08 + (5-q)*0.02)), min 1.3
 fn compute_ef(ef: f64, q: i64) -> f64 {
@@ -1393,7 +1403,8 @@ fn schedule_fsrs(
                 }
             }
         }
-        _ => graduate_with_fsrs(None, review_count, lapse_count, grade, now),
+        // Unknown/empty state: treat as new to prevent accidental graduation
+        _ => schedule_fsrs("new", step, current_memory, stored_interval, review_count, lapse_count, next_review, grade, config),
     }
 }
 
@@ -1451,22 +1462,55 @@ fn db_get_review_items_by_words(app: tauri::AppHandle, words: Vec<String>) -> Re
     Ok(items)
 }
 
+/// Apply daily study-limit increments based on the SRS result. Returns the
+/// updated (reviews_completed, new_cards_seen) for the card's language.
+fn apply_study_limit_increments(
+    conn: &rusqlite::Connection,
+    language: &str,
+    prev_state: &str,
+    result: &SRSResult,
+) -> rusqlite::Result<(i64, i64)> {
+    let today = chrono::Local::now().date_naive().to_string();
+
+    // graduated → reviewed today; first graduation from new/learning → new card seen today
+    // Disjoint counters:
+    //   reviews_completed → review-state cards completed (re-reviews)
+    //   new_cards_seen    → new/learning cards graduating to review for the first time
+    let inc_reviews = if result.graduated && prev_state == "review" { 1i64 } else { 0 };
+    let inc_new = if result.graduated && (prev_state == "new" || prev_state == "learning") { 1i64 } else { 0 };
+
+    if inc_reviews > 0 || inc_new > 0 {
+        conn.execute(
+            "INSERT INTO study_limits(date, language, reviews_completed, new_cards_seen) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(date, language) DO UPDATE SET reviews_completed = reviews_completed + ?3, new_cards_seen = new_cards_seen + ?4",
+            params![today, language, inc_reviews, inc_new],
+        )?;
+    }
+
+    conn.query_row(
+        "SELECT reviews_completed, new_cards_seen FROM study_limits WHERE date = ?1 AND language = ?2",
+        params![today, language],
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
+    ).or_else(|_| Ok((0, 0)))
+}
+
 #[tauri::command]
-fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRSResult, String> {
+fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRSResultWithLimits, String> {
     let conn = open_db(&app)?;
 
-    // Read card state including FSRS columns
-    let row: (f64, i64, i64, String, i64, i64, Option<i64>, Option<f32>, Option<f32>) = conn.query_row(
-        "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty
+    // Read card state including FSRS columns and language
+    let row: (f64, i64, i64, String, i64, i64, Option<i64>, Option<f32>, Option<f32>, Option<String>) = conn.query_row(
+        "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty, language
          FROM review_items WHERE id=?1",
         params![id.clone()],
         |row| Ok((
             row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
+            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?,
         )),
     ).map_err(|e| e.to_string())?;
 
-    let (ef, i, r, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty) = row;
+    let (ef, i, r, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty, language) = row;
+    let language = language.unwrap_or_default();
 
     // Determine current memory state
     let current_memory = if ef == -1.0 {
@@ -1485,7 +1529,9 @@ fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRS
                     "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7, tags=?8 WHERE id=?9",
                     params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, new_tag, id],
                 ).map_err(|e| e.to_string())?;
-                return Ok(result);
+                let (reviews_completed, new_cards_seen) =
+                    apply_study_limit_increments(&conn, &language, &state, &result).map_err(|e| e.to_string())?;
+                return Ok(SRSResultWithLimits { result, reviews_completed, new_cards_seen });
             }
         }
     };
@@ -1518,7 +1564,9 @@ fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRS
         );
     }
 
-    Ok(result)
+    let (reviews_completed, new_cards_seen) =
+        apply_study_limit_increments(&conn, &language, &state, &result).map_err(|e| e.to_string())?;
+    Ok(SRSResultWithLimits { result, reviews_completed, new_cards_seen })
 }
 
 #[derive(Serialize)]

@@ -230,11 +230,16 @@ export default function Review() {
 
     // Capture card ID upfront so the setSessionQueue closure never uses a stale visibleCard
     const cardId = visibleCard.id
-    const cardState = visibleCard.state || 'new'
 
-    let result: { EF: number; I: number; R: number; state: string; step: number; lapse_count: number; next_review: number; lapsed: boolean; graduated: boolean; fsrs_stability: number | null; fsrs_difficulty: number | null }
+    type SrsUpdate = {
+      EF: number; I: number; R: number; state: string; step: number; lapse_count: number;
+      next_review: number; lapsed: boolean; graduated: boolean;
+      fsrs_stability: number | null; fsrs_difficulty: number | null;
+      reviews_completed: number; new_cards_seen: number;
+    }
+    let result: SrsUpdate
     try {
-      result = await invoke<{ EF: number; I: number; R: number; state: string; step: number; lapse_count: number; next_review: number; lapsed: boolean; graduated: boolean; fsrs_stability: number | null; fsrs_difficulty: number | null }>('db_update_srs', { id: cardId, grade })
+      result = await invoke<SrsUpdate>('db_update_srs', { id: cardId, grade })
     } catch {
       isGrading.current = false
       return
@@ -242,17 +247,9 @@ export default function Review() {
 
     invoke('db_record_activity', { activityType: 'review' }).catch(() => {})
 
-    // Only count as reviewed if card graduated (backend determines this)
-    if (result.graduated) {
-      invoke('db_increment_study_limit', { language: selectedLang, field: 'reviews' }).catch(() => {})
-      setReviewedToday(prev => prev + 1)
-    }
-
-    // Track new cards introduced today
-    if (cardState === 'new') {
-      invoke('db_increment_study_limit', { language: selectedLang, field: 'new_cards' }).catch(() => {})
-      setNewCardsToday(prev => prev + 1)
-    }
+    // Backend is authoritative for daily counters — just sync local state to it
+    setReviewedToday(result.reviews_completed)
+    setNewCardsToday(result.new_cards_seen)
 
     setRevealed(false)
     setShowMnemonic(false)
@@ -288,14 +285,11 @@ export default function Review() {
         newQueue = [...before, ...after, updatedItem]
       }
 
-      const newSeenAfterGrade = cardState === 'new' ? newCardsToday + 1 : newCardsToday
-      const reviewedAfterGrade = result.graduated ? reviewedToday + 1 : reviewedToday
-
-      // Each limit is independent — only purge that card type when its limit is hit
-      if (newSeenAfterGrade >= maxNewCards) {
+      // Each limit is independent — purge only that card type when its DB-authoritative limit is hit
+      if (result.new_cards_seen >= maxNewCards) {
         newQueue = newQueue.filter(item => item.state !== 'new' && item.state !== null && item.state !== '')
       }
-      if (reviewedAfterGrade >= maxReviews) {
+      if (result.reviews_completed >= maxReviews) {
         newQueue = newQueue.filter(item => item.state === 'new' || item.state === null || item.state === '')
       }
 
@@ -720,20 +714,24 @@ export default function Review() {
           </div>
         )}
 
-        {/* Session progress */}
-        {sessionQueue.length > 0 && (
-          <div className="flex items-center gap-2">
-            <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-blue-500 rounded-full transition-all duration-300"
-                style={{ width: `${(reviewedToday + immediatelyDueCount) > 0 ? (reviewedToday / (reviewedToday + immediatelyDueCount)) * 100 : 0}%` }}
-              />
+        {/* Session progress — daily target is the combined cap of reviews + new cards */}
+        {sessionQueue.length > 0 && (() => {
+          const dailyTarget = maxReviews + maxNewCards
+          const dailyDone = reviewedToday + newCardsToday
+          return (
+            <div className="flex items-center gap-2">
+              <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                  style={{ width: `${dailyTarget > 0 ? Math.min(100, (dailyDone / dailyTarget) * 100) : 0}%` }}
+                />
+              </div>
+              <span className="text-xs text-gray-400 shrink-0">
+                {dailyDone}/{dailyTarget}
+              </span>
             </div>
-            <span className="text-xs text-gray-400 shrink-0">
-              {reviewedToday}/{reviewedToday + immediatelyDueCount}
-            </span>
-          </div>
-        )}
+          )
+        })()}
       </div>
 
       {/* No due cards for selected language */}
