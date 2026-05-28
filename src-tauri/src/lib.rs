@@ -2453,12 +2453,14 @@ fn db_get_due_review_items(
 
     // Apply non-new (review/learning) card cap
     if let Some(review_cap) = authoritative_review_remaining {
+        // Cap only applies to "review" state cards (already-mastered). Learning/relearning
+        // cards are in-progress and should always stay in the queue regardless of the cap.
         if review_cap <= 0 {
-            items.retain(|item| item.state == "new" || item.state.is_empty());
+            items.retain(|item| item.state != "review");
         } else {
             let mut review_count = 0i64;
             items.retain(|item| {
-                if item.state != "new" && !item.state.is_empty() {
+                if item.state == "review" {
                     if review_count >= review_cap {
                         return false;
                     }

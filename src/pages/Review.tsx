@@ -120,9 +120,12 @@ export default function Review() {
       const reviewsRemaining = Math.max(0, maxReviews - reviewedTodayRef.current)
       const d = new Date()
       d.setHours(23, 59, 59, 999)
+      // SQL LIMIT must be generous enough to cover review cap + new card cap PLUS any
+      // in-progress learning/relearning cards (which aren't capped). Backend then trims
+      // review/new state to their respective caps; learning cards always pass through.
       const items = await invoke<ReviewItem[]>('db_get_due_review_items', {
         language: lang,
-        limit: reviewsRemaining + newRemaining,
+        limit: 500,
         newCardsRemaining: newRemaining,
         maxNextReview: Math.floor(d.getTime() / 1000),
         maxNewCardsPerDay: maxNewCards,
@@ -285,12 +288,13 @@ export default function Review() {
         newQueue = [...before, ...after, updatedItem]
       }
 
-      // Each limit is independent — purge only that card type when its DB-authoritative limit is hit
+      // Caps apply only to their specific card types. Learning/relearning cards are
+      // in-progress and stay in queue regardless of caps.
       if (result.new_cards_seen >= maxNewCards) {
         newQueue = newQueue.filter(item => item.state !== 'new' && item.state !== null && item.state !== '')
       }
       if (result.reviews_completed >= maxReviews) {
-        newQueue = newQueue.filter(item => item.state === 'new' || item.state === null || item.state === '')
+        newQueue = newQueue.filter(item => item.state !== 'review')
       }
 
       return newQueue
