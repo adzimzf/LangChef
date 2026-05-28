@@ -683,7 +683,6 @@ struct ReviewItem {
     step: i64,              // current step index in learning/relearning steps
     lapse_count: i64,       // number of times this card has lapsed
     next_review: Option<i64>,
-    tags: Option<String>,
     language: Option<String>,
     detail: Option<String>,
     mnemonic: Option<String>,
@@ -692,6 +691,7 @@ struct ReviewItem {
     // Display-computed fields (set by helper functions on query)
     difficulty_color: String,
     difficulty_bg_class: String,
+    difficulty_label: String,
     state_label: String,
     next_review_formatted: String,
 }
@@ -702,8 +702,8 @@ fn row_to_review_item(row: &rusqlite::Row) -> rusqlite::Result<ReviewItem> {
     let r: i64 = row.get(4)?;
     let state: String = row.get(5)?;
     let next_review: Option<i64> = row.get(8)?;
-    let fsrs_stability: Option<f32> = row.get(13).unwrap_or(None);
-    let fsrs_difficulty: Option<f32> = row.get(14).unwrap_or(None);
+    let fsrs_stability: Option<f32> = row.get(12).unwrap_or(None);
+    let fsrs_difficulty: Option<f32> = row.get(13).unwrap_or(None);
 
     // Use FSRS difficulty for display if available, else fall back to EF-based
     let (difficulty_color, difficulty_bg_class) = match fsrs_difficulty {
@@ -716,6 +716,10 @@ fn row_to_review_item(row: &rusqlite::Row) -> rusqlite::Result<ReviewItem> {
             compute_difficulty_bg_class(ef, r).to_string(),
         ),
     };
+    let difficulty_label: String = match fsrs_difficulty {
+        Some(d) => if d < 3.0 { "Easy" } else if d < 7.0 { "Medium" } else { "Hard" }.to_string(),
+        None => if ef >= 2.7 && r >= 5 { "Easy" } else if ef < 2.0 { "Hard" } else { "Medium" }.to_string(),
+    };
 
     Ok(ReviewItem {
         id: row.get(0)?,
@@ -727,14 +731,14 @@ fn row_to_review_item(row: &rusqlite::Row) -> rusqlite::Result<ReviewItem> {
         step: row.get(6)?,
         lapse_count: row.get(7)?,
         next_review,
-        tags: row.get(9)?,
-        language: row.get(10)?,
-        detail: row.get(11)?,
-        mnemonic: row.get(12)?,
+        language: row.get(9)?,
+        detail: row.get(10)?,
+        mnemonic: row.get(11)?,
         fsrs_stability,
         fsrs_difficulty,
         difficulty_color,
         difficulty_bg_class,
+        difficulty_label,
         state_label: compute_state_label(&state).to_string(),
         next_review_formatted: compute_next_review_formatted(next_review),
     })
@@ -1409,15 +1413,14 @@ fn schedule_fsrs(
 }
 
 #[tauri::command]
-fn db_upsert_review_item(app: tauri::AppHandle, content: String, tag: Option<String>, language: Option<String>) -> Result<(), String> {
+fn db_upsert_review_item(app: tauri::AppHandle, content: String, language: Option<String>) -> Result<(), String> {
     let conn = open_db(&app)?;
     let id = uuid::Uuid::new_v4().to_string();
-    let tags = tag.unwrap_or_else(|| "new".to_string());
     conn.execute(
-        "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, fsrs_stability, fsrs_difficulty, created_at)
-         VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, ?4, NULL, NULL, CAST(strftime('%s', 'now') * 1000 AS INTEGER))
-         ON CONFLICT(content) DO UPDATE SET tags=excluded.tags, language=COALESCE(excluded.language, review_items.language)",
-        params![id, content, tags, language],
+        "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, language, fsrs_stability, fsrs_difficulty, created_at)
+         VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, NULL, NULL, CAST(strftime('%s', 'now') * 1000 AS INTEGER))
+         ON CONFLICT(content) DO UPDATE SET language=COALESCE(excluded.language, review_items.language)",
+        params![id, content, language],
     ).map_err(|e| e.to_string())?;
     Ok(())
 }
@@ -1427,7 +1430,7 @@ fn db_get_review_items(app: tauri::AppHandle) -> Result<Vec<ReviewItem>, String>
     let conn = open_db(&app)?;
     let mut stmt = conn.prepare(
         "SELECT
-            id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
+            id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
         FROM review_items").map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], row_to_review_item).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
@@ -1446,7 +1449,7 @@ fn db_get_review_items_by_words(app: tauri::AppHandle, words: Vec<String>) -> Re
     let conn = open_db(&app)?;
     let placeholders: Vec<String> = words.iter().map(|_| "?".to_string()).collect();
     let sql = format!(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE content IN ({})",
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE content IN ({})",
         placeholders.join(", ")
     );
 
@@ -1524,10 +1527,9 @@ fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRS
                 eprintln!("[fsrs] On-the-fly migration failed for card {}: {}", id, e);
                 let config = SRSConfig::default();
                 let result = schedule_card(ef, i, r, &state, step, lapse_count, next_review, &grade, &config);
-                let new_tag = compute_tag_from_ef_r(result.EF, result.R);
                 conn.execute(
-                    "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7, tags=?8 WHERE id=?9",
-                    params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, new_tag, id],
+                    "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7 WHERE id=?8",
+                    params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, id],
                 ).map_err(|e| e.to_string())?;
                 let (reviews_completed, new_cards_seen) =
                     apply_study_limit_increments(&conn, &language, &state, &result).map_err(|e| e.to_string())?;
@@ -1539,16 +1541,11 @@ fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRS
     let config = SRSConfig::default();
     let (result, new_memory_opt) = schedule_fsrs(&state, step, current_memory, i, r, lapse_count, next_review, &grade, &config)?;
 
-    let new_tag = match result.fsrs_difficulty {
-        Some(d) => compute_tag_from_fsrs_difficulty(d),
-        None => compute_tag_from_ef_r(result.EF, result.R),
-    };
-
     conn.execute(
-        "UPDATE review_items SET EF=-1.0, I=?1, R=?2, state=?3, step=?4, lapse_count=?5, next_review=?6, tags=?7, fsrs_stability=?8, fsrs_difficulty=?9 WHERE id=?10",
+        "UPDATE review_items SET EF=-1.0, I=?1, R=?2, state=?3, step=?4, lapse_count=?5, next_review=?6, fsrs_stability=?7, fsrs_difficulty=?8 WHERE id=?9",
         params![
             result.I, result.R, result.state, result.step, result.lapse_count,
-            result.next_review, new_tag,
+            result.next_review,
             new_memory_opt.map(|m| m.stability),
             new_memory_opt.map(|m| m.difficulty),
             id
@@ -2254,7 +2251,6 @@ fn db_delete_session(app: tauri::AppHandle, session_id: String) -> Result<(), St
 #[derive(Debug, Deserialize)]
 struct ImportItem {
     content: String,
-    tags: Option<String>,
     language: Option<String>,
     detail: Option<String>,
 }
@@ -2270,7 +2266,7 @@ fn db_update_review_detail(app: tauri::AppHandle, id: String, detail: String) ->
 #[tauri::command]
 fn db_get_review_items_by_language(app: tauri::AppHandle, language: String) -> Result<Vec<ReviewItem>, String> {
     let conn = open_db(&app)?;
-    let mut stmt = conn.prepare("SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE language=?1").map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare("SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE language=?1").map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![language], row_to_review_item).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
     for r in rows {
@@ -2346,7 +2342,7 @@ fn db_search_review_items(
 
     // Fetch page
     let data_sql = format!(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items{}{} LIMIT ?{} OFFSET ?{}",
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items{}{} LIMIT ?{} OFFSET ?{}",
         where_clause, order_clause,
         params.len() + 1, params.len() + 2,
     );
@@ -2426,7 +2422,7 @@ fn db_get_due_review_items(
     let limit_val = limit.unwrap_or(200);
 
     let mut sql = String::from(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
          FROM review_items
          WHERE (next_review IS NULL OR next_review <= ?1)"
     );
@@ -2568,9 +2564,9 @@ fn db_get_difficult_and_known_words(
 
     // Fetch review items (filtered by language if provided)
     let sql = if language.is_some() {
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE language=?1"
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE language=?1"
     } else {
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items"
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items"
     };
     let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
     let rows = if let Some(ref lang) = language {
@@ -2649,7 +2645,6 @@ fn db_delete_review_item(app: tauri::AppHandle, id: String) -> Result<(), String
 struct UpdateReviewItem {
     id: String,
     content: Option<String>,
-    tags: Option<String>,
     language: Option<String>,
 }
 
@@ -2669,10 +2664,6 @@ fn db_update_review_item(app: tauri::AppHandle, item: UpdateReviewItem) -> Resul
         conn.execute("UPDATE review_items SET content=?1 WHERE id=?2", params![content, item.id])
             .map_err(|e| e.to_string())?;
     }
-    if let Some(tags) = item.tags {
-        conn.execute("UPDATE review_items SET tags=?1 WHERE id=?2", params![tags, item.id])
-            .map_err(|e| e.to_string())?;
-    }
     if let Some(language) = item.language {
         conn.execute("UPDATE review_items SET language=?1 WHERE id=?2", params![language, item.id])
             .map_err(|e| e.to_string())?;
@@ -2686,12 +2677,11 @@ fn db_import_review_items(app: tauri::AppHandle, items: Vec<ImportItem>) -> Resu
     let mut imported = 0u32;
     for item in items {
         let id = uuid::Uuid::new_v4().to_string();
-        let tags = item.tags.unwrap_or_default();
         let result = conn.execute(
-            "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, fsrs_stability, fsrs_difficulty, created_at)
-             VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, ?4, ?5, NULL, NULL, CAST(strftime('%s', 'now') * 1000 AS INTEGER))
+            "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, fsrs_stability, fsrs_difficulty, created_at)
+             VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, ?4, NULL, NULL, CAST(strftime('%s', 'now') * 1000 AS INTEGER))
              ON CONFLICT(content) DO NOTHING",
-            params![id, item.content, tags, item.language, item.detail],
+            params![id, item.content, item.language, item.detail],
         );
         if let Ok(n) = result {
             if n > 0 { imported += 1; }

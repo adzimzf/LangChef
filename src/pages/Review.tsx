@@ -377,7 +377,6 @@ export default function Review() {
           content: parts[0],
           detail: parts[1] || undefined,
           language: importLang,
-          tags: undefined as string | undefined,
         }
       })
       const result = await invoke<string>('db_import_review_items', { items })
@@ -782,9 +781,10 @@ export default function Review() {
               </div>
 
               <div className="text-2xl font-semibold mb-1">{visibleCard?.content || ''}</div>
-              {visibleCard.tags && (
-                <span className={`inline-block text-xs px-2 py-0.5 rounded-full text-white ${visibleCard.difficulty_bg_class} mt-1`}>
-                  {visibleCard.tags}
+              {visibleCard.difficulty_label && (
+                <span className="inline-block text-xs px-2 py-0.5 rounded-full text-white mt-1"
+                  style={{ backgroundColor: visibleCard.difficulty_color }}>
+                  {visibleCard.difficulty_label}
                 </span>
               )}
 

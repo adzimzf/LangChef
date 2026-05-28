@@ -246,12 +246,12 @@ export default function WordsList() {
             </div>
 
             <div className="text-2xl font-semibold mb-1">{selectedItem.content}</div>
-            {selectedItem.tags && (
+            {selectedItem.difficulty_label && (
               <span
                 className="inline-block text-xs px-2 py-0.5 rounded-full text-white mt-1"
                 style={{ backgroundColor: selectedItem.difficulty_color }}
               >
-                {selectedItem.tags}
+                {selectedItem.difficulty_label}
               </span>
             )}
             {selectedItem.language && LANGUAGES[selectedItem.language] && (
@@ -556,12 +556,12 @@ export default function WordsList() {
                       )}
                     </div>
                     <div className="flex items-center gap-2 mt-0.5">
-                      {item.tags && (
+                      {item.difficulty_label && (
                         <span
                           className="text-[10px] px-1.5 py-0.5 rounded-full text-white"
                           style={{ backgroundColor: item.difficulty_color }}
                         >
-                          {item.tags}
+                          {item.difficulty_label}
                         </span>
                       )}
                       <span className="text-[10px] text-gray-300">

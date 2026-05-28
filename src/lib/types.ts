@@ -8,7 +8,6 @@ export type ReviewItem = {
   step: number
   lapse_count: number
   next_review: number | null
-  tags: string | null
   language: string | null
   detail: string | null
   mnemonic: string | null
@@ -18,6 +17,7 @@ export type ReviewItem = {
   // Pre-computed display fields from backend
   difficulty_color: string
   difficulty_bg_class: string
+  difficulty_label: string
   state_label: string
   next_review_formatted: string
 }
