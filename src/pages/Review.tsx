@@ -74,8 +74,10 @@ export default function Review() {
   const [reviewedToday, setReviewedToday] = useState(0)
   const [newCardsToday, setNewCardsToday] = useState(0)
   const newCardsTodayRef = useRef(0)
-  // Keep ref in sync so loadDueItems (captured in buildQueue) always reads the latest value
+  const reviewedTodayRef = useRef(0)
+  // Keep refs in sync so loadDueItems (captured in buildQueue) always reads the latest values
   useEffect(() => { newCardsTodayRef.current = newCardsToday }, [newCardsToday])
+  useEffect(() => { reviewedTodayRef.current = reviewedToday }, [reviewedToday])
   const fileInputRef = useRef<HTMLInputElement>(null)
   const maxReviews = getMaxReviews()
   const maxNewCards = getMaxNewCards()
@@ -130,15 +132,17 @@ export default function Review() {
 
   async function loadDueItems(lang: string | null) {
     try {
-      const remaining = Math.max(0, maxNewCards - newCardsTodayRef.current)
+      const newRemaining = Math.max(0, maxNewCards - newCardsTodayRef.current)
+      const reviewsRemaining = Math.max(0, maxReviews - reviewedTodayRef.current)
       const d = new Date()
       d.setHours(23, 59, 59, 999)
       const items = await invoke<ReviewItem[]>('db_get_due_review_items', {
         language: lang,
-        limit: maxReviews,
-        newCardsRemaining: remaining,
+        limit: reviewsRemaining + newRemaining,
+        newCardsRemaining: newRemaining,
         maxNextReview: Math.floor(d.getTime() / 1000),
         maxNewCardsPerDay: maxNewCards,
+        maxReviewsRemaining: reviewsRemaining,
       })
       // don't remove this line
       // console.log(items)
@@ -298,10 +302,15 @@ export default function Review() {
         newQueue = [...before, ...after, updatedItem]
       }
 
-      // If new card limit reached, remove remaining new cards from the queue
       const newSeenAfterGrade = cardState === 'new' ? newCardsToday + 1 : newCardsToday
+      const reviewedAfterGrade = result.graduated ? reviewedToday + 1 : reviewedToday
+
+      // Each limit is independent — only purge that card type when its limit is hit
       if (newSeenAfterGrade >= maxNewCards) {
         newQueue = newQueue.filter(item => item.state !== 'new' && item.state !== null && item.state !== '')
+      }
+      if (reviewedAfterGrade >= maxReviews) {
+        newQueue = newQueue.filter(item => item.state === 'new' || item.state === null || item.state === '')
       }
 
       return newQueue

@@ -2330,6 +2330,7 @@ fn db_get_due_review_items(
     new_cards_remaining: Option<i64>,
     max_next_review: Option<i64>,
     max_new_cards_per_day: Option<i64>,
+    max_reviews_remaining: Option<i64>,
 ) -> Result<Vec<ReviewItem>, String> {
     let conn = open_db(&app)?;
     let today = chrono::Local::now().date_naive().to_string();
@@ -2341,9 +2342,9 @@ fn db_get_due_review_items(
         params![today, language.clone().unwrap_or_default()],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
     );
-    let (_backend_reviews_done, backend_new_seen) = limits_row.unwrap_or((0, 0));
+    let (backend_reviews_done, backend_new_seen) = limits_row.unwrap_or((0, 0));
 
-    // Compute authoritative remaining: frontend hint vs. what study_limits says
+    // Compute authoritative remaining for new cards: take the stricter of frontend hint vs. DB
     let authoritative_new_remaining = match max_new_cards_per_day {
         Some(max_new) => {
             let backend_remaining = i64::max(0, max_new - backend_new_seen);
@@ -2354,6 +2355,11 @@ fn db_get_due_review_items(
         }
         None => new_cards_remaining,
     };
+
+    // Compute authoritative remaining for non-new (review/learning) cards
+    let authoritative_review_remaining: Option<i64> = max_reviews_remaining
+        .map(|frontend_rem| i64::max(0, frontend_rem - backend_reviews_done));
+
     // Use provided cutoff, or default to end of today (23:59:59 local)
     let end_of_day = match max_next_review {
         Some(ts) => ts,
@@ -2395,6 +2401,24 @@ fn db_get_due_review_items(
 
     for r in rows {
         items.push(r.map_err(|e| e.to_string())?);
+    }
+
+    // Apply non-new (review/learning) card cap
+    if let Some(review_cap) = authoritative_review_remaining {
+        if review_cap <= 0 {
+            items.retain(|item| item.state == "new" || item.state.is_empty());
+        } else {
+            let mut review_count = 0i64;
+            items.retain(|item| {
+                if item.state != "new" && !item.state.is_empty() {
+                    if review_count >= review_cap {
+                        return false;
+                    }
+                    review_count += 1;
+                }
+                true
+            });
+        }
     }
 
     // Apply new card cap using authoritative value from study_limits
