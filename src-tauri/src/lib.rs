@@ -939,7 +939,6 @@ fn compute_difficulty_bg_class(ef: f64, _r: i64) -> &'static str {
 
 /// Compute a Tailwind background class from FSRS difficulty.
 fn compute_difficulty_bg_class_from_fsrs(n: f32) -> String {
-//     let n = fsrs_difficulty_normalized(difficulty);
     if n < 3.5 { "bg-emerald-500".to_string() }
     else if n < 4.0 { "bg-green-500".to_string() }
     else if n < 5.0 { "bg-lime-500".to_string() }
@@ -951,14 +950,13 @@ fn compute_difficulty_bg_class_from_fsrs(n: f32) -> String {
 
 /// Compute a difficulty tag from FSRS difficulty.
 fn compute_tag_from_fsrs_difficulty(n: f32) -> &'static str {
-//     let n = fsrs_difficulty_normalized(difficulty);
-    if n < 3.5 { "Super Easy" }
-    else if n < 4.0 { "Very Easy" }
-    else if n < 5.0 { "Easy" }
+    if n < 3.5 { "Trivial" }
+    else if n < 4.0 { "Easy" }
+    else if n < 5.0 { "Mild" }
     else if n < 8.0 { "Medium" }
     else if n < 9.0 { "Hard" }
-    else if n < 9.8 { "Very Hard" }
-    else { "Super Hard" }
+    else if n < 9.8 { "Tough" }
+    else { "Brutal" }
 }
 
 /// Compute a human-readable state label.
