@@ -38,22 +38,6 @@ function getMaxNewCards(): number {
 type GradeOption = { grade: Grade; label: string; nextLabel: string; color: string }
 
 function SessionCompleteEffect({ sessionCompleted }: { sessionCompleted: number }) {
-  const recorded = useRef(false)
-
-  useEffect(() => {
-    if (sessionCompleted > 0 && !recorded.current) {
-      recorded.current = true
-      invoke('db_record_activity', { activityType: 'review' }).catch(() => {})
-    }
-  }, [sessionCompleted])
-
-  // Reset when session restarts (sessionCompleted goes back to 0)
-  useEffect(() => {
-    if (sessionCompleted === 0) {
-      recorded.current = false
-    }
-  }, [sessionCompleted])
-
   return null
 }
 
@@ -255,6 +239,8 @@ export default function Review() {
       isGrading.current = false
       return
     }
+
+    invoke('db_record_activity', { activityType: 'review' }).catch(() => {})
 
     // Only count as reviewed if card graduated (backend determines this)
     if (result.graduated) {
