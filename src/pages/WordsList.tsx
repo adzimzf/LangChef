@@ -248,7 +248,8 @@ export default function WordsList() {
             <div className="text-2xl font-semibold mb-1">{selectedItem.content}</div>
             {selectedItem.tags && (
               <span
-                className={`inline-block text-xs px-2 py-0.5 rounded-full text-white ${selectedItem.difficulty_bg_class} mt-1`}
+                className="inline-block text-xs px-2 py-0.5 rounded-full text-white mt-1"
+                style={{ backgroundColor: selectedItem.difficulty_color }}
               >
                 {selectedItem.tags}
               </span>
@@ -557,7 +558,8 @@ export default function WordsList() {
                     <div className="flex items-center gap-2 mt-0.5">
                       {item.tags && (
                         <span
-                          className={`text-[10px] px-1.5 py-0.5 rounded-full text-white ${item.difficulty_bg_class}`}
+                          className="text-[10px] px-1.5 py-0.5 rounded-full text-white"
+                          style={{ backgroundColor: item.difficulty_color }}
                         >
                           {item.tags}
                         </span>
