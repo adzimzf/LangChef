@@ -689,7 +689,6 @@ struct ReviewItem {
     fsrs_stability: Option<f32>,
     fsrs_difficulty: Option<f32>,
     // Display-computed fields (set by helper functions on query)
-    difficulty_color: String,
     difficulty_bg_class: String,
     difficulty_label: String,
     state_label: String,
@@ -706,18 +705,12 @@ fn row_to_review_item(row: &rusqlite::Row) -> rusqlite::Result<ReviewItem> {
     let fsrs_difficulty: Option<f32> = row.get(13).unwrap_or(None);
 
     // Use FSRS difficulty for display if available, else fall back to EF-based
-    let (difficulty_color, difficulty_bg_class) = match fsrs_difficulty {
-        Some(d) => (
-            compute_difficulty_color_from_fsrs(d),
-            compute_difficulty_bg_class_from_fsrs(d),
-        ),
-        None => (
-            compute_difficulty_color(ef, r),
-            compute_difficulty_bg_class(ef, r).to_string(),
-        ),
+    let difficulty_bg_class = match fsrs_difficulty {
+        Some(d) => compute_difficulty_bg_class_from_fsrs(d),
+        None => compute_difficulty_bg_class(ef, r).to_string(),
     };
     let difficulty_label: String = match fsrs_difficulty {
-        Some(d) => if d < 3.0 { "Easy" } else if d < 7.0 { "Medium" } else { "Hard" }.to_string(),
+        Some(d) => compute_tag_from_fsrs_difficulty(d).to_string(),
         None => if ef >= 2.7 && r >= 5 { "Easy" } else if ef < 2.0 { "Hard" } else { "Medium" }.to_string(),
     };
 
@@ -736,7 +729,6 @@ fn row_to_review_item(row: &rusqlite::Row) -> rusqlite::Result<ReviewItem> {
         mnemonic: row.get(11)?,
         fsrs_stability,
         fsrs_difficulty,
-        difficulty_color,
         difficulty_bg_class,
         difficulty_label,
         state_label: compute_state_label(&state).to_string(),
@@ -933,12 +925,6 @@ fn compute_tag_from_ef_r(ef: f64, r: i64) -> &'static str {
     }
 }
 
-/// Compute a CSS HSL color string for difficulty display.
-fn compute_difficulty_color(ef: f64, _r: i64) -> String {
-    let hue = ef_normalized(ef) * 120.0;
-    format!("hsl({:.0}, 70%, 50%)", hue)
-}
-
 /// Compute a Tailwind background class for difficulty display.
 fn compute_difficulty_bg_class(ef: f64, _r: i64) -> &'static str {
     let n = ef_normalized(ef);
@@ -951,38 +937,28 @@ fn compute_difficulty_bg_class(ef: f64, _r: i64) -> &'static str {
     else { "bg-emerald-500" }
 }
 
-/// Normalize FSRS difficulty (typically 1–10) to a 0..1 scale for color display.
-fn fsrs_difficulty_normalized(difficulty: f32) -> f64 {
-    ((difficulty.clamp(1.0, 10.0) - 1.0) / 9.0) as f64
-}
-
-/// Compute a CSS HSL color string from FSRS difficulty.
-fn compute_difficulty_color_from_fsrs(difficulty: f32) -> String {
-    let hue = (1.0 - fsrs_difficulty_normalized(difficulty)) * 120.0;
-    format!("hsl({:.0}, 70%, 50%)", hue)
-}
-
 /// Compute a Tailwind background class from FSRS difficulty.
-fn compute_difficulty_bg_class_from_fsrs(difficulty: f32) -> String {
-    let n = fsrs_difficulty_normalized(difficulty);
-    if n < 0.15 { "bg-emerald-500".to_string() }
-    else if n < 0.30 { "bg-green-500".to_string() }
-    else if n < 0.40 { "bg-lime-500".to_string() }
-    else if n < 0.50 { "bg-yellow-500".to_string() }
-    else if n < 0.65 { "bg-amber-500".to_string() }
-    else if n < 0.80 { "bg-orange-500".to_string() }
+fn compute_difficulty_bg_class_from_fsrs(n: f32) -> String {
+//     let n = fsrs_difficulty_normalized(difficulty);
+    if n < 3.5 { "bg-emerald-500".to_string() }
+    else if n < 4.0 { "bg-green-500".to_string() }
+    else if n < 5.0 { "bg-lime-500".to_string() }
+    else if n < 8.0 { "bg-yellow-500".to_string() }
+    else if n < 9.0 { "bg-amber-500".to_string() }
+    else if n < 9.8 { "bg-orange-500".to_string() }
     else { "bg-red-500".to_string() }
 }
 
 /// Compute a difficulty tag from FSRS difficulty.
-fn compute_tag_from_fsrs_difficulty(difficulty: f32) -> &'static str {
-    if difficulty < 3.0 {
-        "easy"
-    } else if difficulty < 7.0 {
-        "medium"
-    } else {
-        "hard"
-    }
+fn compute_tag_from_fsrs_difficulty(n: f32) -> &'static str {
+//     let n = fsrs_difficulty_normalized(difficulty);
+    if n < 3.5 { "Super Easy" }
+    else if n < 4.0 { "Very Easy" }
+    else if n < 5.0 { "Easy" }
+    else if n < 8.0 { "Medium" }
+    else if n < 9.0 { "Hard" }
+    else if n < 9.8 { "Very Hard" }
+    else { "Super Hard" }
 }
 
 /// Compute a human-readable state label.
@@ -2544,7 +2520,7 @@ struct WordInfo {
     ef: f64,
     r: i64,
     is_new: bool,
-    difficulty_color: String,
+    difficulty_bg_class: String,
 }
 
 #[derive(Serialize)]
@@ -2605,7 +2581,7 @@ fn db_get_difficult_and_known_words(
                 ef: item.EF,
                 r: item.R,
                 is_new,
-                difficulty_color: item.difficulty_color.clone(),
+                difficulty_bg_class: item.difficulty_bg_class.clone(),
             });
         } else {
             known.push(item.content.to_lowercase());

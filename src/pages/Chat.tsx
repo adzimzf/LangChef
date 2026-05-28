@@ -184,7 +184,7 @@ function computeVisiblePath(
   return { visibleMessages, branchPoints }
 }
 
-type WordColorInfo = { EF: number; R: number; isNew: boolean; difficulty_color: string }
+type WordColorInfo = { EF: number; R: number; isNew: boolean; difficulty_bg_class: string }
 
 export default function Chat() {
   const navigate = useNavigate()
@@ -408,7 +408,7 @@ export default function Chat() {
             EF: w.ef,
             R: w.r,
             isNew: w.is_new,
-            difficulty_color: w.difficulty_color,
+            difficulty_bg_class: w.difficulty_bg_class,
           })
         })
         setDifficult(hardMap)
@@ -463,7 +463,7 @@ export default function Chat() {
   async function markWordDifficult(word: string) {
     const w = word.toLowerCase()
     const next = new Map(difficult)
-    next.set(w, { EF: 2.5, R: 0, isNew: true, difficulty_color: 'hsl(0, 70%, 50%)' })
+    next.set(w, { EF: 2.5, R: 0, isNew: true, difficulty_bg_class: 'bg-red-500' })
     setDifficult(next)
     try {
       await invoke('db_upsert_review_item', { content: w, language: lang || null })
@@ -519,7 +519,7 @@ export default function Chat() {
             EF: item.EF,
             R: item.R,
             isNew: item.state === 'new' || !item.state,
-            difficulty_color: item.difficulty_color,
+            difficulty_bg_class: item.difficulty_bg_class,
           }
           wordColorCache.current.set(item.content.toLowerCase(), info)
           cached.set(item.content.toLowerCase(), info)
@@ -1055,10 +1055,10 @@ export default function Chat() {
             onClick={() => markWordDifficult(surface)}
             className={`cursor-pointer rounded px-0.5 transition-colors ${
               isHard
-                ? ''
+                ? diffInfo.difficulty_bg_class + ' text-white'
                 : 'hover:bg-blue-50 active:bg-yellow-50'
             }`}
-            style={isHard ? { backgroundColor: diffInfo.difficulty_color, color: '#fff' } : undefined}
+            style={isHard ? { color: '#fff' } : undefined}
             title={isHard ? 'Marked difficult' : 'Tap to mark difficult'}
           >
             {renderFurigana(slice, showFurigana)}
@@ -1095,10 +1095,10 @@ export default function Chat() {
             onClick={() => markWordDifficult(part)}
             className={`cursor-pointer rounded px-0.5 transition-colors ${
               isHard
-                ? ''
+                ? diffInfo.difficulty_bg_class + ' text-white'
                 : 'hover:bg-blue-50 active:bg-yellow-50'
             }`}
-            style={isHard ? { backgroundColor: diffInfo.difficulty_color, color: '#fff' } : undefined}
+            style={isHard ? { color: '#fff' } : undefined}
             title={isHard ? 'Marked difficult' : 'Tap to mark difficult'}
           >
             {renderFurigana(slice, showFurigana)}
@@ -1121,10 +1121,10 @@ export default function Chat() {
           onClick={() => markWordDifficult(part)}
           className={`cursor-pointer rounded px-0.5 transition-colors ${
             isHard
-              ? ''
+              ? diffInfo.difficulty_bg_class + ' text-white'
               : 'hover:bg-blue-50 active:bg-yellow-50'
           }`}
-          style={isHard ? { backgroundColor: diffInfo.difficulty_color, color: '#fff' } : undefined}
+          style={isHard ? { color: '#fff' } : undefined}
           title={isHard ? 'Marked difficult' : 'Tap to mark difficult'}
         >
           {part}

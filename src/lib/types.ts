@@ -15,7 +15,6 @@ export type ReviewItem = {
   fsrs_stability?: number | null
   fsrs_difficulty?: number | null
   // Pre-computed display fields from backend
-  difficulty_color: string
   difficulty_bg_class: string
   difficulty_label: string
   state_label: string

@@ -775,15 +775,13 @@ export default function Review() {
                   {visibleCard.state_label}
                 </span>
                 <div
-                  className="w-16 h-2 rounded-full"
-                  style={{ backgroundColor: visibleCard.difficulty_color }}
+                  className={`w-16 h-2 rounded-full ${visibleCard.difficulty_bg_class}`}
                 />
               </div>
 
               <div className="text-2xl font-semibold mb-1">{visibleCard?.content || ''}</div>
               {visibleCard.difficulty_label && (
-                <span className="inline-block text-xs px-2 py-0.5 rounded-full text-white mt-1"
-                  style={{ backgroundColor: visibleCard.difficulty_color }}>
+                <span className={`inline-block text-xs px-2 py-0.5 rounded-full text-white mt-1 ${visibleCard.difficulty_bg_class}`}>
                   {visibleCard.difficulty_label}
                 </span>
               )}

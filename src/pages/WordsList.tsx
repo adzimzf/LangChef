@@ -240,16 +240,14 @@ export default function WordsList() {
                 {selectedItem.state_label}
               </span>
               <div
-                className="w-16 h-2 rounded-full"
-                style={{ backgroundColor: selectedItem.difficulty_color }}
+                className={`w-16 h-2 rounded-full ${selectedItem.difficulty_bg_class}`}
               />
             </div>
 
             <div className="text-2xl font-semibold mb-1">{selectedItem.content}</div>
             {selectedItem.difficulty_label && (
               <span
-                className="inline-block text-xs px-2 py-0.5 rounded-full text-white mt-1"
-                style={{ backgroundColor: selectedItem.difficulty_color }}
+                className={`inline-block text-xs px-2 py-0.5 rounded-full text-white mt-1 ${selectedItem.difficulty_bg_class}`}
               >
                 {selectedItem.difficulty_label}
               </span>
@@ -530,8 +528,7 @@ export default function WordsList() {
                 >
                   {/* Difficulty indicator */}
                   <div
-                    className="w-1 h-8 rounded-full shrink-0"
-                    style={{ backgroundColor: item.difficulty_color }}
+                    className={`w-1 h-8 rounded-full shrink-0 ${item.difficulty_bg_class}`}
                   />
 
                   {/* Word content */}
@@ -558,8 +555,7 @@ export default function WordsList() {
                     <div className="flex items-center gap-2 mt-0.5">
                       {item.difficulty_label && (
                         <span
-                          className="text-[10px] px-1.5 py-0.5 rounded-full text-white"
-                          style={{ backgroundColor: item.difficulty_color }}
+                          className={`text-[10px] px-1.5 py-0.5 rounded-full text-white ${item.difficulty_bg_class}`}
                         >
                           {item.difficulty_label}
                         </span>
