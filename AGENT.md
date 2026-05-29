@@ -34,6 +34,30 @@ All schema changes go in `open_db()` in `src-tauri/src/lib.rs`. Use `ALTER TABLE
 
 Adding a grammar level: create `grammar/<lang>/<LEVEL>.md` and matching `.csv`, then add an `include_str!()` entry in `lib.rs` and register it in `seed_bundled_grammar_if_empty()`. Requires a Rust rebuild.
 
+## Code Reuse — Mandatory
+
+Before writing any new function or component, search for an existing one that covers the same concern.
+
+- **Reuse first**: if an existing function or component almost fits, extend it to support the new case — don't duplicate it.
+- **Refactor to generalize**: if the existing code is too rigid, make it accept a param or callback rather than forking it. Prefer one flexible function over two nearly-identical ones.
+- **New code only as a last resort**: create something new only when the existing code is fundamentally incompatible (different domain, incompatible contract).
+
+Apply this to both Rust functions in `lib.rs` and React components in `src/`.
+
+## Frontend vs Backend Responsibility
+
+Frontend (React/TypeScript) is for **rendering only**:
+- Transform Tauri response data into display values (formatting, labels, colors).
+- Local UI state (loading flags, selected tab, open modal).
+- Calling `invoke()` and passing results to components.
+
+Backend (Rust) owns all **logic**:
+- Filtering, sorting, aggregating, scoring, pagination.
+- Any computation that touches the DB or SRS state.
+- Business rules (difficulty thresholds, retention targets, JLPT constraints).
+
+If you find yourself writing a `filter()`, `reduce()`, or conditional branch on data in a React component, stop and move it to a Rust Tauri command instead.
+
 ## What to Avoid
 
 - Don't add global state, React context, or a state management library — architecture is intentionally local state + Tauri IPC.
