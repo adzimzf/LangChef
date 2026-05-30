@@ -6,7 +6,6 @@ import {
   BookOutlined,
   BarChartOutlined,
   SettingOutlined,
-  ReadOutlined,
   FileTextOutlined,
   LoadingOutlined,
   CheckCircleOutlined,
@@ -28,7 +27,6 @@ const NAV_ITEMS = [
   { key: 'home', label: 'Home', icon: HomeOutlined, path: '/' },
   { key: 'chats', label: 'Chats', icon: MessageOutlined, path: '/chats' },
   { key: 'reading', label: 'Read', icon: FileTextOutlined, path: '/reading' },
-  { key: 'grammar', label: 'Grammar', icon: ReadOutlined, path: '/grammar' },
   { key: 'review', label: 'Review', icon: BookOutlined, path: '/review' },
   { key: 'settings', label: 'Settings', icon: SettingOutlined, path: '/settings' },
 ]
@@ -71,7 +69,6 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     if (location.pathname.startsWith('/chats')) return 'chats'
     if (location.pathname.startsWith('/chat')) return 'chats'
     if (location.pathname.startsWith('/reading')) return 'reading'
-    if (location.pathname.startsWith('/grammar')) return 'grammar'
     if (location.pathname.startsWith('/review')) return 'review'
     if (location.pathname.startsWith('/settings')) return 'settings'
     if (location.pathname.startsWith('/stats')) return 'home'
