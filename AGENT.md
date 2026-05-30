@@ -8,9 +8,11 @@ No test suite. Use these to verify changes before finishing:
 
 ```bash
 npx tsc --noEmit                    # Frontend type check
-cd src-tauri && cargo check         # Rust compile check (no binary)
-cd src-tauri && cargo clippy        # Rust lint
+cd src-tauri && GOOGLE_CLIENT_ID=test GOOGLE_CLIENT_SECRET=test cargo check    # Rust compile check (no binary)
+cd src-tauri && GOOGLE_CLIENT_ID=test GOOGLE_CLIENT_SECRET=test cargo clippy   # Rust lint
 ```
+
+`GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` must be set at compile time (they use `env!()` in `google_auth/mod.rs`). Use `test` as a placeholder for local verification — real values are only needed for Google Auth functionality.
 
 Rust builds require `lindera/` as a sibling directory to the repo root — if `cargo check` fails with a path error, the Lindera dep is missing.
 
