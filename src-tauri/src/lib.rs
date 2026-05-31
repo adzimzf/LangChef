@@ -3,6 +3,7 @@ use tauri::{Emitter, Manager};
 
 mod google_auth;
 mod google_drive;
+mod background_sync;
 mod furigana;
 mod db;
 mod chat;
@@ -108,7 +109,11 @@ fn get_lindera_dict_status(app: tauri::AppHandle) -> bool {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     #[allow(unused_mut)]
-    let mut app = tauri::Builder::default();
+    let mut app = tauri::Builder::default()
+        .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_background_service::init_with_service(
+            || background_sync::AutoSyncService::new(),
+        ));
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {

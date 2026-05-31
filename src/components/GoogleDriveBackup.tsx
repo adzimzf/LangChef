@@ -1,6 +1,12 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
+  startService,
+  stopService,
+  isServiceRunning,
+  configureRecovery,
+} from 'tauri-plugin-background-service'
+import {
   CloudUploadOutlined,
   CloudDownloadOutlined,
   GoogleOutlined,
@@ -113,6 +119,20 @@ export default function GoogleDriveBackup() {
     try {
       const config = await invoke<SyncConfig>('google_get_auto_sync')
       setSyncConfig(config)
+      if (config.enabled) {
+        try {
+          const running = await isServiceRunning()
+          if (!running) {
+            await startService({ serviceLabel: 'LangChef auto-backup' })
+          }
+          await configureRecovery({
+            enabled: true,
+            config: { serviceLabel: 'LangChef auto-backup' },
+          })
+        } catch (svcErr) {
+          showToast(`Background service unavailable: ${svcErr}`, 'error')
+        }
+      }
     } catch (e) {
       showToast(`Failed to load sync settings: ${e}`, 'error')
     }
@@ -146,6 +166,10 @@ export default function GoogleDriveBackup() {
       setAuthStatus({ signed_in: false, email: undefined })
       setBackupStatus(null)
       setSyncConfig((prev) => ({ ...prev, enabled: false }))
+      try {
+        if (await isServiceRunning()) await stopService()
+        await configureRecovery({ enabled: false })
+      } catch {}
       showToast('Signed out successfully', 'success')
     } catch (e) {
       showToast(`Sign-out failed: ${e}`, 'error')
@@ -208,6 +232,26 @@ export default function GoogleDriveBackup() {
         wifiOnly: syncConfig.wifi_only,
       })
       setSyncConfig(config)
+      try {
+        if (enabled) {
+          if (!(await isServiceRunning())) {
+            await startService({ serviceLabel: 'LangChef auto-backup' })
+          }
+          await configureRecovery({
+            enabled: true,
+            config: { serviceLabel: 'LangChef auto-backup' },
+          })
+        } else {
+          if (await isServiceRunning()) await stopService()
+          await configureRecovery({ enabled: false })
+        }
+      } catch (svcErr) {
+        const msg = `Background service error: ${svcErr}`
+        setSyncError(msg)
+        showToast(msg, 'error')
+        setSyncToggled(false)
+        return
+      }
       showToast(enabled ? 'Auto-sync enabled' : 'Auto-sync disabled', 'success')
     } catch (e) {
       const msg = `Failed to save sync settings: ${e}`

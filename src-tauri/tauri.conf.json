@@ -24,6 +24,12 @@
       "csp": null
     }
   },
+  "plugins": {
+    "background-service": {
+      "androidForegroundServiceTypes": ["dataSync"],
+      "androidValidateForegroundServiceType": true
+    }
+  },
   "bundle": {
     "active": true,
     "icon": [
