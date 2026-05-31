@@ -240,6 +240,7 @@ export default function Chat() {
   // Only stores user overrides; defaults come from isActivePath in the DB.
   const [branchSelection, setBranchSelection] = useState<Map<number | null, number>>(new Map())
   const [editingMessageId, setEditingMessageId] = useState<number | null>(null)
+  const [selectedTopic, setSelectedTopic] = useState<string | null>(null)
 
   const langInfo = LANGUAGES[lang]
 
@@ -339,11 +340,14 @@ export default function Chat() {
     load()
   }, [lang, jlptLevel])
 
-  // Load session messages
+  // Load session messages + topic
   useEffect(() => {
     async function load() {
       if (!sessionId) return
       try {
+        invoke<string | null>('db_get_session_topic', { sessionId })
+          .then(t => setSelectedTopic(t))
+          .catch(() => {})
         const res = await invoke<{ id: number, role: string, content: string, created_at: number, parent_message_id: number | null, is_active_path: number }[]>('db_list_session_messages', { sessionId })
         const msgs: Msg[] = res.map(m => ({
           id: m.id,
@@ -682,7 +686,7 @@ export default function Chat() {
     return [...selectedDifficult, ...selectedKnown]
   }
 
-  function buildSSRSystemPrompt(targetWords: string[]): string {
+  function buildSSRSystemPrompt(targetWords: string[], topic?: string | null): string {
     const langName = langInfo?.label || 'the target language'
 
     let prompt = `You are a language learning conversation partner. The target language is ${langName}. Reply in ${langName} only. `
@@ -718,6 +722,16 @@ export default function Chat() {
         prompt += `- KNOWN words (use at least half of these to maintain retention): ${selectedKn.join(', ')}\n`
       }
       prompt += `\nWeave these naturally into your sentences. Do NOT list them explicitly. Each difficult word MUST appear at least once in your response.`
+    }
+
+    if (topic) {
+      const topicLabel = topic === 'Random Topic' ? 'a random interesting topic of your choice' : `"${topic}"`
+      prompt += `\n\nCONVERSATION TOPIC: The topic for this session is ${topicLabel}. Keep the conversation centered around this topic.`
+    }
+
+    if (topic) {
+      const topicLabel = topic === 'Random Topic' ? 'a random interesting topic of your choice' : `"${topic}"`
+      prompt += `\n\nCONVERSATION TOPIC: The topic for this session is ${topicLabel}. Keep the conversation centered around this topic.`
     }
 
     prompt += `\n\nIf the user seems stuck, offer a hint or rephrase. Encourage them to keep trying in ${langName}.`
@@ -799,7 +813,7 @@ export default function Chat() {
       if (sessionId) setLLMPending(sessionId)
       try {
         // Build SSR system prompt using the same target words
-        const systemPrompt = buildSSRSystemPrompt(targetWords)
+        const systemPrompt = buildSSRSystemPrompt(targetWords, selectedTopic)
 
         // Send visible conversation history with system prompt
         const { visibleMessages: contextVisible } = computeVisiblePath(nextMessages, branchSelection)
@@ -868,6 +882,71 @@ export default function Chat() {
     }
   }
 
+  async function startTopicConversation(topic: string) {
+    setSelectedTopic(topic)
+    if (!apiHost || !apiKey) return
+
+    let sid = sessionId
+    if (!sid) {
+      try {
+        sid = await invoke<string>('db_new_session', { title: topic, language: lang || null, level: lang === 'ja' ? jlptLevel : null })
+        setSessionId(sid)
+      } catch { return }
+    }
+    if (sid) invoke('db_set_session_topic', { sessionId: sid, topic }).catch(() => {})
+
+    const targetWords = buildTargetWordsList()
+    const systemPrompt = buildSSRSystemPrompt(targetWords, topic)
+
+    setLoading(true)
+    if (sid) setLLMPending(sid)
+    await invoke('db_record_activity', { activityType: 'chat' }).catch(() => {})
+
+    try {
+      const topicInstruction = topic === 'Random Topic'
+        ? 'Begin the conversation with a natural opening about an interesting topic of your choice.'
+        : `Begin the conversation with a natural opening related to "${topic}".`
+
+      const llmMessages = [
+        { role: 'system' as const, content: systemPrompt },
+        { role: 'user' as const, content: topicInstruction },
+      ]
+
+      const res = await invoke<string>('llm_chat', { apiHost, apiKey, model, messages: llmMessages })
+      const annotatedRes = lang === 'ja'
+        ? await invoke<string>('add_furigana', { text: res, language: lang })
+        : res
+
+      const assistantId = await invoke<number>('db_add_message_in_session', {
+        sessionId: sid, role: 'assistant', content: annotatedRes, parentMessageId: null
+      }).catch(() => -1)
+
+      if (mounted.current) {
+        const assistant: Msg = { id: null, role: 'assistant', content: annotatedRes, parentMessageId: null, isActivePath: true }
+        setMessages(prev => [...prev, assistant])
+        if (assistantId >= 0) {
+          setMessages(prev => prev.map((m, idx) => idx === prev.length - 1 ? { ...m, id: assistantId } : m))
+        }
+      }
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e)
+      const errorContent = `[Error] ${errMsg}`
+      const errorId = await invoke<number>('db_add_message_in_session', {
+        sessionId: sid, role: 'assistant', content: errorContent, parentMessageId: null
+      }).catch(() => -1)
+      if (mounted.current) {
+        const errorMsg: Msg = { id: null, role: 'assistant', content: errorContent, parentMessageId: null, isActivePath: true }
+        setMessages(prev => [...prev, errorMsg])
+        if (errorId >= 0) {
+          setMessages(prev => prev.map((m, idx) => idx === prev.length - 1 ? { ...m, id: errorId } : m))
+        }
+      }
+    } finally {
+      if (sid) clearLLMPending(sid)
+      if (mounted.current) setLoading(false)
+    }
+  }
+
   async function handleEditSave(m: Msg) {
     if (!m.id || !input.trim()) return
     const newContent = input.trim()
@@ -924,7 +1003,7 @@ export default function Chat() {
     if (sessionId) setLLMPending(sessionId)
 
     const targetWords = buildTargetWordsList()
-    const systemPrompt = buildSSRSystemPrompt(targetWords)
+    const systemPrompt = buildSSRSystemPrompt(targetWords, selectedTopic)
 
     // Build conversation history: visible path including the edited message
     const tempMessages = [...messages.filter(msg => !toDeactivate.has(msg.id ?? -1)), editedMsg]
@@ -1258,6 +1337,13 @@ export default function Chat() {
         </div>
       )}
 
+      {/* Topic card */}
+      {selectedTopic && (
+        <div className="shrink-0 border-b border-amber-100 bg-gradient-to-r from-amber-50 via-orange-50 to-amber-50 px-3 py-1.5 text-center">
+          <p className="text-xs font-medium text-amber-700 tracking-wide">{selectedTopic}</p>
+        </div>
+      )}
+
       {/* Grammar info modal */}
       {grammarInfoItem && (
         <div
@@ -1322,7 +1408,7 @@ export default function Chat() {
               {SUGGESTIONS.map((s, i) => (
                 <button
                   key={s}
-                  onClick={() => send(`Talk about ${s.toLowerCase()}.`)}
+                  onClick={() => startTopicConversation(s)}
                   className="shrink-0 whitespace-nowrap px-4 py-2 rounded-full text-sm bg-white border border-gray-200 text-gray-600 shadow-sm hover:bg-blue-50 hover:border-blue-200 hover:text-blue-600 active:bg-blue-100 transition-all duration-200 animate-fade-in-up"
                   style={{ animationDelay: `${i * 80}ms` }}
                 >

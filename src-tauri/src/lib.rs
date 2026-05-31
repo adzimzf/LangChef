@@ -166,6 +166,8 @@ pub fn run() {
             sessions::db_get_bot_response_for_user,
             sessions::db_rename_session,
             sessions::db_delete_session,
+            sessions::db_set_session_topic,
+            sessions::db_get_session_topic,
             // SRS / Review
             srs::db_upsert_review_item,
             srs::db_get_review_items,

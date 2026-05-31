@@ -221,6 +221,29 @@ pub fn db_rename_session(app: tauri::AppHandle, session_id: String, title: Strin
 }
 
 #[tauri::command]
+pub fn db_set_session_topic(app: tauri::AppHandle, session_id: String, topic: Option<String>) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    conn.execute("UPDATE chat_sessions SET topic=?1 WHERE id=?2", params![topic, session_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[tauri::command]
+pub fn db_get_session_topic(app: tauri::AppHandle, session_id: String) -> Result<Option<String>, String> {
+    let conn = open_db(&app)?;
+    let result = conn.query_row(
+        "SELECT topic FROM chat_sessions WHERE id=?1",
+        params![session_id],
+        |row| row.get(0),
+    );
+    match result {
+        Ok(topic) => Ok(topic),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+#[tauri::command]
 pub fn db_delete_session(app: tauri::AppHandle, session_id: String) -> Result<(), String> {
     let conn = open_db(&app)?;
     conn.execute("DELETE FROM messages WHERE session_id=?1", params![session_id])

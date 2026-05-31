@@ -105,6 +105,7 @@ pub fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN language TEXT", []);
     let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN selected_grammar TEXT", []);
     let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN level TEXT", []);
+    let _ = conn.execute("ALTER TABLE chat_sessions ADD COLUMN topic TEXT", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN language TEXT", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN detail TEXT", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN state TEXT DEFAULT 'new'", []);
