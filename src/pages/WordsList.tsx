@@ -1,5 +1,5 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useNavigate, useSearchParams } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
 import {
   ArrowLeftOutlined,
@@ -33,6 +33,7 @@ type SortOrder = 'hardest' | 'easiest' | 'next_review'
 
 export default function WordsList() {
   const navigate = useNavigate()
+  const [searchParams, setSearchParams] = useSearchParams()
 
   const [items, setItems] = useState<ReviewItem[]>([])
   const [total, setTotal] = useState(0)
@@ -53,11 +54,9 @@ export default function WordsList() {
   // Pagination
   const [offset, setOffset] = useState(0)
 
-  // Detail view
-  const [selectedId, setSelectedId] = useState<string | null>(null)
-
-  // Edit state
-  const [editingId, setEditingId] = useState<string | null>(null)
+  // Detail / edit view — URL-driven so Android back gesture pops them
+  const selectedId = searchParams.get('wid')
+  const editingId = searchParams.get('edit') === '1' ? selectedId : null
 
   // Delete confirmation
   const [deletingId, setDeletingId] = useState<string | null>(null)
@@ -115,7 +114,7 @@ export default function WordsList() {
     try {
       await invoke('db_delete_review_item', { id })
       setItems((prev) => prev.filter((item) => item.id !== id))
-      if (selectedId === id) setSelectedId(null)
+      if (selectedId === id) navigate(-1)
       setDeletingId(null)
     } catch (e) {
       console.error('Failed to delete item:', e)
@@ -184,14 +183,14 @@ export default function WordsList() {
       <div className="flex flex-col h-full -m-4">
         <div className="shrink-0 sticky top-0 z-10 bg-gray-50 flex items-center gap-3 px-4 pt-4 pb-2">
           <button
-            onClick={() => { setSelectedId(null); loadItems(false) }}
+            onClick={() => navigate(-1)}
             className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
           >
             <ArrowLeftOutlined />
           </button>
           <h2 className="text-lg font-semibold flex-1">Word Detail</h2>
           <button
-            onClick={() => setEditingId(selectedItem.id)}
+            onClick={() => setSearchParams({ wid: selectedItem.id, edit: '1' })}
             className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-blue-50 text-blue-600 text-sm font-medium hover:bg-blue-100 transition-colors"
           >
             <EditOutlined /> Edit
@@ -295,14 +294,16 @@ export default function WordsList() {
   if (editingId) {
     const item = items.find((i) => i.id === editingId)
     if (!item) {
-      setEditingId(null)
+      // Items not loaded yet or stale URL — wait, don't pop unintentionally
+      if (loading) return null
+      navigate(-1)
       return null
     }
     return (
       <EditWordForm
         item={item}
         title="Edit Word"
-        onCancel={() => setEditingId(null)}
+        onCancel={() => navigate(-1)}
         onSave={async (data) => {
           if (data.content) {
             await invoke('db_update_review_item', {
@@ -312,8 +313,7 @@ export default function WordsList() {
           await invoke('db_update_review_detail', { id: editingId, detail: data.detail })
           await invoke('db_update_mnemonic', { id: editingId, mnemonic: data.mnemonic })
           await loadItems(false)
-          setSelectedId(editingId)
-          setEditingId(null)
+          setSearchParams({ wid: editingId }, { replace: true })
         }}
       />
     )
@@ -521,7 +521,7 @@ export default function WordsList() {
               return (
                 <div
                   key={item.id}
-                  onClick={() => setSelectedId(item.id)}
+                  onClick={() => setSearchParams({ wid: item.id })}
                   className={`flex items-center gap-3 px-4 py-3 cursor-pointer hover:bg-gray-50 active:bg-gray-100 transition-colors ${
                     idx < items.length - 1 ? 'border-b border-gray-50' : ''
                   }`}
@@ -592,7 +592,7 @@ export default function WordsList() {
                     ) : (
                       <>
                         <button
-                          onClick={() => setEditingId(item.id)}
+                          onClick={() => setSearchParams({ wid: item.id, edit: '1' })}
                           className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-blue-500 hover:bg-blue-50 transition-colors"
                           title="Edit"
                         >
