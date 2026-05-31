@@ -972,13 +972,13 @@ fn fetch_next_pending(
          JOIN review_items r ON r.id = sc.review_item_id
          WHERE sc.study_id = ?1 AND sc.status = 'pending'
          ORDER BY
+            sc.update_time ASC,
             CASE
                 WHEN r.state IN ('learning','relearning') AND r.next_review IS NOT NULL AND r.next_review <= ?2 THEN 0
                 WHEN r.state = 'review' THEN 1
                 WHEN r.state IN ('learning','relearning') THEN 2
                 ELSE 3
-            END,
-            sc.create_time ASC
+            END
          LIMIT 1",
         params![study_id, now],
         row_to_review_item,
