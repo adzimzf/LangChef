@@ -54,6 +54,31 @@ const MAX_DIFFICULT_WORDS_DEFAULT = 10
 const MAX_KNOWN_WORDS_KEY = 'max_known_words'
 const MAX_KNOWN_WORDS_DEFAULT = 20
 const WORD_QUEUE_USED_KEY = 'word_queue_used_difficult'
+const WORD_CACHE_KEY = 'word_classification_cache'
+const WORD_CACHE_TTL_MS = 18 * 60 * 60 * 1000
+
+type CachedWordClassification = {
+  ts: number
+  lang: string
+  difficult: Array<{ content: string; ef: number; r: number; is_new: boolean; difficulty_bg_class: string }>
+  known: string[]
+}
+
+function readWordCache(): CachedWordClassification | null {
+  try {
+    const raw = localStorage.getItem(WORD_CACHE_KEY)
+    if (!raw) return null
+    return JSON.parse(raw) as CachedWordClassification
+  } catch {
+    return null
+  }
+}
+
+function writeWordCache(data: CachedWordClassification) {
+  try {
+    localStorage.setItem(WORD_CACHE_KEY, JSON.stringify(data))
+  } catch {}
+}
 
 function getMaxReviews(): number {
   const val = localStorage.getItem(MAX_REVIEWS_KEY)
@@ -241,6 +266,8 @@ export default function Chat() {
   const [branchSelection, setBranchSelection] = useState<Map<number | null, number>>(new Map())
   const [editingMessageId, setEditingMessageId] = useState<number | null>(null)
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null)
+  const [topicVisible, setTopicVisible] = useState(true)
+  const lastScrollTopRef = useRef(0)
 
   const langInfo = LANGUAGES[lang]
 
@@ -398,16 +425,30 @@ export default function Chat() {
     return () => clearInterval(interval)
   }, [sessionId])
 
-  // Load difficult/known words from backend (pre-classified)
+  // Load difficult/known words from backend (pre-classified).
+  // Cached in localStorage for 18h to avoid hitting the DB on every chat open.
   useEffect(() => {
     async function load() {
       try {
-        const data = await invoke<{ difficult: WordColorInfo[]; known: string[] }>(
-          'db_get_difficult_and_known_words',
-          { language: lang || null }
-        )
+        const cacheLang = lang || ''
+        const cached = readWordCache()
+        let raw: CachedWordClassification['difficult'] = []
+        let knownArr: string[] = []
+        const fresh = cached && cached.lang === cacheLang && Date.now() - cached.ts < WORD_CACHE_TTL_MS
+        if (fresh) {
+          raw = cached!.difficult
+          knownArr = cached!.known
+        } else {
+          const data = await invoke<{ difficult: CachedWordClassification['difficult']; known: string[] }>(
+            'db_get_difficult_and_known_words',
+            { language: lang || null }
+          )
+          raw = data.difficult
+          knownArr = data.known
+          writeWordCache({ ts: Date.now(), lang: cacheLang, difficult: raw, known: knownArr })
+        }
         const hardMap = new Map<string, WordColorInfo>()
-        data.difficult.forEach((w) => {
+        raw.forEach((w) => {
           hardMap.set(w.content.toLowerCase(), {
             EF: w.ef,
             R: w.r,
@@ -416,7 +457,7 @@ export default function Chat() {
           })
         })
         setDifficult(hardMap)
-        setKnown(new Set(data.known.map((w) => w.toLowerCase())))
+        setKnown(new Set(knownArr.map((w) => w.toLowerCase())))
       } catch {
         console.error('Failed to load difficult/known words')
       }
@@ -464,6 +505,28 @@ export default function Chat() {
     }
   }, [keyboardInset])
 
+  // Auto-hide topic pill on scroll-down, reveal on scroll-up
+  useEffect(() => {
+    const el = logRef.current
+    if (!el) return
+    function onScroll() {
+      if (!el) return
+      const current = el.scrollTop
+      const delta = current - lastScrollTopRef.current
+      const scrollable = el.scrollHeight - el.clientHeight > 20
+      if (!scrollable || current <= 0) {
+        setTopicVisible(true)
+      } else if (delta > 4) {
+        setTopicVisible(false)
+      } else if (delta < -4) {
+        setTopicVisible(true)
+      }
+      lastScrollTopRef.current = current
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [])
+
   async function markWordDifficult(word: string) {
     const w = word.toLowerCase()
     const next = new Map(difficult)
@@ -471,6 +534,15 @@ export default function Chat() {
     setDifficult(next)
     try {
       await invoke('db_upsert_review_item', { content: w, language: lang || null })
+      // Write-through to cache so the new word survives within the 18h TTL.
+      const cached = readWordCache()
+      const cacheLang = lang || ''
+      if (cached && cached.lang === cacheLang) {
+        if (!cached.difficult.some(d => d.content.toLowerCase() === w)) {
+          cached.difficult.unshift({ content: w, ef: 2.5, r: 0, is_new: true, difficulty_bg_class: 'bg-red-500' })
+          writeWordCache(cached)
+        }
+      }
     } catch (e) {
       console.error('Failed to save difficult word to DB:', e)
       // Roll back local state if DB write fails
@@ -1393,8 +1465,14 @@ export default function Chat() {
       <div ref={logRef} className="flex-1 overflow-y-auto px-3 py-3 relative">
         {/* Floating topic badge */}
         {selectedTopic && (
-          <div className="sticky top-0 z-10 flex justify-center pb-2">
-            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-50/95 border border-amber-200 text-xs font-medium text-amber-700 shadow-sm backdrop-blur-sm">
+          <div
+            className={`sticky top-0 z-10 flex justify-center pb-2 transition-all duration-300 ease-out pointer-events-none ${
+              topicVisible
+                ? 'opacity-100 translate-y-0'
+                : 'opacity-0 -translate-y-2'
+            }`}
+          >
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-50/95 border border-amber-200 text-xs font-medium text-amber-700 shadow-sm backdrop-blur-sm pointer-events-auto">
               <span className="text-[10px]">💬</span>
               <span className="text-[10px] text-amber-400 uppercase tracking-wider">Topic</span>
               {selectedTopic}

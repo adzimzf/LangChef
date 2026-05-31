@@ -532,67 +532,67 @@ pub fn db_get_difficult_and_known_words(
 ) -> Result<WordClassification, String> {
     let conn = open_db(&app)?;
 
-    let sql = if language.is_some() {
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE language=?1"
+    let cols = "id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty";
+
+    let (difficult_sql, known_sql) = if language.is_some() {
+        (
+            format!(
+                "SELECT {cols} FROM review_items \
+                 WHERE language=?1 AND COALESCE(fsrs_difficulty, 5.0) >= 5.0 \
+                 ORDER BY COALESCE(fsrs_difficulty, 5.0) DESC LIMIT 20"
+            ),
+            "SELECT content FROM review_items \
+             WHERE language=?1 AND COALESCE(fsrs_difficulty, 5.0) < 5.0 \
+             ORDER BY COALESCE(fsrs_difficulty, 5.0) ASC LIMIT 20"
+                .to_string(),
+        )
     } else {
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items"
+        (
+            format!(
+                "SELECT {cols} FROM review_items \
+                 WHERE COALESCE(fsrs_difficulty, 5.0) >= 5.0 \
+                 ORDER BY COALESCE(fsrs_difficulty, 5.0) DESC LIMIT 20"
+            ),
+            "SELECT content FROM review_items \
+             WHERE COALESCE(fsrs_difficulty, 5.0) < 5.0 \
+             ORDER BY COALESCE(fsrs_difficulty, 5.0) ASC LIMIT 20"
+                .to_string(),
+        )
     };
-    let mut stmt = conn.prepare(sql).map_err(|e| e.to_string())?;
-    let rows = if let Some(ref lang) = language {
-        stmt.query_map(params![lang], row_to_review_item)
+
+    let mut stmt_d = conn.prepare(&difficult_sql).map_err(|e| e.to_string())?;
+    let difficult_rows = if let Some(ref lang) = language {
+        stmt_d.query_map(params![lang], row_to_review_item)
     } else {
-        stmt.query_map([], row_to_review_item)
+        stmt_d.query_map([], row_to_review_item)
     }
     .map_err(|e| e.to_string())?;
-    let mut items = Vec::new();
-    for r in rows {
-        items.push(r.map_err(|e| e.to_string())?);
+
+    let mut difficult: Vec<WordInfo> = Vec::new();
+    for r in difficult_rows {
+        let item = r.map_err(|e| e.to_string())?;
+        let is_new = item.state == "new" || item.state.is_empty();
+        difficult.push(WordInfo {
+            content: item.content.clone(),
+            ef: item.EF,
+            r: item.R,
+            is_new,
+            difficulty_bg_class: item.difficulty_bg_class.clone(),
+        });
     }
 
-    items.sort_by(|a, b| {
-        let a_hardness = a.fsrs_difficulty.unwrap_or_else(|| (3.3 - a.EF) as f32);
-        let b_hardness = b.fsrs_difficulty.unwrap_or_else(|| (3.3 - b.EF) as f32);
-        b_hardness.partial_cmp(&a_hardness).unwrap_or(std::cmp::Ordering::Equal)
-    });
+    let mut stmt_k = conn.prepare(&known_sql).map_err(|e| e.to_string())?;
+    let map_string = |row: &rusqlite::Row<'_>| -> rusqlite::Result<String> { row.get(0) };
+    let known_rows = if let Some(ref lang) = language {
+        stmt_k.query_map(params![lang], map_string)
+    } else {
+        stmt_k.query_map([], map_string)
+    }
+    .map_err(|e| e.to_string())?;
 
-    let mut difficult = Vec::new();
     let mut known: Vec<String> = Vec::new();
-
-    for item in &items {
-        let is_difficult = if item.EF == -1.0 {
-            item.fsrs_difficulty.unwrap_or(5.0) >= 5.0 || item.R < 3
-        } else {
-            item.EF < 2.7 || item.R < 5
-        };
-        if is_difficult {
-            let is_new = item.state == "new" || item.state.is_empty();
-            difficult.push(WordInfo {
-                content: item.content.clone(),
-                ef: item.EF,
-                r: item.R,
-                is_new,
-                difficulty_bg_class: item.difficulty_bg_class.clone(),
-            });
-        } else {
-            known.push(item.content.to_lowercase());
-        }
-    }
-
-    if let Ok(mut stmt2) =
-        conn.prepare("SELECT word FROM known_words WHERE language IS NULL OR language=?1")
-    {
-        let lang = language.unwrap_or_default();
-        let rows2 = stmt2
-            .query_map(params![lang], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?;
-        for r in rows2 {
-            if let Ok(w) = r {
-                let lower = w.to_lowercase();
-                if !known.contains(&lower) {
-                    known.push(lower);
-                }
-            }
-        }
+    for r in known_rows {
+        known.push(r.map_err(|e| e.to_string())?.to_lowercase());
     }
 
     Ok(WordClassification { difficult, known })
