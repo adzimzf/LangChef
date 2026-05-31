@@ -1,7 +1,6 @@
 use crate::db::open_db;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -705,97 +704,6 @@ pub fn db_get_review_items_by_words(app: tauri::AppHandle, words: Vec<String>) -
     Ok(items)
 }
 
-pub fn apply_study_limit_increments(
-    conn: &rusqlite::Connection,
-    language: &str,
-    prev_state: &str,
-    result: &SRSResult,
-) -> rusqlite::Result<(i64, i64)> {
-    let today = chrono::Local::now().date_naive().to_string();
-
-    let inc_reviews = if result.graduated && prev_state == "review" { 1i64 } else { 0 };
-    let inc_new = if result.graduated && (prev_state == "new" || prev_state == "learning") { 1i64 } else { 0 };
-
-    if inc_reviews > 0 || inc_new > 0 {
-        conn.execute(
-            "INSERT INTO study_limits(date, language, reviews_completed, new_cards_seen) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT(date, language) DO UPDATE SET reviews_completed = reviews_completed + ?3, new_cards_seen = new_cards_seen + ?4",
-            params![today, language, inc_reviews, inc_new],
-        )?;
-    }
-
-    conn.query_row(
-        "SELECT reviews_completed, new_cards_seen FROM study_limits WHERE date = ?1 AND language = ?2",
-        params![today, language],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    ).or_else(|_| Ok((0, 0)))
-}
-
-#[tauri::command]
-pub fn db_update_srs(app: tauri::AppHandle, id: String, grade: String) -> Result<SRSResultWithLimits, String> {
-    let conn = open_db(&app)?;
-
-    #[allow(clippy::type_complexity)]
-    let row: (f64, i64, i64, String, i64, i64, Option<i64>, Option<f32>, Option<f32>, Option<String>) = conn.query_row(
-        "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty, language
-         FROM review_items WHERE id=?1",
-        params![id.clone()],
-        |row| Ok((
-            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?,
-        )),
-    ).map_err(|e| e.to_string())?;
-
-    let (ef, i, r, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty, language) = row;
-    let language = language.unwrap_or_default();
-
-    let current_memory = if ef == -1.0 {
-        memory_state_from_db(fsrs_stability, fsrs_difficulty)
-    } else {
-        let fsrs = get_fsrs();
-        match fsrs.memory_state_from_sm2(ef as f32, i as f32, DESIRED_RETENTION) {
-            Ok(ms) => Some(ms),
-            Err(e) => {
-                eprintln!("[fsrs] On-the-fly migration failed for card {}: {}", id, e);
-                let config = SRSConfig::default();
-                let result = schedule_card(ef, i, r, &state, step, lapse_count, next_review, &grade, &config);
-                conn.execute(
-                    "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7 WHERE id=?8",
-                    params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, id],
-                ).map_err(|e| e.to_string())?;
-                let (reviews_completed, new_cards_seen) =
-                    apply_study_limit_increments(&conn, &language, &state, &result).map_err(|e| e.to_string())?;
-                return Ok(SRSResultWithLimits { result, reviews_completed, new_cards_seen });
-            }
-        }
-    };
-
-    let config = SRSConfig::default();
-    let (result, new_memory_opt) = schedule_fsrs(&state, step, current_memory, i, r, lapse_count, next_review, &grade, &config)?;
-
-    conn.execute(
-        "UPDATE review_items SET EF=-1.0, I=?1, R=?2, state=?3, step=?4, lapse_count=?5, next_review=?6, fsrs_stability=?7, fsrs_difficulty=?8 WHERE id=?9",
-        params![
-            result.I, result.R, result.state, result.step, result.lapse_count,
-            result.next_review,
-            new_memory_opt.map(|m| m.stability),
-            new_memory_opt.map(|m| m.difficulty),
-            id
-        ],
-    ).map_err(|e| e.to_string())?;
-
-    if result.state == "review" && state != "review" {
-        let _ = conn.execute(
-            "UPDATE review_items SET mastered_at = CAST(strftime('%s', 'now') * 1000 AS INTEGER)
-             WHERE id = ?1 AND mastered_at IS NULL",
-            params![id],
-        );
-    }
-
-    let (reviews_completed, new_cards_seen) =
-        apply_study_limit_increments(&conn, &language, &state, &result).map_err(|e| e.to_string())?;
-    Ok(SRSResultWithLimits { result, reviews_completed, new_cards_seen })
-}
 
 #[derive(Serialize)]
 pub struct GradePreview {
@@ -850,14 +758,6 @@ pub fn db_preview_srs_grades(app: tauri::AppHandle, id: String) -> Result<Vec<Gr
     Ok(previews)
 }
 
-pub struct ReviewSession {
-    pub queue: VecDeque<ReviewItem>,
-    pub max_reviews: i64,
-    pub max_new_cards: i64,
-}
-
-pub type SessionMap = Mutex<HashMap<String, ReviewSession>>;
-
 fn compute_grade_previews(conn: &rusqlite::Connection, id: &str) -> Result<Vec<GradePreview>, String> {
     let row: (f64, i64, i64, String, i64, i64, Option<i64>, Option<f32>, Option<f32>) = conn.query_row(
         "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty
@@ -898,20 +798,19 @@ fn compute_grade_previews(conn: &rusqlite::Connection, id: &str) -> Result<Vec<G
     Ok(previews)
 }
 
-fn grade_card_in_db(conn: &rusqlite::Connection, id: &str, grade: &str) -> Result<SRSResultWithLimits, String> {
+fn grade_card_in_db(conn: &rusqlite::Connection, id: &str, grade: &str) -> Result<SRSResult, String> {
     #[allow(clippy::type_complexity)]
-    let row: (f64, i64, i64, String, i64, i64, Option<i64>, Option<f32>, Option<f32>, Option<String>) = conn.query_row(
-        "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty, language
+    let row: (f64, i64, i64, String, i64, i64, Option<i64>, Option<f32>, Option<f32>) = conn.query_row(
+        "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty
          FROM review_items WHERE id=?1",
         params![id],
         |row| Ok((
             row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?,
+            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
         )),
     ).map_err(|e| e.to_string())?;
 
-    let (ef, i, r, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty, language) = row;
-    let language = language.unwrap_or_default();
+    let (ef, i, r, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty) = row;
 
     let current_memory = if ef == -1.0 {
         memory_state_from_db(fsrs_stability, fsrs_difficulty)
@@ -927,9 +826,7 @@ fn grade_card_in_db(conn: &rusqlite::Connection, id: &str, grade: &str) -> Resul
                     "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7 WHERE id=?8",
                     params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, id],
                 ).map_err(|e| e.to_string())?;
-                let (reviews_completed, new_cards_seen) =
-                    apply_study_limit_increments(conn, &language, &state, &result).map_err(|e| e.to_string())?;
-                return Ok(SRSResultWithLimits { result, reviews_completed, new_cards_seen });
+                return Ok(result);
             }
         }
     };
@@ -948,9 +845,15 @@ fn grade_card_in_db(conn: &rusqlite::Connection, id: &str, grade: &str) -> Resul
         ],
     ).map_err(|e| e.to_string())?;
 
-    let (reviews_completed, new_cards_seen) =
-        apply_study_limit_increments(conn, &language, &state, &result).map_err(|e| e.to_string())?;
-    Ok(SRSResultWithLimits { result, reviews_completed, new_cards_seen })
+    if result.state == "review" && state != "review" {
+        let _ = conn.execute(
+            "UPDATE review_items SET mastered_at = CAST(strftime('%s', 'now') * 1000 AS INTEGER)
+             WHERE id = ?1 AND mastered_at IS NULL",
+            params![id],
+        );
+    }
+
+    Ok(result)
 }
 
 #[derive(Serialize)]
@@ -964,10 +867,178 @@ pub struct SessionStartResult {
     pub new_cards_seen: i64,
 }
 
+fn ensure_study(
+    conn: &rusqlite::Connection,
+    date: &str,
+    language: &str,
+    max_review: i64,
+    max_new: i64,
+) -> Result<i64, String> {
+    conn.execute(
+        "INSERT INTO study (date, language, max_review, max_new) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(date, language) DO UPDATE SET max_review = excluded.max_review, max_new = excluded.max_new",
+        params![date, language, max_review, max_new],
+    ).map_err(|e| e.to_string())?;
+    conn.query_row(
+        "SELECT study_id FROM study WHERE date = ?1 AND language = ?2",
+        params![date, language],
+        |row| row.get::<_, i64>(0),
+    ).map_err(|e| e.to_string())
+}
+
+fn classify_kind(state: &str) -> &'static str {
+    match state {
+        "review" => "review",
+        "learning" | "relearning" => "learning",
+        _ => "new",
+    }
+}
+
+fn top_up_queue(
+    conn: &rusqlite::Connection,
+    study_id: i64,
+    language: &str,
+    eod: i64,
+    max_review: i64,
+    max_new: i64,
+) -> Result<(), String> {
+    let (n_review, n_new): (i64, i64) = conn.query_row(
+        "SELECT
+            COALESCE(SUM(CASE WHEN kind='review' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN kind='new'    THEN 1 ELSE 0 END), 0)
+         FROM study_card WHERE study_id = ?1",
+        params![study_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    ).unwrap_or((0, 0));
+
+    let mut review_slots = (max_review - n_review).max(0);
+    let mut new_slots = (max_new - n_new).max(0);
+
+    let mut stmt = conn.prepare(
+        "SELECT id, state FROM review_items
+         WHERE language = ?1
+           AND (next_review IS NULL OR next_review <= ?2)
+           AND id NOT IN (SELECT review_item_id FROM study_card WHERE study_id = ?3)
+         ORDER BY
+            CASE WHEN state IN ('learning','relearning') THEN 0
+                 WHEN state = 'review' THEN 1
+                 ELSE 2 END,
+            next_review ASC NULLS LAST"
+    ).map_err(|e| e.to_string())?;
+
+    let candidates: Vec<(String, String)> = stmt
+        .query_map(params![language, eod, study_id], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })
+        .map_err(|e| e.to_string())?
+        .filter_map(|r| r.ok())
+        .collect();
+
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let mut insert_stmt = conn.prepare(
+        "INSERT INTO study_card (study_id, review_item_id, kind, status, create_time, update_time)
+         VALUES (?1, ?2, ?3, 'pending', ?4, ?4)"
+    ).map_err(|e| e.to_string())?;
+
+    for (id, state) in candidates {
+        let kind = classify_kind(&state);
+        match kind {
+            "review" => {
+                if review_slots <= 0 { continue; }
+                review_slots -= 1;
+            }
+            "new" => {
+                if new_slots <= 0 { continue; }
+                new_slots -= 1;
+            }
+            _ => {}
+        }
+        insert_stmt
+            .execute(params![study_id, id, kind, now_ms])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
+fn fetch_next_pending(
+    conn: &rusqlite::Connection,
+    study_id: i64,
+    now: i64,
+) -> Result<Option<ReviewItem>, String> {
+    let result = conn.query_row(
+        "SELECT r.id, r.content, r.EF, r.I, r.R, r.state, r.step, r.lapse_count, r.next_review,
+                r.language, r.detail, r.mnemonic, r.fsrs_stability, r.fsrs_difficulty
+         FROM study_card sc
+         JOIN review_items r ON r.id = sc.review_item_id
+         WHERE sc.study_id = ?1 AND sc.status = 'pending'
+         ORDER BY
+            CASE
+                WHEN r.state IN ('learning','relearning') AND r.next_review IS NOT NULL AND r.next_review <= ?2 THEN 0
+                WHEN r.state = 'review' THEN 1
+                WHEN r.state IN ('learning','relearning') THEN 2
+                ELSE 3
+            END,
+            sc.create_time ASC
+         LIMIT 1",
+        params![study_id, now],
+        row_to_review_item,
+    );
+    match result {
+        Ok(item) => Ok(Some(item)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+fn count_scalar(conn: &rusqlite::Connection, sql: &str, study_id: i64) -> Result<i64, String> {
+    conn.query_row(sql, params![study_id], |row| row.get::<_, i64>(0))
+        .map_err(|e| e.to_string())
+}
+
+fn count_pending(conn: &rusqlite::Connection, study_id: i64) -> Result<usize, String> {
+    count_scalar(conn,
+        "SELECT COUNT(*) FROM study_card WHERE study_id = ?1 AND status = 'pending'",
+        study_id,
+    ).map(|n| n as usize)
+}
+
+fn count_total(conn: &rusqlite::Connection, study_id: i64) -> Result<usize, String> {
+    count_scalar(conn, "SELECT COUNT(*) FROM study_card WHERE study_id = ?1", study_id)
+        .map(|n| n as usize)
+}
+
+fn count_reviewed(conn: &rusqlite::Connection, study_id: i64) -> Result<i64, String> {
+    count_scalar(conn,
+        "SELECT COUNT(*) FROM study_card WHERE study_id = ?1 AND kind = 'review' AND status = 'graded'",
+        study_id,
+    )
+}
+
+fn count_new_seen(conn: &rusqlite::Connection, study_id: i64) -> Result<i64, String> {
+    count_scalar(conn,
+        "SELECT COUNT(*) FROM study_card WHERE study_id = ?1 AND kind = 'new' AND status = 'graded'",
+        study_id,
+    )
+}
+
+fn set_card_status(
+    conn: &rusqlite::Connection,
+    study_id: i64,
+    card_id: &str,
+    status: &str,
+) -> Result<(), String> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    conn.execute(
+        "UPDATE study_card SET status = ?1, update_time = ?2
+         WHERE study_id = ?3 AND review_item_id = ?4",
+        params![status, now_ms, study_id, card_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 #[tauri::command]
 pub fn db_session_start(
     app: tauri::AppHandle,
-    sessions: tauri::State<'_, SessionMap>,
     language: String,
     max_reviews: i64,
     max_new_cards: i64,
@@ -975,71 +1046,28 @@ pub fn db_session_start(
     let conn = open_db(&app)?;
     let today = chrono::Local::now().date_naive().to_string();
     let eod = end_of_today();
+    let now = chrono::Utc::now().timestamp();
 
-    let (reviews_done, new_seen) = conn.query_row(
-        "SELECT reviews_completed, new_cards_seen FROM study_limits WHERE date=?1 AND language=?2",
-        params![today, language],
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
-    ).unwrap_or((0, 0));
+    let study_id = ensure_study(&conn, &today, &language, max_reviews, max_new_cards)?;
+    top_up_queue(&conn, study_id, &language, eod, max_reviews, max_new_cards)?;
 
-    let reviews_remaining = (max_reviews - reviews_done).max(0);
-    let new_remaining = (max_new_cards - new_seen).max(0);
-
-    let mut stmt = conn.prepare(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
-         FROM review_items
-         WHERE (next_review IS NULL OR next_review <= ?1) AND language = ?2
-         ORDER BY CASE WHEN state='learning' OR state='relearning' THEN 0
-                       WHEN state='review' THEN 1
-                       ELSE 2 END,
-                next_review ASC NULLS FIRST
-         LIMIT 500"
-    ).map_err(|e| e.to_string())?;
-
-    let all_items: Vec<ReviewItem> = stmt
-        .query_map(params![eod, language], row_to_review_item)
-        .map_err(|e| e.to_string())?
-        .filter_map(|r| r.ok())
-        .collect();
-
-    let mut queue: VecDeque<ReviewItem> = VecDeque::new();
-    let mut review_count = 0i64;
-    let mut new_count = 0i64;
-
-    for item in &all_items {
-        match item.state.as_str() {
-            "learning" | "relearning" => queue.push_back(item.clone()),
-            "review" if review_count < reviews_remaining => {
-                queue.push_back(item.clone());
-                review_count += 1;
-            }
-            s if (s == "new" || s.is_empty()) && new_count < new_remaining => {
-                queue.push_back(item.clone());
-                new_count += 1;
-            }
-            _ => {}
-        }
-    }
-
-    let total_cards = queue.len();
-    let next_card = queue.front().cloned();
-
+    let reviews_completed = count_reviewed(&conn, study_id)?;
+    let new_cards_seen = count_new_seen(&conn, study_id)?;
+    let total_cards = count_total(&conn, study_id)?;
+    let next_card = fetch_next_pending(&conn, study_id, now)?;
     let grade_options = match &next_card {
         Some(card) => compute_grade_previews(&conn, &card.id).unwrap_or_default(),
         None => vec![],
     };
 
-    sessions.lock().map_err(|e| e.to_string())?
-        .insert(language, ReviewSession { queue, max_reviews, max_new_cards });
-
     Ok(SessionStartResult {
         total_cards,
         next_card,
         grade_options,
-        reviews_remaining,
-        new_remaining,
-        reviews_completed: reviews_done,
-        new_cards_seen: new_seen,
+        reviews_remaining: (max_reviews - reviews_completed).max(0),
+        new_remaining: (max_new_cards - new_cards_seen).max(0),
+        reviews_completed,
+        new_cards_seen,
     })
 }
 
@@ -1056,106 +1084,39 @@ pub struct SessionGradeResult {
 #[tauri::command]
 pub fn db_session_grade(
     app: tauri::AppHandle,
-    sessions: tauri::State<'_, SessionMap>,
     language: String,
     card_id: String,
     grade: String,
+    max_reviews: i64,
+    max_new_cards: i64,
 ) -> Result<SessionGradeResult, String> {
     let conn = open_db(&app)?;
-    let srs = grade_card_in_db(&conn, &card_id, &grade)?;
+    let today = chrono::Local::now().date_naive().to_string();
+    let now = chrono::Utc::now().timestamp();
 
-    let (next_card_id, session_done, remaining_count) = {
-        let mut map = sessions.lock().map_err(|e| e.to_string())?;
-        let session = map.get_mut(&language)
-            .ok_or_else(|| "No active session — call db_session_start first".to_string())?;
+    let study_id = ensure_study(&conn, &today, &language, max_reviews, max_new_cards)?;
 
-        session.queue.pop_front();
+    let result = grade_card_in_db(&conn, &card_id, &grade)?;
+    set_card_status(&conn, study_id, &card_id, "graded")?;
 
-        if !srs.result.graduated || srs.result.lapsed {
-            if let Ok(updated) = conn.query_row(
-                "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
-                 FROM review_items WHERE id=?1",
-                params![card_id],
-                row_to_review_item,
-            ) {
-                session.queue.push_back(updated);
-            }
-        }
+    if result.state == "learning" || result.state == "relearning" {
+        set_card_status(&conn, study_id, &card_id, "pending")?;
+    }
 
-        if srs.reviews_completed >= session.max_reviews {
-            session.queue.retain(|item| item.state != "review");
-        }
-        if srs.new_cards_seen >= session.max_new_cards {
-            session.queue.retain(|item| item.state != "new" && !item.state.is_empty());
-        }
-
-        let next_id = session.queue.front().map(|c| c.id.clone());
-        let remaining = session.queue.len();
-        (next_id, remaining == 0, remaining)
-    };
-
-    let next_card = match &next_card_id {
-        Some(id) => conn.query_row(
-            "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
-             FROM review_items WHERE id=?1",
-            params![id],
-            row_to_review_item,
-        ).ok(),
-        None => None,
-    };
-
+    let reviews_completed = count_reviewed(&conn, study_id)?;
+    let new_cards_seen = count_new_seen(&conn, study_id)?;
+    let remaining_count = count_pending(&conn, study_id)?;
+    let next_card = fetch_next_pending(&conn, study_id, now)?;
     let grade_options = match &next_card {
         Some(card) => compute_grade_previews(&conn, &card.id).unwrap_or_default(),
         None => vec![],
     };
 
-    Ok(SessionGradeResult { srs, next_card, grade_options, session_done, remaining_count })
-}
-
-#[derive(Serialize)]
-pub struct StudyLimits {
-    pub reviews_completed: i64,
-    pub new_cards_seen: i64,
-}
-
-#[tauri::command]
-pub fn db_get_study_limits(app: tauri::AppHandle, language: String) -> Result<StudyLimits, String> {
-    let conn = open_db(&app)?;
-    let today = chrono::Local::now().date_naive().to_string();
-    let result = conn.query_row(
-        "SELECT reviews_completed, new_cards_seen FROM study_limits WHERE date=?1 AND language=?2",
-        params![today, language],
-        |row| Ok(StudyLimits {
-            reviews_completed: row.get(0)?,
-            new_cards_seen: row.get(1)?,
-        }),
-    );
-    match result {
-        Ok(limits) => Ok(limits),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(StudyLimits {
-            reviews_completed: 0,
-            new_cards_seen: 0,
-        }),
-        Err(e) => Err(e.to_string()),
-    }
-}
-
-#[tauri::command]
-pub fn db_increment_study_limit(app: tauri::AppHandle, language: String, field: String) -> Result<(), String> {
-    let conn = open_db(&app)?;
-    let today = chrono::Local::now().date_naive().to_string();
-    let column = match field.as_str() {
-        "reviews" => "reviews_completed",
-        "new_cards" => "new_cards_seen",
-        _ => return Err(format!("Invalid field: {}", field)),
-    };
-    conn.execute(
-        &format!(
-            "INSERT INTO study_limits(date, language, reviews_completed, new_cards_seen) VALUES (?1, ?2, 0, 0)
-             ON CONFLICT(date, language) DO UPDATE SET {} = {} + 1",
-            column, column
-        ),
-        params![today, language],
-    ).map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(SessionGradeResult {
+        srs: SRSResultWithLimits { result, reviews_completed, new_cards_seen },
+        next_card,
+        grade_options,
+        session_done: remaining_count == 0,
+        remaining_count,
+    })
 }

@@ -85,6 +85,24 @@ pub fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
             new_cards_seen INTEGER NOT NULL DEFAULT 0,
             PRIMARY KEY (date, language)
         );
+        CREATE TABLE IF NOT EXISTS study(
+            study_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            language TEXT NOT NULL,
+            max_review INTEGER NOT NULL,
+            max_new INTEGER NOT NULL,
+            UNIQUE(date, language)
+        );
+        CREATE TABLE IF NOT EXISTS study_card(
+            study_id INTEGER NOT NULL REFERENCES study(study_id),
+            review_item_id TEXT NOT NULL REFERENCES review_items(id),
+            kind TEXT NOT NULL,
+            status TEXT NOT NULL,
+            create_time INTEGER NOT NULL,
+            update_time INTEGER NOT NULL,
+            PRIMARY KEY (study_id, review_item_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_study_card_status ON study_card(study_id, status);
         CREATE TABLE IF NOT EXISTS reading_sessions(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             language TEXT NOT NULL,

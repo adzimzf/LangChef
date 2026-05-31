@@ -186,6 +186,8 @@ export default function Review() {
         language: currentCard.language || selectedLang || 'ja',
         cardId: currentCard.id,
         grade,
+        maxReviews: getMaxReviews(),
+        maxNewCards: getMaxNewCards(),
       })
 
       invoke('db_record_activity', { activityType: 'review' }).catch(() => {})

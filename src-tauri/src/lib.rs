@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
@@ -141,7 +140,6 @@ pub fn run() {
                 eprintln!("[furigana] Dict not cached — call init_lindera_dict from frontend");
             }
             app.manage(Mutex::new(initial));
-            app.manage(Mutex::new(HashMap::<String, srs::ReviewSession>::new()));
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -172,12 +170,9 @@ pub fn run() {
             srs::db_upsert_review_item,
             srs::db_get_review_items,
             srs::db_get_review_items_by_words,
-            srs::db_update_srs,
             srs::db_preview_srs_grades,
             srs::db_session_start,
             srs::db_session_grade,
-            srs::db_get_study_limits,
-            srs::db_increment_study_limit,
             // Words
             words::db_list_known_words,
             words::db_add_known_word,

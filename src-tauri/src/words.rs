@@ -423,7 +423,11 @@ pub fn db_get_due_review_items(
     let today = chrono::Local::now().date_naive().to_string();
 
     let limits_row = conn.query_row(
-        "SELECT reviews_completed, new_cards_seen FROM study_limits WHERE date = ?1 AND language = ?2",
+        "SELECT
+            COALESCE(SUM(CASE WHEN sc.kind='review' AND sc.status='graded' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN sc.kind='new'    AND sc.status='graded' THEN 1 ELSE 0 END), 0)
+         FROM study s JOIN study_card sc ON sc.study_id = s.study_id
+         WHERE s.date = ?1 AND s.language = ?2",
         params![today, language.clone().unwrap_or_default()],
         |row| Ok((row.get::<_, i64>(0)?, row.get::<_, i64>(1)?)),
     );
