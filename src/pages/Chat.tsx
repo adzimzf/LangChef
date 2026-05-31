@@ -1337,13 +1337,6 @@ export default function Chat() {
         </div>
       )}
 
-      {/* Topic card */}
-      {selectedTopic && (
-        <div className="shrink-0 border-b border-amber-100 bg-gradient-to-r from-amber-50 via-orange-50 to-amber-50 px-3 py-1.5 text-center">
-          <p className="text-xs font-medium text-amber-700 tracking-wide">{selectedTopic}</p>
-        </div>
-      )}
-
       {/* Grammar info modal */}
       {grammarInfoItem && (
         <div
@@ -1397,7 +1390,17 @@ export default function Chat() {
       )}
 
       {/* Messages area */}
-      <div ref={logRef} className="flex-1 overflow-y-auto px-3 py-3">
+      <div ref={logRef} className="flex-1 overflow-y-auto px-3 py-3 relative">
+        {/* Floating topic badge */}
+        {selectedTopic && (
+          <div className="sticky top-0 z-10 flex justify-center pb-2">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-50/95 border border-amber-200 text-xs font-medium text-amber-700 shadow-sm backdrop-blur-sm">
+              <span className="text-[10px]">💬</span>
+              <span className="text-[10px] text-amber-400 uppercase tracking-wider">Topic</span>
+              {selectedTopic}
+            </span>
+          </div>
+        )}
         {messages.length === 0 && !loading && (
           <div className="flex flex-col items-center justify-end h-full text-gray-400 gap-3 pb-2">
             <div className="text-4xl">💬</div>
