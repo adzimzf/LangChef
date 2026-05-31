@@ -267,7 +267,9 @@ export default function Chat() {
   const [editingMessageId, setEditingMessageId] = useState<number | null>(null)
   const [selectedTopic, setSelectedTopic] = useState<string | null>(null)
   const [topicVisible, setTopicVisible] = useState(true)
+  const [atBottom, setAtBottom] = useState(true)
   const lastScrollTopRef = useRef(0)
+  const [previewTargets, setPreviewTargets] = useState<{ difficult: string[]; known: string[]; resetUsed: boolean }>({ difficult: [], known: [], resetUsed: false })
 
   const langInfo = LANGUAGES[lang]
 
@@ -505,6 +507,15 @@ export default function Chat() {
     }
   }, [keyboardInset])
 
+  // Seed the preview chip strip when difficult/known sets load or change size.
+  // Skipped if preview is already populated by a recent send (refs may have advanced).
+  useEffect(() => {
+    if (difficult.size === 0 && known.size === 0) return
+    if (previewTargets.difficult.length === 0 && previewTargets.known.length === 0) {
+      setPreviewTargets(pickTargetWords())
+    }
+  }, [difficult.size, known.size])
+
   // Auto-hide topic pill on scroll-down, reveal on scroll-up
   useEffect(() => {
     const el = logRef.current
@@ -514,6 +525,7 @@ export default function Chat() {
       const current = el.scrollTop
       const delta = current - lastScrollTopRef.current
       const scrollable = el.scrollHeight - el.clientHeight > 20
+      const distFromBottom = el.scrollHeight - el.clientHeight - current
       if (!scrollable || current <= 0) {
         setTopicVisible(true)
       } else if (delta > 4) {
@@ -521,6 +533,7 @@ export default function Chat() {
       } else if (delta < -4) {
         setTopicVisible(true)
       }
+      setAtBottom(!scrollable || distFromBottom < 60)
       lastScrollTopRef.current = current
     }
     el.addEventListener('scroll', onScroll, { passive: true })
@@ -722,10 +735,11 @@ export default function Chat() {
     return [selected, nextIndex]
   }
 
-  function buildTargetWordsList(): string[] {
+  // Pure: choose target words without mutating rotation state.
+  // Returns `resetUsed` so commit can replay the same reset decision.
+  function pickTargetWords(): { difficult: string[]; known: string[]; resetUsed: boolean } {
     const difficultArr = Array.from(difficult.keys())
     const knownArr = Array.from(known).filter(w => !difficult.has(w))
-    // Shuffle known words so each rotation batch is random
     for (let i = knownArr.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1))
       ;[knownArr[i], knownArr[j]] = [knownArr[j], knownArr[i]]
@@ -733,29 +747,42 @@ export default function Chat() {
     const maxWords = getMaxDifficultWords()
     const maxKnown = getMaxKnownWords()
 
-    // Pick difficult words that haven't been used yet in this rotation cycle.
-    // When all difficult words have been used, reset and start a new cycle.
     const unusedDifficult = difficultArr.filter(w => !usedDifficultWords.current.has(w))
     let selectedDifficult: string[]
+    let resetUsed = false
     if (unusedDifficult.length >= maxWords) {
       selectedDifficult = unusedDifficult.slice(0, maxWords)
     } else {
-      // Not enough unused words left — take what's available, then reset and fill the rest
       selectedDifficult = [...unusedDifficult]
-      usedDifficultWords.current.clear()
+      resetUsed = true
       const remaining = maxWords - selectedDifficult.length
       const freshPool = difficultArr.filter(w => !selectedDifficult.includes(w))
       selectedDifficult.push(...freshPool.slice(0, remaining))
     }
-    // Mark selected words as used
-    for (const w of selectedDifficult) {
-      usedDifficultWords.current.add(w)
-    }
-    localStorage.setItem(WORD_QUEUE_USED_KEY, JSON.stringify([...usedDifficultWords.current]))
 
-    const [selectedKnown, nextKnownIdx] = dequeueRotate(knownArr, knownQueueIndex.current, maxKnown)
-    knownQueueIndex.current = nextKnownIdx
-    return [...selectedDifficult, ...selectedKnown]
+    const [selectedKnown] = dequeueRotate(knownArr, knownQueueIndex.current, maxKnown)
+    return { difficult: selectedDifficult, known: selectedKnown, resetUsed }
+  }
+
+  // Mutate rotation state to reflect a previously made pick.
+  function commitTargetPick(picked: { difficult: string[]; known: string[]; resetUsed: boolean }) {
+    if (picked.resetUsed) usedDifficultWords.current.clear()
+    for (const w of picked.difficult) usedDifficultWords.current.add(w)
+    localStorage.setItem(WORD_QUEUE_USED_KEY, JSON.stringify([...usedDifficultWords.current]))
+    const knownArr = Array.from(known).filter(w => !difficult.has(w))
+    if (knownArr.length > 0) {
+      knownQueueIndex.current = (knownQueueIndex.current + picked.known.length) % knownArr.length
+    }
+  }
+
+  // Send-time consumer: prefer the previewed pick so what user saw == what LLM gets.
+  // Commits the pick and refreshes the preview for the next turn.
+  function buildTargetWordsList(): string[] {
+    const usePreview = previewTargets.difficult.length > 0 || previewTargets.known.length > 0
+    const picked = usePreview ? previewTargets : pickTargetWords()
+    commitTargetPick(picked)
+    setPreviewTargets(pickTargetWords())
+    return [...picked.difficult, ...picked.known]
   }
 
   function buildSSRSystemPrompt(targetWords: string[], topic?: string | null): string {
@@ -1634,6 +1661,49 @@ export default function Chat() {
         })}
         {loading && <TypingIndicator />}
       </div>
+
+      {/* Target word chip strip — visible only on user's turn at the bottom of the scroll */}
+      {(() => {
+        const hasTargets = previewTargets.difficult.length > 0 || previewTargets.known.length > 0
+        const visible = hasTargets && !loading && atBottom
+        return (
+          <div
+            aria-hidden={!visible}
+            className={`shrink-0 bg-white overflow-hidden transition-all duration-300 ease-out ${
+              visible
+                ? 'max-h-24 opacity-100 translate-y-0 border-t pt-1.5 pb-1'
+                : 'max-h-0 opacity-0 translate-y-1 border-t-0 pt-0 pb-0'
+            }`}
+          >
+            <div className="px-3">
+              <div className="flex items-center gap-1.5 mb-1">
+                <span className="text-[9px] font-semibold text-gray-400 uppercase tracking-wider">Try to use</span>
+                <span className="text-[9px] text-gray-300">
+                  {previewTargets.difficult.length} hard · {previewTargets.known.length} known
+                </span>
+              </div>
+              <div className="flex flex-nowrap gap-1 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
+                {previewTargets.difficult.map(w => (
+                  <span
+                    key={`d-${w}`}
+                    className="shrink-0 px-2 py-0.5 rounded-full text-xs font-medium bg-red-50 text-red-600 border border-red-200 whitespace-nowrap"
+                  >
+                    {w}
+                  </span>
+                ))}
+                {previewTargets.known.map(w => (
+                  <span
+                    key={`k-${w}`}
+                    className="shrink-0 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-600 border border-blue-200 whitespace-nowrap"
+                  >
+                    {w}
+                  </span>
+                ))}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
 
       {/* Bottom input bar */}
       <div
