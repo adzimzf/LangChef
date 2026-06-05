@@ -897,7 +897,19 @@ export default function Chat() {
         const finalScore = (!userUsedAnyTarget && targetWords.length > 0) ? 0 : fb.score
         setFeedbackMap(prev => { const next = new Map(prev); next.set(userId, { ...fb, messageId: userId, score: finalScore, loading: false }); return next })
       }).catch(() => {
-        setFeedbackMap(prev => { const next = new Map(prev); const existing = next.get(userId); if (existing?.loading) next.delete(userId); return next })
+        // Evaluation invoke failed — Rust may have still written to DB (async IPC drop).
+        // Load from DB before giving up so the chip doesn't vanish.
+        invoke<UserFeedback | null>('db_get_user_feedback', { messageId: userId })
+          .then(fb => {
+            if (fb) {
+              setFeedbackMap(prev => new Map(prev).set(userId, { ...fb, messageId: userId, loading: false }))
+            } else {
+              setFeedbackMap(prev => { const next = new Map(prev); if (next.get(userId)?.loading) next.delete(userId); return next })
+            }
+          })
+          .catch(() => {
+            setFeedbackMap(prev => { const next = new Map(prev); if (next.get(userId)?.loading) next.delete(userId); return next })
+          })
       })
     }
     setInput('')
@@ -1155,12 +1167,17 @@ export default function Chat() {
             return next
           })
         }).catch(() => {
-          setFeedbackMap(prev => {
-            const next = new Map(prev)
-            const existing = next.get(fbId)
-            if (existing?.loading) next.delete(fbId)
-            return next
-          })
+          invoke<UserFeedback | null>('db_get_user_feedback', { messageId: fbId })
+            .then(fb => {
+              if (fb) {
+                setFeedbackMap(prev => new Map(prev).set(fbId, { ...fb, messageId: fbId, loading: false }))
+              } else {
+                setFeedbackMap(prev => { const next = new Map(prev); if (next.get(fbId)?.loading) next.delete(fbId); return next })
+              }
+            })
+            .catch(() => {
+              setFeedbackMap(prev => { const next = new Map(prev); if (next.get(fbId)?.loading) next.delete(fbId); return next })
+            })
         })
       }
     } catch (e) {
