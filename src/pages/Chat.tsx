@@ -5,10 +5,11 @@ import { renderFurigana, hasFuriganaAnnotations, stripFurigana } from '../lib/fu
 import { JLPT_LEVELS, DEFAULT_JLPT_LEVEL, JLPT_LEVEL_STORAGE_KEY } from '../lib/jlpt'
 import type { JLPTLevel } from '../lib/jlpt'
 import type { ReviewItem } from '../lib/types'
+import { parseDetailJson } from '../lib/types'
 import UserMessageFeedback, { type UserFeedback } from '../components/UserMessageFeedback'
 import { Input } from 'antd'
 const { TextArea } = Input
-import { ArrowLeftOutlined, SendOutlined, InfoCircleOutlined, CloseOutlined, PlusOutlined, EditOutlined, LeftOutlined, RightOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, SendOutlined, InfoCircleOutlined, CloseOutlined, PlusOutlined, EditOutlined, LeftOutlined, RightOutlined, DownOutlined, UpOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 
@@ -54,6 +55,31 @@ const MAX_DIFFICULT_WORDS_DEFAULT = 10
 const MAX_KNOWN_WORDS_KEY = 'max_known_words'
 const MAX_KNOWN_WORDS_DEFAULT = 20
 const WORD_QUEUE_USED_KEY = 'word_queue_used_difficult'
+const WORD_CACHE_KEY = 'word_classification_cache'
+const WORD_CACHE_TTL_MS = 18 * 60 * 60 * 1000
+
+type CachedWordClassification = {
+  ts: number
+  lang: string
+  difficult: Array<{ content: string; ef: number; r: number; is_new: boolean; difficulty_bg_class: string }>
+  known: string[]
+}
+
+function readWordCache(): CachedWordClassification | null {
+  try {
+    const raw = localStorage.getItem(WORD_CACHE_KEY)
+    if (!raw) return null
+    return JSON.parse(raw) as CachedWordClassification
+  } catch {
+    return null
+  }
+}
+
+function writeWordCache(data: CachedWordClassification) {
+  try {
+    localStorage.setItem(WORD_CACHE_KEY, JSON.stringify(data))
+  } catch {}
+}
 
 function getMaxReviews(): number {
   const val = localStorage.getItem(MAX_REVIEWS_KEY)
@@ -184,7 +210,7 @@ function computeVisiblePath(
   return { visibleMessages, branchPoints }
 }
 
-type WordColorInfo = { EF: number; R: number; isNew: boolean; difficulty_color: string }
+type WordColorInfo = { EF: number; R: number; isNew: boolean; difficulty_bg_class: string }
 
 export default function Chat() {
   const navigate = useNavigate()
@@ -240,6 +266,89 @@ export default function Chat() {
   // Only stores user overrides; defaults come from isActivePath in the DB.
   const [branchSelection, setBranchSelection] = useState<Map<number | null, number>>(new Map())
   const [editingMessageId, setEditingMessageId] = useState<number | null>(null)
+  const [selectedTopic, setSelectedTopic] = useState<string | null>(null)
+  const [topicVisible, setTopicVisible] = useState(true)
+  const [atBottom, setAtBottom] = useState(true)
+  const lastScrollTopRef = useRef(0)
+  const [previewTargets, setPreviewTargets] = useState<{ difficult: string[]; known: string[]; resetUsed: boolean }>({ difficult: [], known: [], resetUsed: false })
+
+  // Detail popup for target chips
+  const [detailIndex, setDetailIndex] = useState<number | null>(null)
+  const [detailVisible, setDetailVisible] = useState(false)
+  const [detailItems, setDetailItems] = useState<Map<string, ReviewItem>>(new Map())
+  const detailScrollRef = useRef<HTMLDivElement>(null)
+  const detailCardRefs = useRef<Map<number, HTMLDivElement>>(new Map())
+  const detailCloseTimer = useRef<number | null>(null)
+
+  const targetChips = useMemo(() => [
+    ...previewTargets.difficult.map(w => ({ word: w, kind: 'hard' as const })),
+    ...previewTargets.known.map(w => ({ word: w, kind: 'known' as const })),
+  ], [previewTargets.difficult, previewTargets.known])
+
+  const closeDetail = () => {
+    setDetailVisible(false)
+    if (detailCloseTimer.current) window.clearTimeout(detailCloseTimer.current)
+    detailCloseTimer.current = window.setTimeout(() => {
+      setDetailIndex(null)
+      detailCloseTimer.current = null
+    }, 220)
+  }
+
+  const openDetail = async (idx: number) => {
+    if (detailCloseTimer.current) {
+      window.clearTimeout(detailCloseTimer.current)
+      detailCloseTimer.current = null
+    }
+    setDetailIndex(idx)
+    // Defer visibility flip to the next frame so the enter transition runs
+    requestAnimationFrame(() => {
+      if (mounted.current) setDetailVisible(true)
+    })
+    const allWords = [...previewTargets.difficult, ...previewTargets.known]
+    const missing = allWords.filter(w => !detailItems.has(w))
+    if (missing.length === 0) return
+    try {
+      const items = await invoke<ReviewItem[]>('db_get_review_items_by_words', { words: missing })
+      if (!mounted.current) return
+      setDetailItems(prev => {
+        const next = new Map(prev)
+        for (const it of items) next.set(it.content, it)
+        return next
+      })
+    } catch (e) {
+      console.error('Failed to load word details', e)
+    }
+  }
+
+  // Scroll the popup to the requested card whenever it (re)opens
+  useEffect(() => {
+    if (detailIndex == null) return
+    const node = detailCardRefs.current.get(detailIndex)
+    if (node) node.scrollIntoView({ behavior: 'instant' as ScrollBehavior, inline: 'center', block: 'nearest' })
+  }, [detailIndex])
+
+  // Track which card is currently centered as the user swipes
+  const onDetailScroll = () => {
+    const container = detailScrollRef.current
+    if (!container) return
+    const center = container.scrollLeft + container.clientWidth / 2
+    let bestIdx = detailIndex ?? 0
+    let bestDist = Infinity
+    detailCardRefs.current.forEach((el, idx) => {
+      const cardCenter = el.offsetLeft + el.offsetWidth / 2
+      const dist = Math.abs(cardCenter - center)
+      if (dist < bestDist) { bestDist = dist; bestIdx = idx }
+    })
+    if (bestIdx !== detailIndex) setDetailIndex(bestIdx)
+  }
+
+  // Close popup on Escape
+  useEffect(() => {
+    if (detailIndex == null) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeDetail() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [detailIndex])
 
   const langInfo = LANGUAGES[lang]
 
@@ -339,11 +448,14 @@ export default function Chat() {
     load()
   }, [lang, jlptLevel])
 
-  // Load session messages
+  // Load session messages + topic
   useEffect(() => {
     async function load() {
       if (!sessionId) return
       try {
+        invoke<string | null>('db_get_session_topic', { sessionId })
+          .then(t => setSelectedTopic(t))
+          .catch(() => {})
         const res = await invoke<{ id: number, role: string, content: string, created_at: number, parent_message_id: number | null, is_active_path: number }[]>('db_list_session_messages', { sessionId })
         const msgs: Msg[] = res.map(m => ({
           id: m.id,
@@ -394,25 +506,39 @@ export default function Chat() {
     return () => clearInterval(interval)
   }, [sessionId])
 
-  // Load difficult/known words from backend (pre-classified)
+  // Load difficult/known words from backend (pre-classified).
+  // Cached in localStorage for 18h to avoid hitting the DB on every chat open.
   useEffect(() => {
     async function load() {
       try {
-        const data = await invoke<{ difficult: WordColorInfo[]; known: string[] }>(
-          'db_get_difficult_and_known_words',
-          { language: lang || null }
-        )
+        const cacheLang = lang || ''
+        const cached = readWordCache()
+        let raw: CachedWordClassification['difficult'] = []
+        let knownArr: string[] = []
+        const fresh = cached && cached.lang === cacheLang && Date.now() - cached.ts < WORD_CACHE_TTL_MS
+        if (fresh) {
+          raw = cached!.difficult
+          knownArr = cached!.known
+        } else {
+          const data = await invoke<{ difficult: CachedWordClassification['difficult']; known: string[] }>(
+            'db_get_difficult_and_known_words',
+            { language: lang || null }
+          )
+          raw = data.difficult
+          knownArr = data.known
+          writeWordCache({ ts: Date.now(), lang: cacheLang, difficult: raw, known: knownArr })
+        }
         const hardMap = new Map<string, WordColorInfo>()
-        data.difficult.forEach((w) => {
+        raw.forEach((w) => {
           hardMap.set(w.content.toLowerCase(), {
             EF: w.ef,
             R: w.r,
             isNew: w.is_new,
-            difficulty_color: w.difficulty_color,
+            difficulty_bg_class: w.difficulty_bg_class,
           })
         })
         setDifficult(hardMap)
-        setKnown(new Set(data.known.map((w) => w.toLowerCase())))
+        setKnown(new Set(knownArr.map((w) => w.toLowerCase())))
       } catch {
         console.error('Failed to load difficult/known words')
       }
@@ -460,13 +586,55 @@ export default function Chat() {
     }
   }, [keyboardInset])
 
+  // Seed the preview chip strip when difficult/known sets load or change size.
+  // Skipped if preview is already populated by a recent send (refs may have advanced).
+  useEffect(() => {
+    if (difficult.size === 0 && known.size === 0) return
+    if (previewTargets.difficult.length === 0 && previewTargets.known.length === 0) {
+      setPreviewTargets(pickTargetWords())
+    }
+  }, [difficult.size, known.size])
+
+  // Auto-hide topic pill on scroll-down, reveal on scroll-up
+  useEffect(() => {
+    const el = logRef.current
+    if (!el) return
+    function onScroll() {
+      if (!el) return
+      const current = el.scrollTop
+      const delta = current - lastScrollTopRef.current
+      const scrollable = el.scrollHeight - el.clientHeight > 20
+      const distFromBottom = el.scrollHeight - el.clientHeight - current
+      if (!scrollable || current <= 0) {
+        setTopicVisible(true)
+      } else if (delta > 4) {
+        setTopicVisible(false)
+      } else if (delta < -4) {
+        setTopicVisible(true)
+      }
+      setAtBottom(!scrollable || distFromBottom < 60)
+      lastScrollTopRef.current = current
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [])
+
   async function markWordDifficult(word: string) {
     const w = word.toLowerCase()
     const next = new Map(difficult)
-    next.set(w, { EF: 2.5, R: 0, isNew: true, difficulty_color: 'hsl(0, 70%, 50%)' })
+    next.set(w, { EF: 2.5, R: 0, isNew: true, difficulty_bg_class: 'bg-red-500' })
     setDifficult(next)
     try {
       await invoke('db_upsert_review_item', { content: w, language: lang || null })
+      // Write-through to cache so the new word survives within the 18h TTL.
+      const cached = readWordCache()
+      const cacheLang = lang || ''
+      if (cached && cached.lang === cacheLang) {
+        if (!cached.difficult.some(d => d.content.toLowerCase() === w)) {
+          cached.difficult.unshift({ content: w, ef: 2.5, r: 0, is_new: true, difficulty_bg_class: 'bg-red-500' })
+          writeWordCache(cached)
+        }
+      }
     } catch (e) {
       console.error('Failed to save difficult word to DB:', e)
       // Roll back local state if DB write fails
@@ -519,7 +687,7 @@ export default function Chat() {
             EF: item.EF,
             R: item.R,
             isNew: item.state === 'new' || !item.state,
-            difficulty_color: item.difficulty_color,
+            difficulty_bg_class: item.difficulty_bg_class,
           }
           wordColorCache.current.set(item.content.toLowerCase(), info)
           cached.set(item.content.toLowerCase(), info)
@@ -646,10 +814,11 @@ export default function Chat() {
     return [selected, nextIndex]
   }
 
-  function buildTargetWordsList(): string[] {
+  // Pure: choose target words without mutating rotation state.
+  // Returns `resetUsed` so commit can replay the same reset decision.
+  function pickTargetWords(): { difficult: string[]; known: string[]; resetUsed: boolean } {
     const difficultArr = Array.from(difficult.keys())
     const knownArr = Array.from(known).filter(w => !difficult.has(w))
-    // Shuffle known words so each rotation batch is random
     for (let i = knownArr.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1))
       ;[knownArr[i], knownArr[j]] = [knownArr[j], knownArr[i]]
@@ -657,32 +826,45 @@ export default function Chat() {
     const maxWords = getMaxDifficultWords()
     const maxKnown = getMaxKnownWords()
 
-    // Pick difficult words that haven't been used yet in this rotation cycle.
-    // When all difficult words have been used, reset and start a new cycle.
     const unusedDifficult = difficultArr.filter(w => !usedDifficultWords.current.has(w))
     let selectedDifficult: string[]
+    let resetUsed = false
     if (unusedDifficult.length >= maxWords) {
       selectedDifficult = unusedDifficult.slice(0, maxWords)
     } else {
-      // Not enough unused words left — take what's available, then reset and fill the rest
       selectedDifficult = [...unusedDifficult]
-      usedDifficultWords.current.clear()
+      resetUsed = true
       const remaining = maxWords - selectedDifficult.length
       const freshPool = difficultArr.filter(w => !selectedDifficult.includes(w))
       selectedDifficult.push(...freshPool.slice(0, remaining))
     }
-    // Mark selected words as used
-    for (const w of selectedDifficult) {
-      usedDifficultWords.current.add(w)
-    }
-    localStorage.setItem(WORD_QUEUE_USED_KEY, JSON.stringify([...usedDifficultWords.current]))
 
-    const [selectedKnown, nextKnownIdx] = dequeueRotate(knownArr, knownQueueIndex.current, maxKnown)
-    knownQueueIndex.current = nextKnownIdx
-    return [...selectedDifficult, ...selectedKnown]
+    const [selectedKnown] = dequeueRotate(knownArr, knownQueueIndex.current, maxKnown)
+    return { difficult: selectedDifficult, known: selectedKnown, resetUsed }
   }
 
-  function buildSSRSystemPrompt(targetWords: string[]): string {
+  // Mutate rotation state to reflect a previously made pick.
+  function commitTargetPick(picked: { difficult: string[]; known: string[]; resetUsed: boolean }) {
+    if (picked.resetUsed) usedDifficultWords.current.clear()
+    for (const w of picked.difficult) usedDifficultWords.current.add(w)
+    localStorage.setItem(WORD_QUEUE_USED_KEY, JSON.stringify([...usedDifficultWords.current]))
+    const knownArr = Array.from(known).filter(w => !difficult.has(w))
+    if (knownArr.length > 0) {
+      knownQueueIndex.current = (knownQueueIndex.current + picked.known.length) % knownArr.length
+    }
+  }
+
+  // Send-time consumer: prefer the previewed pick so what user saw == what LLM gets.
+  // Commits the pick and refreshes the preview for the next turn.
+  function buildTargetWordsList(): string[] {
+    const usePreview = previewTargets.difficult.length > 0 || previewTargets.known.length > 0
+    const picked = usePreview ? previewTargets : pickTargetWords()
+    commitTargetPick(picked)
+    setPreviewTargets(pickTargetWords())
+    return [...picked.difficult, ...picked.known]
+  }
+
+  function buildSSRSystemPrompt(targetWords: string[], topic?: string | null): string {
     const langName = langInfo?.label || 'the target language'
 
     let prompt = `You are a language learning conversation partner. The target language is ${langName}. Reply in ${langName} only. `
@@ -718,6 +900,16 @@ export default function Chat() {
         prompt += `- KNOWN words (use at least half of these to maintain retention): ${selectedKn.join(', ')}\n`
       }
       prompt += `\nWeave these naturally into your sentences. Do NOT list them explicitly. Each difficult word MUST appear at least once in your response.`
+    }
+
+    if (topic) {
+      const topicLabel = topic === 'Random Topic' ? 'a random interesting topic of your choice' : `"${topic}"`
+      prompt += `\n\nCONVERSATION TOPIC: The topic for this session is ${topicLabel}. Keep the conversation centered around this topic.`
+    }
+
+    if (topic) {
+      const topicLabel = topic === 'Random Topic' ? 'a random interesting topic of your choice' : `"${topic}"`
+      prompt += `\n\nCONVERSATION TOPIC: The topic for this session is ${topicLabel}. Keep the conversation centered around this topic.`
     }
 
     prompt += `\n\nIf the user seems stuck, offer a hint or rephrase. Encourage them to keep trying in ${langName}.`
@@ -784,7 +976,19 @@ export default function Chat() {
         const finalScore = (!userUsedAnyTarget && targetWords.length > 0) ? 0 : fb.score
         setFeedbackMap(prev => { const next = new Map(prev); next.set(userId, { ...fb, messageId: userId, score: finalScore, loading: false }); return next })
       }).catch(() => {
-        setFeedbackMap(prev => { const next = new Map(prev); const existing = next.get(userId); if (existing?.loading) next.delete(userId); return next })
+        // Evaluation invoke failed — Rust may have still written to DB (async IPC drop).
+        // Load from DB before giving up so the chip doesn't vanish.
+        invoke<UserFeedback | null>('db_get_user_feedback', { messageId: userId })
+          .then(fb => {
+            if (fb) {
+              setFeedbackMap(prev => new Map(prev).set(userId, { ...fb, messageId: userId, loading: false }))
+            } else {
+              setFeedbackMap(prev => { const next = new Map(prev); if (next.get(userId)?.loading) next.delete(userId); return next })
+            }
+          })
+          .catch(() => {
+            setFeedbackMap(prev => { const next = new Map(prev); if (next.get(userId)?.loading) next.delete(userId); return next })
+          })
       })
     }
     setInput('')
@@ -799,7 +1003,7 @@ export default function Chat() {
       if (sessionId) setLLMPending(sessionId)
       try {
         // Build SSR system prompt using the same target words
-        const systemPrompt = buildSSRSystemPrompt(targetWords)
+        const systemPrompt = buildSSRSystemPrompt(targetWords, selectedTopic)
 
         // Send visible conversation history with system prompt
         const { visibleMessages: contextVisible } = computeVisiblePath(nextMessages, branchSelection)
@@ -868,6 +1072,71 @@ export default function Chat() {
     }
   }
 
+  async function startTopicConversation(topic: string) {
+    setSelectedTopic(topic)
+    if (!apiHost || !apiKey) return
+
+    let sid = sessionId
+    if (!sid) {
+      try {
+        sid = await invoke<string>('db_new_session', { title: topic, language: lang || null, level: lang === 'ja' ? jlptLevel : null })
+        setSessionId(sid)
+      } catch { return }
+    }
+    if (sid) invoke('db_set_session_topic', { sessionId: sid, topic }).catch(() => {})
+
+    const targetWords = buildTargetWordsList()
+    const systemPrompt = buildSSRSystemPrompt(targetWords, topic)
+
+    setLoading(true)
+    if (sid) setLLMPending(sid)
+    await invoke('db_record_activity', { activityType: 'chat' }).catch(() => {})
+
+    try {
+      const topicInstruction = topic === 'Random Topic'
+        ? 'Begin the conversation with a natural opening about an interesting topic of your choice.'
+        : `Begin the conversation with a natural opening related to "${topic}".`
+
+      const llmMessages = [
+        { role: 'system' as const, content: systemPrompt },
+        { role: 'user' as const, content: topicInstruction },
+      ]
+
+      const res = await invoke<string>('llm_chat', { apiHost, apiKey, model, messages: llmMessages })
+      const annotatedRes = lang === 'ja'
+        ? await invoke<string>('add_furigana', { text: res, language: lang })
+        : res
+
+      const assistantId = await invoke<number>('db_add_message_in_session', {
+        sessionId: sid, role: 'assistant', content: annotatedRes, parentMessageId: null
+      }).catch(() => -1)
+
+      if (mounted.current) {
+        const assistant: Msg = { id: null, role: 'assistant', content: annotatedRes, parentMessageId: null, isActivePath: true }
+        setMessages(prev => [...prev, assistant])
+        if (assistantId >= 0) {
+          setMessages(prev => prev.map((m, idx) => idx === prev.length - 1 ? { ...m, id: assistantId } : m))
+        }
+      }
+    } catch (e) {
+      const errMsg = e instanceof Error ? e.message : String(e)
+      const errorContent = `[Error] ${errMsg}`
+      const errorId = await invoke<number>('db_add_message_in_session', {
+        sessionId: sid, role: 'assistant', content: errorContent, parentMessageId: null
+      }).catch(() => -1)
+      if (mounted.current) {
+        const errorMsg: Msg = { id: null, role: 'assistant', content: errorContent, parentMessageId: null, isActivePath: true }
+        setMessages(prev => [...prev, errorMsg])
+        if (errorId >= 0) {
+          setMessages(prev => prev.map((m, idx) => idx === prev.length - 1 ? { ...m, id: errorId } : m))
+        }
+      }
+    } finally {
+      if (sid) clearLLMPending(sid)
+      if (mounted.current) setLoading(false)
+    }
+  }
+
   async function handleEditSave(m: Msg) {
     if (!m.id || !input.trim()) return
     const newContent = input.trim()
@@ -924,7 +1193,7 @@ export default function Chat() {
     if (sessionId) setLLMPending(sessionId)
 
     const targetWords = buildTargetWordsList()
-    const systemPrompt = buildSSRSystemPrompt(targetWords)
+    const systemPrompt = buildSSRSystemPrompt(targetWords, selectedTopic)
 
     // Build conversation history: visible path including the edited message
     const tempMessages = [...messages.filter(msg => !toDeactivate.has(msg.id ?? -1)), editedMsg]
@@ -977,12 +1246,17 @@ export default function Chat() {
             return next
           })
         }).catch(() => {
-          setFeedbackMap(prev => {
-            const next = new Map(prev)
-            const existing = next.get(fbId)
-            if (existing?.loading) next.delete(fbId)
-            return next
-          })
+          invoke<UserFeedback | null>('db_get_user_feedback', { messageId: fbId })
+            .then(fb => {
+              if (fb) {
+                setFeedbackMap(prev => new Map(prev).set(fbId, { ...fb, messageId: fbId, loading: false }))
+              } else {
+                setFeedbackMap(prev => { const next = new Map(prev); if (next.get(fbId)?.loading) next.delete(fbId); return next })
+              }
+            })
+            .catch(() => {
+              setFeedbackMap(prev => { const next = new Map(prev); if (next.get(fbId)?.loading) next.delete(fbId); return next })
+            })
         })
       }
     } catch (e) {
@@ -1055,10 +1329,10 @@ export default function Chat() {
             onClick={() => markWordDifficult(surface)}
             className={`cursor-pointer rounded px-0.5 transition-colors ${
               isHard
-                ? ''
+                ? diffInfo.difficulty_bg_class + ' text-white'
                 : 'hover:bg-blue-50 active:bg-yellow-50'
             }`}
-            style={isHard ? { backgroundColor: diffInfo.difficulty_color, color: '#fff' } : undefined}
+            style={isHard ? { color: '#fff' } : undefined}
             title={isHard ? 'Marked difficult' : 'Tap to mark difficult'}
           >
             {renderFurigana(slice, showFurigana)}
@@ -1095,10 +1369,10 @@ export default function Chat() {
             onClick={() => markWordDifficult(part)}
             className={`cursor-pointer rounded px-0.5 transition-colors ${
               isHard
-                ? ''
+                ? diffInfo.difficulty_bg_class + ' text-white'
                 : 'hover:bg-blue-50 active:bg-yellow-50'
             }`}
-            style={isHard ? { backgroundColor: diffInfo.difficulty_color, color: '#fff' } : undefined}
+            style={isHard ? { color: '#fff' } : undefined}
             title={isHard ? 'Marked difficult' : 'Tap to mark difficult'}
           >
             {renderFurigana(slice, showFurigana)}
@@ -1121,10 +1395,10 @@ export default function Chat() {
           onClick={() => markWordDifficult(part)}
           className={`cursor-pointer rounded px-0.5 transition-colors ${
             isHard
-              ? ''
+              ? diffInfo.difficulty_bg_class + ' text-white'
               : 'hover:bg-blue-50 active:bg-yellow-50'
           }`}
-          style={isHard ? { backgroundColor: diffInfo.difficulty_color, color: '#fff' } : undefined}
+          style={isHard ? { color: '#fff' } : undefined}
           title={isHard ? 'Marked difficult' : 'Tap to mark difficult'}
         >
           {part}
@@ -1311,7 +1585,23 @@ export default function Chat() {
       )}
 
       {/* Messages area */}
-      <div ref={logRef} className="flex-1 overflow-y-auto px-3 py-3">
+      <div ref={logRef} className="flex-1 overflow-y-auto px-3 py-3 relative">
+        {/* Floating topic badge */}
+        {selectedTopic && (
+          <div
+            className={`sticky top-0 z-10 flex justify-center pb-2 transition-all duration-300 ease-out pointer-events-none ${
+              topicVisible
+                ? 'opacity-100 translate-y-0'
+                : 'opacity-0 -translate-y-2'
+            }`}
+          >
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-50/95 border border-amber-200 text-xs font-medium text-amber-700 shadow-sm backdrop-blur-sm pointer-events-auto">
+              <span className="text-[10px]">💬</span>
+              <span className="text-[10px] text-amber-400 uppercase tracking-wider">Topic</span>
+              {selectedTopic}
+            </span>
+          </div>
+        )}
         {messages.length === 0 && !loading && (
           <div className="flex flex-col items-center justify-end h-full text-gray-400 gap-3 pb-2">
             <div className="text-4xl">💬</div>
@@ -1322,7 +1612,7 @@ export default function Chat() {
               {SUGGESTIONS.map((s, i) => (
                 <button
                   key={s}
-                  onClick={() => send(`Talk about ${s.toLowerCase()}.`)}
+                  onClick={() => startTopicConversation(s)}
                   className="shrink-0 whitespace-nowrap px-4 py-2 rounded-full text-sm bg-white border border-gray-200 text-gray-600 shadow-sm hover:bg-blue-50 hover:border-blue-200 hover:text-blue-600 active:bg-blue-100 transition-all duration-200 animate-fade-in-up"
                   style={{ animationDelay: `${i * 80}ms` }}
                 >
@@ -1468,6 +1758,54 @@ export default function Chat() {
         {loading && <TypingIndicator />}
       </div>
 
+      {/* Target word chip strip — visible only on user's turn at the bottom of the scroll */}
+      {(() => {
+        const hasTargets = previewTargets.difficult.length > 0 || previewTargets.known.length > 0
+        const visible = hasTargets && !loading && atBottom && messages.length > 0
+        return (
+          <div
+            aria-hidden={!visible}
+            className={`shrink-0 bg-white overflow-hidden transition-all duration-300 ease-out ${
+              visible
+                ? 'max-h-24 opacity-100 translate-y-0 border-t pt-1.5 pb-1'
+                : 'max-h-0 opacity-0 translate-y-1 border-t-0 pt-0 pb-0'
+            }`}
+          >
+            <div className="px-3">
+              <div className="flex items-center gap-1.5 mb-1">
+                <span className="text-[9px] font-semibold text-gray-400 uppercase tracking-wider">Try to use</span>
+                <span className="text-[9px] text-gray-300">
+                  {previewTargets.difficult.length} hard · {previewTargets.known.length} known
+                </span>
+              </div>
+              <div className="flex flex-nowrap gap-1 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
+                {targetChips.map((t, i) => {
+                  const expanded = detailIndex === i
+                  const palette = t.kind === 'hard'
+                    ? { chip: 'bg-red-50 text-red-600 border-red-200', btn: 'hover:bg-red-100 text-red-500' }
+                    : { chip: 'bg-blue-50 text-blue-600 border-blue-200', btn: 'hover:bg-blue-100 text-blue-500' }
+                  return (
+                    <span
+                      key={`${t.kind}-${t.word}`}
+                      className={`shrink-0 flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full text-xs font-medium border whitespace-nowrap ${palette.chip}`}
+                    >
+                      <span>{t.word}</span>
+                      <button
+                        onClick={() => expanded ? closeDetail() : openDetail(i)}
+                        aria-label={expanded ? 'Collapse word detail' : 'Expand word detail'}
+                        className={`flex items-center justify-center w-4 h-4 rounded-full transition-colors ${palette.btn}`}
+                      >
+                        {expanded ? <UpOutlined style={{ fontSize: 8 }} /> : <DownOutlined style={{ fontSize: 8 }} />}
+                      </button>
+                    </span>
+                  )
+                })}
+              </div>
+            </div>
+          </div>
+        )
+      })()}
+
       {/* Bottom input bar */}
       <div
         className="shrink-0 bg-white border-t px-3 py-2 safe-bottom mb-1"
@@ -1528,6 +1866,148 @@ export default function Chat() {
           </button>
         </div>
       </div>
+
+      {detailIndex != null && targetChips[detailIndex] && (
+        <div
+          className={`fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 transition-opacity duration-200 ease-out ${
+            detailVisible ? 'opacity-100' : 'opacity-0'
+          }`}
+          onClick={closeDetail}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className={`w-full sm:max-w-md bg-white rounded-t-2xl sm:rounded-2xl shadow-xl relative max-h-[85vh] flex flex-col transform transition-all duration-200 ease-out ${
+              detailVisible
+                ? 'opacity-100 translate-y-0 sm:scale-100'
+                : 'opacity-0 translate-y-6 sm:translate-y-0 sm:scale-95'
+            }`}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="shrink-0 flex items-center justify-between px-4 pt-3 pb-2 border-b">
+              <div className="text-xs text-gray-400">
+                {detailIndex + 1} / {targetChips.length}
+              </div>
+              <button
+                onClick={closeDetail}
+                aria-label="Close detail"
+                className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
+              >
+                <CloseOutlined />
+              </button>
+            </div>
+
+            <div className="relative flex-1 overflow-hidden">
+              {detailIndex > 0 && (
+                <button
+                  onClick={() => openDetail(detailIndex - 1)}
+                  aria-label="Previous word"
+                  className="hidden sm:flex absolute left-1 top-1/2 -translate-y-1/2 z-10 w-8 h-8 items-center justify-center rounded-full bg-white/90 shadow border border-gray-200 hover:bg-gray-50"
+                >
+                  <LeftOutlined />
+                </button>
+              )}
+              {detailIndex < targetChips.length - 1 && (
+                <button
+                  onClick={() => openDetail(detailIndex + 1)}
+                  aria-label="Next word"
+                  className="hidden sm:flex absolute right-1 top-1/2 -translate-y-1/2 z-10 w-8 h-8 items-center justify-center rounded-full bg-white/90 shadow border border-gray-200 hover:bg-gray-50"
+                >
+                  <RightOutlined />
+                </button>
+              )}
+
+              <div
+                ref={detailScrollRef}
+                onScroll={onDetailScroll}
+                className="h-full overflow-x-auto overflow-y-auto flex snap-x snap-mandatory"
+                style={{ scrollbarWidth: 'none' }}
+              >
+                {targetChips.map((t, i) => {
+                  const item = detailItems.get(t.word)
+                  const parsed = item?.detail ? parseDetailJson(item.detail) : null
+                  return (
+                    <div
+                      key={`${t.kind}-${t.word}-${i}`}
+                      ref={el => { if (el) detailCardRefs.current.set(i, el); else detailCardRefs.current.delete(i) }}
+                      className="snap-center shrink-0 w-full px-5 py-4 overflow-y-auto"
+                    >
+                      <div className="flex items-center justify-center gap-2 mb-2">
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full text-white ${t.kind === 'hard' ? 'bg-red-500' : 'bg-blue-500'}`}>
+                          {t.kind === 'hard' ? 'Difficult' : 'Known'}
+                        </span>
+                        {item?.state_label && (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
+                            {item.state_label}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-2xl font-semibold text-center mb-3">{t.word}</div>
+
+                      {!item ? (
+                        <div className="text-center text-sm text-gray-400 py-6">
+                          No saved entry yet. Tap the word in chat to add it to your deck.
+                        </div>
+                      ) : (
+                        <div className="space-y-2 text-left">
+                          {parsed?.reading && (
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-xs text-gray-400 w-24 shrink-0">Reading</span>
+                              <span className="text-sm font-medium">{parsed.reading}</span>
+                            </div>
+                          )}
+                          {parsed?.meaning && (
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-xs text-gray-400 w-24 shrink-0">Meaning</span>
+                              <span className="text-sm font-medium">{parsed.meaning}</span>
+                            </div>
+                          )}
+                          {parsed?.part_of_speech && (
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-xs text-gray-400 w-24 shrink-0">Part of speech</span>
+                              <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{parsed.part_of_speech}</span>
+                            </div>
+                          )}
+                          {parsed?.example && (
+                            <div className="mt-2 p-2 bg-gray-50 rounded-lg">
+                              <p className="text-sm italic">{parsed.example}</p>
+                              {parsed.example_meaning && (
+                                <p className="text-xs text-gray-500 mt-1">{parsed.example_meaning}</p>
+                              )}
+                            </div>
+                          )}
+                          {!parsed && item.detail && (
+                            <p className="text-sm text-gray-600 whitespace-pre-wrap">{item.detail}</p>
+                          )}
+                          {item.mnemonic && (
+                            <div className="pt-2 mt-2 border-t border-gray-100">
+                              <span className="text-xs text-gray-400">Mnemonic</span>
+                              <p className="text-sm text-amber-700 bg-amber-50 p-2 rounded-lg mt-1">{item.mnemonic}</p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
+            {targetChips.length > 1 && (
+              <div className="shrink-0 flex items-center justify-center gap-1 py-2 border-t">
+                {targetChips.map((_, i) => (
+                  <button
+                    key={i}
+                    onClick={() => openDetail(i)}
+                    aria-label={`Go to word ${i + 1}`}
+                    className={`h-1.5 rounded-full transition-all ${i === detailIndex ? 'w-4 bg-gray-600' : 'w-1.5 bg-gray-300'}`}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }

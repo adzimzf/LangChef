@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef, useCallback } from 'react'
+import { useEffect, useMemo, useState, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import type { Grade } from '../lib/types'
 import {
@@ -34,26 +34,55 @@ function getMaxNewCards(): number {
   return val ? parseInt(val, 10) || MAX_NEW_CARDS_DEFAULT : MAX_NEW_CARDS_DEFAULT
 }
 
-// Grade button config
 type GradeOption = { grade: Grade; label: string; nextLabel: string; color: string }
 
+const GRADE_COLORS: Record<string, string> = {
+  again: 'bg-red-500',
+  hard: 'bg-orange-500',
+  good: 'bg-blue-500',
+  easy: 'bg-green-500',
+}
+
+type RawGradePreview = {
+  grade: string
+  label: string
+  next_review_formatted: string
+  lapsed: boolean
+  graduated: boolean
+}
+
+type SessionStartResult = {
+  total_cards: number
+  next_card: ReviewItem | null
+  grade_options: RawGradePreview[]
+  reviews_remaining: number
+  new_remaining: number
+  reviews_completed: number
+  new_cards_seen: number
+}
+
+type SessionGradeResult = {
+  EF: number; I: number; R: number
+  state: string; step: number; lapse_count: number
+  next_review: number; lapsed: boolean; graduated: boolean
+  fsrs_stability: number | null; fsrs_difficulty: number | null
+  reviews_completed: number; new_cards_seen: number
+  next_card: ReviewItem | null
+  grade_options: RawGradePreview[]
+  session_done: boolean
+  remaining_count: number
+}
+
+function toGradeOptions(previews: RawGradePreview[]): GradeOption[] {
+  return previews.map(p => ({
+    grade: p.grade as Grade,
+    label: p.label,
+    nextLabel: p.next_review_formatted,
+    color: GRADE_COLORS[p.grade] || 'bg-gray-500',
+  }))
+}
+
 function SessionCompleteEffect({ sessionCompleted }: { sessionCompleted: number }) {
-  const recorded = useRef(false)
-
-  useEffect(() => {
-    if (sessionCompleted > 0 && !recorded.current) {
-      recorded.current = true
-      invoke('db_record_activity', { activityType: 'review' }).catch(() => {})
-    }
-  }, [sessionCompleted])
-
-  // Reset when session restarts (sessionCompleted goes back to 0)
-  useEffect(() => {
-    if (sessionCompleted === 0) {
-      recorded.current = false
-    }
-  }, [sessionCompleted])
-
   return null
 }
 
@@ -71,53 +100,25 @@ export default function Review() {
   const [importing, setImporting] = useState(false)
   const [importResult, setImportResult] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
+
+  // Session state — owned by backend, mirrored here for display only
+  const [currentCard, setCurrentCard] = useState<ReviewItem | null>(null)
+  const [sessionTotal, setSessionTotal] = useState(0)
+  const [sessionRemaining, setSessionRemaining] = useState(0)
+  const [sessionCompleted, setSessionCompleted] = useState(0)
   const [reviewedToday, setReviewedToday] = useState(0)
   const [newCardsToday, setNewCardsToday] = useState(0)
-  const newCardsTodayRef = useRef(0)
-  // Keep ref in sync so loadDueItems (captured in buildQueue) always reads the latest value
-  useEffect(() => { newCardsTodayRef.current = newCardsToday }, [newCardsToday])
+  const [gradeOptions, setGradeOptions] = useState<GradeOption[]>([])
+
   const fileInputRef = useRef<HTMLInputElement>(null)
-  const maxReviews = getMaxReviews()
-  const maxNewCards = getMaxNewCards()
-
-  // Session queue: ordered list of cards to review.
-  // Lapsed cards go to the back; passed cards are removed.
-  // Card state is updated locally after each grade so that
-  // subsequent grade previews are accurate without needing a DB reload.
-  const [sessionQueue, setSessionQueue] = useState<ReviewItem[]>([])
-  const [sessionCompleted, setSessionCompleted] = useState(0)
-
-  // Track if this is the initial load (to build queue from DB)
-  const initialLoadDone = useRef(false)
-
-  // Guard against double-tapping grade buttons before React re-renders.
-  // Using a ref (not state) so the check is synchronous — no stale closure risk.
   const isGrading = useRef(false)
 
-  // Tick counter to force re-evaluation of which cards are due.
-  // Learning/relearning cards have short step intervals (e.g. 1m, 10m) and
-  // become due when their next_review timestamp passes. Without ticking,
-  // they'd remain invisible until the user takes some other action.
-  const [tick, setTick] = useState(0)
-  useEffect(() => {
-    const interval = setInterval(() => setTick(t => t + 1), 5000)
-    return () => clearInterval(interval)
-  }, [])
+  const maxReviews = getMaxReviews()
+  const maxNewCards = getMaxNewCards()
 
   useEffect(() => {
     loadItems()
   }, [])
-
-  // Load study limits from backend when language changes
-  useEffect(() => {
-    if (!selectedLang) return
-    invoke<{ reviews_completed: number; new_cards_seen: number }>('db_get_study_limits', { language: selectedLang })
-      .then(limits => {
-        setReviewedToday(limits.reviews_completed)
-        setNewCardsToday(limits.new_cards_seen)
-      })
-      .catch(() => {})
-  }, [selectedLang])
 
   async function loadItems() {
     setLoading(true)
@@ -128,26 +129,26 @@ export default function Review() {
     setLoading(false)
   }
 
-  async function loadDueItems(lang: string | null) {
+  async function startSession(lang: string | null) {
+    if (!lang) return
     try {
-      const remaining = Math.max(0, maxNewCards - newCardsTodayRef.current)
-      const d = new Date()
-      d.setHours(23, 59, 59, 999)
-      const items = await invoke<ReviewItem[]>('db_get_due_review_items', {
+      const result = await invoke<SessionStartResult>('db_session_start', {
         language: lang,
-        limit: maxReviews,
-        newCardsRemaining: remaining,
-        maxNextReview: Math.floor(d.getTime() / 1000),
-        maxNewCardsPerDay: maxNewCards,
+        maxReviews: getMaxReviews(),
+        maxNewCards: getMaxNewCards(),
       })
-      // don't remove this line
-      // console.log(items)
-      setSessionQueue(items)
+      setCurrentCard(result.next_card ?? null)
+      setGradeOptions(toGradeOptions(result.grade_options))
+      setSessionTotal(result.total_cards)
+      setSessionRemaining(result.total_cards)
+      setReviewedToday(result.reviews_completed)
+      setNewCardsToday(result.new_cards_seen)
       setSessionCompleted(0)
+      setRevealed(false)
     } catch {}
   }
 
-  // Group items by language — skip items without a language
+  // Group items by language for deck stats display
   const languageGroups = useMemo(() => {
     const groups: Record<string, ReviewItem[]> = {}
     for (const item of allItems) {
@@ -159,7 +160,7 @@ export default function Review() {
     return groups
   }, [allItems])
 
-  // Auto-select first language if none selected
+  // Auto-select first language
   useEffect(() => {
     const langs = Object.keys(languageGroups)
     if (langs.length > 0 && !selectedLang) {
@@ -167,158 +168,48 @@ export default function Review() {
     }
   }, [languageGroups])
 
-  // Build session queue from backend. Only called on mount, language change, or manual refresh.
-  const buildQueue = useCallback((lang: string | null) => {
-    loadDueItems(lang)
-  }, [maxNewCards, maxReviews])
-
-  // Build queue on initial load
-  useEffect(() => {
-    if (selectedLang && !loading && !initialLoadDone.current) {
-      buildQueue(selectedLang)
-      initialLoadDone.current = true
-    }
-  }, [selectedLang, loading, buildQueue])
-
-  // Build queue on language change
+  // Start session whenever language changes (or on initial select)
   const prevLang = useRef<string | null>(null)
   useEffect(() => {
-    if (selectedLang && selectedLang !== prevLang.current && initialLoadDone.current) {
-      buildQueue(selectedLang)
-      setRevealed(false)
+    if (selectedLang && selectedLang !== prevLang.current && !loading) {
+      startSession(selectedLang)
     }
     prevLang.current = selectedLang
-  }, [selectedLang, buildQueue])
-
-  const currentCard = sessionQueue[0]
-
-  // End of today (23:59:59 local) in seconds for consistent due-counting
-  const endOfDaySeconds = (() => {
-    const d = new Date()
-    d.setHours(23, 59, 59, 999)
-    return Math.floor(d.getTime() / 1000)
-  })()
-
-  // Backend already returns only items due by end of today.
-  // Just use the first item — no additional time-based filtering needed.
-  const visibleCard = sessionQueue[0] || null
-
-  // Count total items in queue (all are due by end of day)
-  const immediatelyDueCount = sessionQueue.length
-
-  // Stats for the selected language
-  const deckItems: ReviewItem[] = selectedLang ? (languageGroups[selectedLang] || []) : []
-  const dueInDeck = (() => {
-    if (!selectedLang) return 0
-    return deckItems.filter((item: ReviewItem) => !item.next_review || item.next_review <= endOfDaySeconds).length
-  })()
-
-  // Anki-style grade options with dynamic next-review preview (loaded from backend)
-  const [gradeOptions, setGradeOptions] = useState<GradeOption[]>([])
-
-  useEffect(() => {
-    if (!visibleCard) { setGradeOptions([]); return }
-    let cancelled = false
-    invoke<Array<{ grade: string; label: string; next_review_formatted: string; lapsed: boolean; graduated: boolean }>>('db_preview_srs_grades', { id: visibleCard.id })
-      .then(previews => {
-        if (cancelled) return
-        const colors: Record<string, string> = { again: 'bg-red-500', hard: 'bg-orange-500', good: 'bg-blue-500', easy: 'bg-green-500' }
-        setGradeOptions(previews.map(p => ({
-          grade: p.grade as Grade,
-          label: p.label,
-          nextLabel: p.next_review_formatted,
-          color: colors[p.grade] || 'bg-gray-500',
-        })))
-      })
-      .catch(() => { if (!cancelled) setGradeOptions([]) })
-    return () => { cancelled = true }
-  }, [visibleCard?.id])
+  }, [selectedLang, loading])
 
   async function handleGrade(grade: Grade) {
-    if (!visibleCard) return
-    // Prevent double-tap: discard rapid clicks before React re-renders
-    if (isGrading.current) return
+    if (!currentCard || isGrading.current) return
     isGrading.current = true
 
-    // Capture card ID upfront so the setSessionQueue closure never uses a stale visibleCard
-    const cardId = visibleCard.id
-    const cardState = visibleCard.state || 'new'
-
-    let result: { EF: number; I: number; R: number; state: string; step: number; lapse_count: number; next_review: number; lapsed: boolean; graduated: boolean; fsrs_stability: number | null; fsrs_difficulty: number | null }
     try {
-      result = await invoke<{ EF: number; I: number; R: number; state: string; step: number; lapse_count: number; next_review: number; lapsed: boolean; graduated: boolean; fsrs_stability: number | null; fsrs_difficulty: number | null }>('db_update_srs', { id: cardId, grade })
-    } catch {
-      isGrading.current = false
-      return
-    }
+      const result = await invoke<SessionGradeResult>('db_session_grade', {
+        language: currentCard.language || selectedLang || 'ja',
+        cardId: currentCard.id,
+        grade,
+        maxReviews: getMaxReviews(),
+        maxNewCards: getMaxNewCards(),
+      })
 
-    // Only count as reviewed if card graduated (backend determines this)
-    if (result.graduated) {
-      invoke('db_increment_study_limit', { language: selectedLang, field: 'reviews' }).catch(() => {})
-      setReviewedToday(prev => prev + 1)
-    }
+      invoke('db_record_activity', { activityType: 'review' }).catch(() => {})
 
-    // Track new cards introduced today
-    if (cardState === 'new') {
-      invoke('db_increment_study_limit', { language: selectedLang, field: 'new_cards' }).catch(() => {})
-      setNewCardsToday(prev => prev + 1)
-    }
+      setReviewedToday(result.reviews_completed)
+      setNewCardsToday(result.new_cards_seen)
+      setCurrentCard(result.next_card ?? null)
+      setSessionRemaining(result.remaining_count)
+      setGradeOptions(toGradeOptions(result.grade_options))
+      setRevealed(false)
+      setShowMnemonic(false)
 
-    setRevealed(false)
-    setShowMnemonic(false)
-
-    // Update session queue with backend-computed SRS state.
-    // Uses captured cardId instead of visibleCard from outer scope to avoid stale closures.
-    setSessionQueue(prev => {
-      const idx = prev.findIndex(item => item.id === cardId)
-      if (idx < 0) return prev
-
-      const before = prev.slice(0, idx)
-      const after = prev.slice(idx + 1)
-
-      const updatedItem: ReviewItem = {
-        ...prev[idx],
-        EF: result.EF,
-        I: result.I,
-        R: result.R,
-        state: result.state,
-        step: result.step,
-        lapse_count: result.lapse_count,
-        next_review: result.next_review,
-        fsrs_stability: result.fsrs_stability,
-        fsrs_difficulty: result.fsrs_difficulty,
-      }
-
-      let newQueue: ReviewItem[]
       if (result.graduated && !result.lapsed) {
-        // Card graduated to Review: remove from session queue entirely.
-        newQueue = [...before, ...after]
-      } else {
-        // All other cases: move to back of queue.
-        newQueue = [...before, ...after, updatedItem]
+        setSessionCompleted(prev => prev + 1)
       }
+    } catch {}
 
-      // If new card limit reached, remove remaining new cards from the queue
-      const newSeenAfterGrade = cardState === 'new' ? newCardsToday + 1 : newCardsToday
-      if (newSeenAfterGrade >= maxNewCards) {
-        newQueue = newQueue.filter(item => item.state !== 'new' && item.state !== null && item.state !== '')
-      }
-
-      return newQueue
-    })
-
-    if (result.graduated && !result.lapsed) {
-      setSessionCompleted(prev => prev + 1)
-    }
-
-    // Release the guard after state updates are scheduled (next tick).
-    // React batches these setState calls so they'll apply in one render;
-    // by then visibleCard has changed and a new click would be valid.
     setTimeout(() => { isGrading.current = false }, 0)
   }
 
   async function generateDetail() {
-    if (!visibleCard) return
+    if (!currentCard) return
     const apiHost = localStorage.getItem('api_host') || ''
     const apiKey = localStorage.getItem('api_key') || ''
     const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
@@ -328,15 +219,13 @@ export default function Review() {
     }
     setGeneratingDetail(true)
     try {
-      const lang = visibleCard.language || 'ja'
+      const lang = currentCard.language || 'ja'
       const result = await invoke<string>('db_generate_detail', {
         apiHost, apiKey, model,
-        content: visibleCard.content,
+        content: currentCard.content,
         language: lang,
       })
-      setSessionQueue(prev => prev.map(item =>
-        item.id === visibleCard.id ? { ...item, detail: result } : item
-      ))
+      setCurrentCard(prev => prev ? { ...prev, detail: result } : prev)
     } catch (e) {
       alert(`Failed to generate: ${e}`)
     }
@@ -344,7 +233,7 @@ export default function Review() {
   }
 
   async function generateMnemonic() {
-    if (!visibleCard) return
+    if (!currentCard) return
     const apiHost = localStorage.getItem('api_host') || ''
     const apiKey = localStorage.getItem('api_key') || ''
     const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
@@ -354,17 +243,15 @@ export default function Review() {
     }
     setGeneratingMnemonic(true)
     try {
-      const lang = visibleCard.language || 'ja'
+      const lang = currentCard.language || 'ja'
       const result = await invoke<string>('db_generate_mnemonic', {
         apiHost, apiKey, model,
-        id: visibleCard.id,
-        content: visibleCard.content,
+        id: currentCard.id,
+        content: currentCard.content,
         language: lang,
-        detail: visibleCard.detail,
+        detail: currentCard.detail,
       })
-      setSessionQueue(prev => prev.map(item =>
-        item.id === visibleCard.id ? { ...item, mnemonic: result } : item
-      ))
+      setCurrentCard(prev => prev ? { ...prev, mnemonic: result } : prev)
       setShowMnemonic(true)
     } catch (e) {
       alert(`Failed to generate mnemonic: ${e}`)
@@ -384,14 +271,12 @@ export default function Review() {
           content: parts[0],
           detail: parts[1] || undefined,
           language: importLang,
-          tags: undefined as string | undefined,
         }
       })
       const result = await invoke<string>('db_import_review_items', { items })
       setImportResult(result)
-      // Reload DB and rebuild queue
       await loadItems()
-      buildQueue(selectedLang)
+      await startSession(selectedLang)
     } catch (e) {
       setImportResult(`Error: ${e}`)
     }
@@ -407,9 +292,7 @@ export default function Review() {
 
   async function refreshFromDB() {
     await loadItems()
-    // Need to wait for allItems to update, then rebuild
-    // We do this by using a flag that triggers in the useEffect
-    initialLoadDone.current = false
+    await startSession(selectedLang)
   }
 
   function renderDetailContent(detail: string | null) {
@@ -427,9 +310,7 @@ export default function Review() {
               {generatingDetail ? 'Generating...' : 'Generate with AI'}
             </button>
             <button
-              onClick={() => {
-                setEditingId(visibleCard?.id || null)
-              }}
+              onClick={() => { setEditingId(currentCard?.id || null) }}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gray-200 text-gray-700 text-sm font-medium hover:bg-gray-300 active:bg-gray-400 transition-colors"
             >
               <EditOutlined />
@@ -470,11 +351,10 @@ export default function Review() {
               )}
             </div>
           )}
-          {/* Mnemonic section */}
           <div className="mt-3 pt-2 border-t border-gray-100">
             <div className="flex items-center justify-between mb-1">
               <span className="text-xs text-gray-400">Mnemonic</span>
-              {!visibleCard?.mnemonic && (
+              {!currentCard?.mnemonic && (
                 <button
                   onClick={generateMnemonic}
                   disabled={generatingMnemonic}
@@ -485,13 +365,13 @@ export default function Review() {
                 </button>
               )}
             </div>
-            {visibleCard?.mnemonic ? (
+            {currentCard?.mnemonic ? (
               <div>
                 <button
                   onClick={() => setShowMnemonic(!showMnemonic)}
                   className="text-sm text-left w-full"
                 >
-                  {showMnemonic ? visibleCard.mnemonic : 'Tap to reveal mnemonic'}
+                  {showMnemonic ? currentCard.mnemonic : 'Tap to reveal mnemonic'}
                 </button>
                 <button
                   onClick={generateMnemonic}
@@ -507,9 +387,7 @@ export default function Review() {
             )}
           </div>
           <button
-            onClick={() => {
-              setEditingId(visibleCard?.id || null)
-            }}
+            onClick={() => { setEditingId(currentCard?.id || null) }}
             className="text-xs text-gray-400 hover:text-gray-600 mt-1"
           >
             <EditOutlined className="mr-1" />Edit detail
@@ -522,9 +400,7 @@ export default function Review() {
       <div className="mt-4 text-left">
         <p className="text-sm text-gray-600 whitespace-pre-wrap">{detail}</p>
         <button
-          onClick={() => {
-            setEditingId(visibleCard?.id || null)
-          }}
+          onClick={() => { setEditingId(currentCard?.id || null) }}
           className="text-xs text-gray-400 hover:text-gray-600 mt-2"
         >
           <EditOutlined className="mr-1" />Edit detail
@@ -535,7 +411,7 @@ export default function Review() {
 
   // Edit detail modal
   if (editingId) {
-    const card = sessionQueue.find(i => i.id === editingId) || allItems.find(i => i.id === editingId)
+    const card = (currentCard?.id === editingId ? currentCard : null) || allItems.find(i => i.id === editingId)
     if (!card) {
       setEditingId(null)
       return null
@@ -553,10 +429,9 @@ export default function Review() {
           }
           await invoke('db_update_review_detail', { id: editingId, detail: data.detail })
           await invoke('db_update_mnemonic', { id: editingId, mnemonic: data.mnemonic })
-          // Update local state
-          setSessionQueue(prev => prev.map(item =>
-            item.id === editingId ? { ...item, content: data.content, detail: data.detail, mnemonic: data.mnemonic } : item
-          ))
+          setCurrentCard(prev =>
+            prev?.id === editingId ? { ...prev, content: data.content, detail: data.detail, mnemonic: data.mnemonic } : prev
+          )
           setAllItems(prev => prev.map(item =>
             item.id === editingId ? { ...item, content: data.content, detail: data.detail, mnemonic: data.mnemonic } : item
           ))
@@ -678,12 +553,19 @@ export default function Review() {
     )
   }
 
-  // Language tabs
   const langKeys = Object.keys(languageGroups)
+  const deckItems: ReviewItem[] = selectedLang ? (languageGroups[selectedLang] || []) : []
+  const endOfDaySeconds = (() => {
+    const d = new Date(); d.setHours(23, 59, 59, 999)
+    return Math.floor(d.getTime() / 1000)
+  })()
+  const dueInDeck = deckItems.filter(
+    (item: ReviewItem) => !item.next_review || item.next_review <= endOfDaySeconds
+  ).length
 
   return (
     <div className="flex flex-col h-full -m-4 p-4 overflow-y-auto">
-      {/* Header with language tabs */}
+      {/* Header */}
       <div className="mb-3 shrink-0 sticky top-0 z-10 bg-gray-50 pt-4 pb-2">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-lg font-semibold">Review</h2>
@@ -725,24 +607,28 @@ export default function Review() {
           </div>
         )}
 
-        {/* Session progress */}
-        {sessionQueue.length > 0 && (
-          <div className="flex items-center gap-2">
-            <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
-              <div
-                className="h-full bg-blue-500 rounded-full transition-all duration-300"
-                style={{ width: `${(reviewedToday + immediatelyDueCount) > 0 ? (reviewedToday / (reviewedToday + immediatelyDueCount)) * 100 : 0}%` }}
-              />
+        {/* Session progress bar */}
+        {currentCard !== null && (() => {
+          const dailyTarget = maxReviews + maxNewCards
+          const dailyDone = reviewedToday + newCardsToday
+          return (
+            <div className="flex items-center gap-2">
+              <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-blue-500 rounded-full transition-all duration-300"
+                  style={{ width: `${dailyTarget > 0 ? Math.min(100, (dailyDone / dailyTarget) * 100) : 0}%` }}
+                />
+              </div>
+              <span className="text-xs text-gray-400 shrink-0">
+                {dailyDone}/{dailyTarget}
+              </span>
             </div>
-            <span className="text-xs text-gray-400 shrink-0">
-              {reviewedToday}/{reviewedToday + immediatelyDueCount}
-            </span>
-          </div>
-        )}
+          )
+        })()}
       </div>
 
-      {/* No due cards for selected language */}
-      {!visibleCard ? (
+      {/* No due cards */}
+      {!currentCard ? (
         <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-3">
           <SessionCompleteEffect sessionCompleted={sessionCompleted} />
           <>
@@ -771,23 +657,20 @@ export default function Review() {
               {/* State badge & difficulty indicator */}
               <div className="flex items-center justify-center gap-2 mb-4">
                 <span className={`text-xs px-2 py-0.5 rounded-full text-white ${
-                  visibleCard.state === 'new' ? 'bg-purple-500' :
-                  visibleCard.state === 'learning' ? 'bg-blue-500' :
-                  visibleCard.state === 'relearning' ? 'bg-orange-500' :
+                  currentCard.state === 'new' ? 'bg-purple-500' :
+                  currentCard.state === 'learning' ? 'bg-blue-500' :
+                  currentCard.state === 'relearning' ? 'bg-orange-500' :
                   'bg-green-500'
                 }`}>
-                  {visibleCard.state_label}
+                  {currentCard.state_label}
                 </span>
-                <div
-                  className="w-16 h-2 rounded-full"
-                  style={{ backgroundColor: visibleCard.difficulty_color }}
-                />
+                <div className={`w-16 h-2 rounded-full ${currentCard.difficulty_bg_class}`} />
               </div>
 
-              <div className="text-2xl font-semibold mb-1">{visibleCard?.content || ''}</div>
-              {visibleCard.tags && (
-                <span className={`inline-block text-xs px-2 py-0.5 rounded-full text-white ${visibleCard.difficulty_bg_class} mt-1`}>
-                  {visibleCard.tags}
+              <div className="text-2xl font-semibold mb-1">{currentCard.content}</div>
+              {currentCard.difficulty_label && (
+                <span className={`inline-block text-xs px-2 py-0.5 rounded-full text-white mt-1 ${currentCard.difficulty_bg_class}`}>
+                  {currentCard.difficulty_label}
                 </span>
               )}
 
@@ -795,22 +678,20 @@ export default function Review() {
                 <div className="text-sm text-gray-400 mt-4">Tap to reveal</div>
               ) : (
                 <>
-                  {/* Detail section */}
-                  {renderDetailContent(visibleCard.detail)}
+                  {renderDetailContent(currentCard.detail)}
 
-                  {/* SRS stats */}
                   <div className="mt-4 pt-3 border-t border-gray-100">
                     <div className="flex items-center justify-center gap-4 text-xs text-gray-400">
-                      <span>Reps: {visibleCard.R}</span>
-                      <span>Stability: {visibleCard.fsrs_stability != null ? `${Math.round(visibleCard.fsrs_stability)}d` : `${visibleCard.I}d`}</span>
-                      <span>Difficulty: {visibleCard.fsrs_difficulty != null ? visibleCard.fsrs_difficulty.toFixed(1) : '—'}</span>
-                      {visibleCard.lapse_count > 0 && (
-                        <span>Lapses: {visibleCard.lapse_count}</span>
+                      <span>Reps: {currentCard.R}</span>
+                      <span>Stability: {currentCard.fsrs_stability != null ? `${Math.round(currentCard.fsrs_stability)}d` : `${currentCard.I}d`}</span>
+                      <span>Difficulty: {currentCard.fsrs_difficulty != null ? currentCard.fsrs_difficulty.toFixed(1) : '—'}</span>
+                      {currentCard.lapse_count > 0 && (
+                        <span>Lapses: {currentCard.lapse_count}</span>
                       )}
                     </div>
-                    {visibleCard.next_review && (
+                    {currentCard.next_review && (
                       <div className="text-xs text-gray-300 mt-1">
-                        Next review: {new Date(visibleCard.next_review * 1000).toLocaleString()}
+                        Next review: {new Date(currentCard.next_review * 1000).toLocaleString()}
                       </div>
                     )}
                   </div>
@@ -819,7 +700,7 @@ export default function Review() {
             </div>
           </div>
 
-          {/* Grade buttons - fixed at bottom for one-handed reach */}
+          {/* Grade buttons */}
           <div className="fixed bottom-14 left-0 right-0 px-4 pt-3 pb-4 z-40">
             {revealed ? (
               <div className="grid grid-cols-4 gap-2">

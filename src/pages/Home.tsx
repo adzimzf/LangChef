@@ -9,6 +9,7 @@ import {
   RightOutlined,
   UnorderedListOutlined,
   ReadOutlined,
+  FileTextOutlined,
 } from '@ant-design/icons'
 import { type ActivityRow, todayKey, computeStreakFromActivity } from '../lib/stats'
 
@@ -28,10 +29,10 @@ export default function Home() {
       try {
         const [activityRows, reviewItems] = await Promise.all([
           invoke<ActivityRow[]>('db_get_user_activity', { dateFrom: '2000-01-01', dateTo: todayKey() }),
-          invoke<{ R: number }[]>('db_get_review_items'),
+          invoke<{ R: number; state: string }[]>('db_get_review_items'),
         ])
         const streak = computeStreakFromActivity(activityRows)
-        const mastered = reviewItems.filter((c) => c.R >= 3).length
+        const mastered = reviewItems.filter((c) => c.state === 'review').length
         const today = todayKey()
         const sessionsToday = activityRows
           .filter(a => a.date === today)
@@ -75,6 +76,14 @@ export default function Home() {
       desc: `${stats.total} words in your deck`,
       color: 'bg-amber-500',
       onClick: () => navigate('/words'),
+    },
+    {
+      key: 'reading',
+      icon: <FileTextOutlined className="text-xl" />,
+      label: 'Reading',
+      desc: 'Read articles and practice comprehension',
+      color: 'bg-teal-500',
+      onClick: () => navigate('/reading'),
     },
     {
       key: 'grammar',
