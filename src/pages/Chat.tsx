@@ -5,10 +5,11 @@ import { renderFurigana, hasFuriganaAnnotations, stripFurigana } from '../lib/fu
 import { JLPT_LEVELS, DEFAULT_JLPT_LEVEL, JLPT_LEVEL_STORAGE_KEY } from '../lib/jlpt'
 import type { JLPTLevel } from '../lib/jlpt'
 import type { ReviewItem } from '../lib/types'
+import { parseDetailJson } from '../lib/types'
 import UserMessageFeedback, { type UserFeedback } from '../components/UserMessageFeedback'
 import { Input } from 'antd'
 const { TextArea } = Input
-import { ArrowLeftOutlined, SendOutlined, InfoCircleOutlined, CloseOutlined, PlusOutlined, EditOutlined, LeftOutlined, RightOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, SendOutlined, InfoCircleOutlined, CloseOutlined, PlusOutlined, EditOutlined, LeftOutlined, RightOutlined, DownOutlined, UpOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 
@@ -270,6 +271,84 @@ export default function Chat() {
   const [atBottom, setAtBottom] = useState(true)
   const lastScrollTopRef = useRef(0)
   const [previewTargets, setPreviewTargets] = useState<{ difficult: string[]; known: string[]; resetUsed: boolean }>({ difficult: [], known: [], resetUsed: false })
+
+  // Detail popup for target chips
+  const [detailIndex, setDetailIndex] = useState<number | null>(null)
+  const [detailVisible, setDetailVisible] = useState(false)
+  const [detailItems, setDetailItems] = useState<Map<string, ReviewItem>>(new Map())
+  const detailScrollRef = useRef<HTMLDivElement>(null)
+  const detailCardRefs = useRef<Map<number, HTMLDivElement>>(new Map())
+  const detailCloseTimer = useRef<number | null>(null)
+
+  const targetChips = useMemo(() => [
+    ...previewTargets.difficult.map(w => ({ word: w, kind: 'hard' as const })),
+    ...previewTargets.known.map(w => ({ word: w, kind: 'known' as const })),
+  ], [previewTargets.difficult, previewTargets.known])
+
+  const closeDetail = () => {
+    setDetailVisible(false)
+    if (detailCloseTimer.current) window.clearTimeout(detailCloseTimer.current)
+    detailCloseTimer.current = window.setTimeout(() => {
+      setDetailIndex(null)
+      detailCloseTimer.current = null
+    }, 220)
+  }
+
+  const openDetail = async (idx: number) => {
+    if (detailCloseTimer.current) {
+      window.clearTimeout(detailCloseTimer.current)
+      detailCloseTimer.current = null
+    }
+    setDetailIndex(idx)
+    // Defer visibility flip to the next frame so the enter transition runs
+    requestAnimationFrame(() => {
+      if (mounted.current) setDetailVisible(true)
+    })
+    const allWords = [...previewTargets.difficult, ...previewTargets.known]
+    const missing = allWords.filter(w => !detailItems.has(w))
+    if (missing.length === 0) return
+    try {
+      const items = await invoke<ReviewItem[]>('db_get_review_items_by_words', { words: missing })
+      if (!mounted.current) return
+      setDetailItems(prev => {
+        const next = new Map(prev)
+        for (const it of items) next.set(it.content, it)
+        return next
+      })
+    } catch (e) {
+      console.error('Failed to load word details', e)
+    }
+  }
+
+  // Scroll the popup to the requested card whenever it (re)opens
+  useEffect(() => {
+    if (detailIndex == null) return
+    const node = detailCardRefs.current.get(detailIndex)
+    if (node) node.scrollIntoView({ behavior: 'instant' as ScrollBehavior, inline: 'center', block: 'nearest' })
+  }, [detailIndex])
+
+  // Track which card is currently centered as the user swipes
+  const onDetailScroll = () => {
+    const container = detailScrollRef.current
+    if (!container) return
+    const center = container.scrollLeft + container.clientWidth / 2
+    let bestIdx = detailIndex ?? 0
+    let bestDist = Infinity
+    detailCardRefs.current.forEach((el, idx) => {
+      const cardCenter = el.offsetLeft + el.offsetWidth / 2
+      const dist = Math.abs(cardCenter - center)
+      if (dist < bestDist) { bestDist = dist; bestIdx = idx }
+    })
+    if (bestIdx !== detailIndex) setDetailIndex(bestIdx)
+  }
+
+  // Close popup on Escape
+  useEffect(() => {
+    if (detailIndex == null) return
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') closeDetail() }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [detailIndex])
 
   const langInfo = LANGUAGES[lang]
 
@@ -1682,7 +1761,7 @@ export default function Chat() {
       {/* Target word chip strip — visible only on user's turn at the bottom of the scroll */}
       {(() => {
         const hasTargets = previewTargets.difficult.length > 0 || previewTargets.known.length > 0
-        const visible = hasTargets && !loading && atBottom
+        const visible = hasTargets && !loading && atBottom && messages.length > 0
         return (
           <div
             aria-hidden={!visible}
@@ -1700,22 +1779,27 @@ export default function Chat() {
                 </span>
               </div>
               <div className="flex flex-nowrap gap-1 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
-                {previewTargets.difficult.map(w => (
-                  <span
-                    key={`d-${w}`}
-                    className="shrink-0 px-2 py-0.5 rounded-full text-xs font-medium bg-red-50 text-red-600 border border-red-200 whitespace-nowrap"
-                  >
-                    {w}
-                  </span>
-                ))}
-                {previewTargets.known.map(w => (
-                  <span
-                    key={`k-${w}`}
-                    className="shrink-0 px-2 py-0.5 rounded-full text-xs font-medium bg-blue-50 text-blue-600 border border-blue-200 whitespace-nowrap"
-                  >
-                    {w}
-                  </span>
-                ))}
+                {targetChips.map((t, i) => {
+                  const expanded = detailIndex === i
+                  const palette = t.kind === 'hard'
+                    ? { chip: 'bg-red-50 text-red-600 border-red-200', btn: 'hover:bg-red-100 text-red-500' }
+                    : { chip: 'bg-blue-50 text-blue-600 border-blue-200', btn: 'hover:bg-blue-100 text-blue-500' }
+                  return (
+                    <span
+                      key={`${t.kind}-${t.word}`}
+                      className={`shrink-0 flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full text-xs font-medium border whitespace-nowrap ${palette.chip}`}
+                    >
+                      <span>{t.word}</span>
+                      <button
+                        onClick={() => expanded ? closeDetail() : openDetail(i)}
+                        aria-label={expanded ? 'Collapse word detail' : 'Expand word detail'}
+                        className={`flex items-center justify-center w-4 h-4 rounded-full transition-colors ${palette.btn}`}
+                      >
+                        {expanded ? <UpOutlined style={{ fontSize: 8 }} /> : <DownOutlined style={{ fontSize: 8 }} />}
+                      </button>
+                    </span>
+                  )
+                })}
               </div>
             </div>
           </div>
@@ -1782,6 +1866,148 @@ export default function Chat() {
           </button>
         </div>
       </div>
+
+      {detailIndex != null && targetChips[detailIndex] && (
+        <div
+          className={`fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/60 transition-opacity duration-200 ease-out ${
+            detailVisible ? 'opacity-100' : 'opacity-0'
+          }`}
+          onClick={closeDetail}
+          role="dialog"
+          aria-modal="true"
+        >
+          <div
+            className={`w-full sm:max-w-md bg-white rounded-t-2xl sm:rounded-2xl shadow-xl relative max-h-[85vh] flex flex-col transform transition-all duration-200 ease-out ${
+              detailVisible
+                ? 'opacity-100 translate-y-0 sm:scale-100'
+                : 'opacity-0 translate-y-6 sm:translate-y-0 sm:scale-95'
+            }`}
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="shrink-0 flex items-center justify-between px-4 pt-3 pb-2 border-b">
+              <div className="text-xs text-gray-400">
+                {detailIndex + 1} / {targetChips.length}
+              </div>
+              <button
+                onClick={closeDetail}
+                aria-label="Close detail"
+                className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
+              >
+                <CloseOutlined />
+              </button>
+            </div>
+
+            <div className="relative flex-1 overflow-hidden">
+              {detailIndex > 0 && (
+                <button
+                  onClick={() => openDetail(detailIndex - 1)}
+                  aria-label="Previous word"
+                  className="hidden sm:flex absolute left-1 top-1/2 -translate-y-1/2 z-10 w-8 h-8 items-center justify-center rounded-full bg-white/90 shadow border border-gray-200 hover:bg-gray-50"
+                >
+                  <LeftOutlined />
+                </button>
+              )}
+              {detailIndex < targetChips.length - 1 && (
+                <button
+                  onClick={() => openDetail(detailIndex + 1)}
+                  aria-label="Next word"
+                  className="hidden sm:flex absolute right-1 top-1/2 -translate-y-1/2 z-10 w-8 h-8 items-center justify-center rounded-full bg-white/90 shadow border border-gray-200 hover:bg-gray-50"
+                >
+                  <RightOutlined />
+                </button>
+              )}
+
+              <div
+                ref={detailScrollRef}
+                onScroll={onDetailScroll}
+                className="h-full overflow-x-auto overflow-y-auto flex snap-x snap-mandatory"
+                style={{ scrollbarWidth: 'none' }}
+              >
+                {targetChips.map((t, i) => {
+                  const item = detailItems.get(t.word)
+                  const parsed = item?.detail ? parseDetailJson(item.detail) : null
+                  return (
+                    <div
+                      key={`${t.kind}-${t.word}-${i}`}
+                      ref={el => { if (el) detailCardRefs.current.set(i, el); else detailCardRefs.current.delete(i) }}
+                      className="snap-center shrink-0 w-full px-5 py-4 overflow-y-auto"
+                    >
+                      <div className="flex items-center justify-center gap-2 mb-2">
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full text-white ${t.kind === 'hard' ? 'bg-red-500' : 'bg-blue-500'}`}>
+                          {t.kind === 'hard' ? 'Difficult' : 'Known'}
+                        </span>
+                        {item?.state_label && (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
+                            {item.state_label}
+                          </span>
+                        )}
+                      </div>
+                      <div className="text-2xl font-semibold text-center mb-3">{t.word}</div>
+
+                      {!item ? (
+                        <div className="text-center text-sm text-gray-400 py-6">
+                          No saved entry yet. Tap the word in chat to add it to your deck.
+                        </div>
+                      ) : (
+                        <div className="space-y-2 text-left">
+                          {parsed?.reading && (
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-xs text-gray-400 w-24 shrink-0">Reading</span>
+                              <span className="text-sm font-medium">{parsed.reading}</span>
+                            </div>
+                          )}
+                          {parsed?.meaning && (
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-xs text-gray-400 w-24 shrink-0">Meaning</span>
+                              <span className="text-sm font-medium">{parsed.meaning}</span>
+                            </div>
+                          )}
+                          {parsed?.part_of_speech && (
+                            <div className="flex items-baseline gap-2">
+                              <span className="text-xs text-gray-400 w-24 shrink-0">Part of speech</span>
+                              <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{parsed.part_of_speech}</span>
+                            </div>
+                          )}
+                          {parsed?.example && (
+                            <div className="mt-2 p-2 bg-gray-50 rounded-lg">
+                              <p className="text-sm italic">{parsed.example}</p>
+                              {parsed.example_meaning && (
+                                <p className="text-xs text-gray-500 mt-1">{parsed.example_meaning}</p>
+                              )}
+                            </div>
+                          )}
+                          {!parsed && item.detail && (
+                            <p className="text-sm text-gray-600 whitespace-pre-wrap">{item.detail}</p>
+                          )}
+                          {item.mnemonic && (
+                            <div className="pt-2 mt-2 border-t border-gray-100">
+                              <span className="text-xs text-gray-400">Mnemonic</span>
+                              <p className="text-sm text-amber-700 bg-amber-50 p-2 rounded-lg mt-1">{item.mnemonic}</p>
+                            </div>
+                          )}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
+            </div>
+
+            {targetChips.length > 1 && (
+              <div className="shrink-0 flex items-center justify-center gap-1 py-2 border-t">
+                {targetChips.map((_, i) => (
+                  <button
+                    key={i}
+                    onClick={() => openDetail(i)}
+                    aria-label={`Go to word ${i + 1}`}
+                    className={`h-1.5 rounded-full transition-all ${i === detailIndex ? 'w-4 bg-gray-600' : 'w-1.5 bg-gray-300'}`}
+                  />
+                ))}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   )
 }
