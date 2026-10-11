@@ -9,6 +9,7 @@ mod db;
 mod chat;
 mod sessions;
 mod srs;
+mod quiz;
 mod words;
 mod stats;
 mod grammar;
@@ -178,6 +179,9 @@ pub fn run() {
             srs::db_preview_srs_grades,
             srs::db_session_start,
             srs::db_session_grade,
+            quiz::db_session_answer,
+            quiz::db_session_override,
+            quiz::db_session_summary,
             // Words
             words::db_list_known_words,
             words::db_add_known_word,

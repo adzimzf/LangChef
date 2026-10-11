@@ -1,4 +1,5 @@
 use crate::db::open_db;
+use crate::quiz::{clear_task, issue_task, QuizTask};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -152,14 +153,6 @@ pub struct SRSResult {
     pub fsrs_difficulty: Option<f32>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct SRSResultWithLimits {
-    #[serde(flatten)]
-    pub result: SRSResult,
-    pub reviews_completed: i64,
-    pub new_cards_seen: i64,
-}
-
 fn compute_ef(ef: f64, q: i64) -> f64 {
     let qf = q as f64;
     f64::max(1.3, ef + (0.1 - (5.0 - qf) * (0.08 + (5.0 - qf) * 0.02)))
@@ -177,7 +170,7 @@ fn grace_bonus(next_review: Option<i64>, now: i64, multiplier: f64) -> f64 {
     }
 }
 
-fn format_next_review_minutes(minutes: i64) -> String {
+pub(crate) fn format_next_review_minutes(minutes: i64) -> String {
     if minutes <= 0 { return "<1m".to_string(); }
     if minutes < 60 { return format!("{}m", minutes); }
     if minutes < 24 * 60 { return format!("{}h", minutes / 60); }
@@ -187,7 +180,7 @@ fn format_next_review_minutes(minutes: i64) -> String {
     format!("{}y", (days as f64 / 365.0).round() as i64)
 }
 
-fn end_of_today() -> i64 {
+pub(crate) fn end_of_today() -> i64 {
     let now_local = chrono::Local::now();
     now_local
         .date_naive()
@@ -860,6 +853,7 @@ fn grade_card_in_db(conn: &rusqlite::Connection, id: &str, grade: &str) -> Resul
 pub struct SessionStartResult {
     pub total_cards: usize,
     pub next_card: Option<ReviewItem>,
+    pub next_task: Option<QuizTask>,
     pub grade_options: Vec<GradePreview>,
     pub reviews_remaining: i64,
     pub new_remaining: i64,
@@ -867,7 +861,7 @@ pub struct SessionStartResult {
     pub new_cards_seen: i64,
 }
 
-fn ensure_study(
+pub(crate) fn ensure_study(
     conn: &rusqlite::Connection,
     date: &str,
     language: &str,
@@ -1021,7 +1015,7 @@ fn count_new_seen(conn: &rusqlite::Connection, study_id: i64) -> Result<i64, Str
     )
 }
 
-fn set_card_status(
+pub(crate) fn set_card_status(
     conn: &rusqlite::Connection,
     study_id: i64,
     card_id: &str,
@@ -1036,6 +1030,71 @@ fn set_card_status(
     Ok(())
 }
 
+pub(crate) fn fetch_review_item(conn: &rusqlite::Connection, id: &str) -> Result<Option<ReviewItem>, String> {
+    let result = conn.query_row(
+        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
+         FROM review_items WHERE id = ?1",
+        params![id],
+        row_to_review_item,
+    );
+    match result {
+        Ok(item) => Ok(Some(item)),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.to_string()),
+    }
+}
+
+/// Grades a card inside today's study session and re-queues it while it is still learning.
+pub(crate) fn apply_session_grade(
+    conn: &rusqlite::Connection,
+    study_id: i64,
+    card_id: &str,
+    grade: &str,
+) -> Result<SRSResult, String> {
+    let result = grade_card_in_db(conn, card_id, grade)?;
+    set_card_status(conn, study_id, card_id, "graded")?;
+    if result.state == "learning" || result.state == "relearning" {
+        set_card_status(conn, study_id, card_id, "pending")?;
+    }
+    Ok(result)
+}
+
+/// What the review screen needs after any session step: counters plus the next card and its question.
+#[derive(Serialize)]
+pub struct SessionProgress {
+    pub reviews_completed: i64,
+    pub new_cards_seen: i64,
+    pub remaining_count: usize,
+    pub session_done: bool,
+    pub next_card: Option<ReviewItem>,
+    pub next_task: Option<QuizTask>,
+    pub grade_options: Vec<GradePreview>,
+}
+
+pub(crate) fn session_progress(conn: &rusqlite::Connection, study_id: i64) -> Result<SessionProgress, String> {
+    let now = chrono::Utc::now().timestamp();
+    let reviews_completed = count_reviewed(conn, study_id)?;
+    let new_cards_seen = count_new_seen(conn, study_id)?;
+    let remaining_count = count_pending(conn, study_id)?;
+    let next_card = fetch_next_pending(conn, study_id, now)?;
+    let (next_task, grade_options) = match &next_card {
+        Some(card) => (
+            Some(issue_task(conn, study_id, card)?),
+            compute_grade_previews(conn, &card.id).unwrap_or_default(),
+        ),
+        None => (None, vec![]),
+    };
+    Ok(SessionProgress {
+        reviews_completed,
+        new_cards_seen,
+        remaining_count,
+        session_done: remaining_count == 0,
+        next_card,
+        next_task,
+        grade_options,
+    })
+}
+
 #[tauri::command]
 pub fn db_session_start(
     app: tauri::AppHandle,
@@ -1046,41 +1105,34 @@ pub fn db_session_start(
     let conn = open_db(&app)?;
     let today = chrono::Local::now().date_naive().to_string();
     let eod = end_of_today();
-    let now = chrono::Utc::now().timestamp();
 
     let study_id = ensure_study(&conn, &today, &language, max_reviews, max_new_cards)?;
     top_up_queue(&conn, study_id, &language, eod, max_reviews, max_new_cards)?;
 
-    let reviews_completed = count_reviewed(&conn, study_id)?;
-    let new_cards_seen = count_new_seen(&conn, study_id)?;
     let total_cards = count_total(&conn, study_id)?;
-    let next_card = fetch_next_pending(&conn, study_id, now)?;
-    let grade_options = match &next_card {
-        Some(card) => compute_grade_previews(&conn, &card.id).unwrap_or_default(),
-        None => vec![],
-    };
+    let progress = session_progress(&conn, study_id)?;
 
     Ok(SessionStartResult {
         total_cards,
-        next_card,
-        grade_options,
-        reviews_remaining: (max_reviews - reviews_completed).max(0),
-        new_remaining: (max_new_cards - new_cards_seen).max(0),
-        reviews_completed,
-        new_cards_seen,
+        next_card: progress.next_card,
+        next_task: progress.next_task,
+        grade_options: progress.grade_options,
+        reviews_remaining: (max_reviews - progress.reviews_completed).max(0),
+        new_remaining: (max_new_cards - progress.new_cards_seen).max(0),
+        reviews_completed: progress.reviews_completed,
+        new_cards_seen: progress.new_cards_seen,
     })
 }
 
 #[derive(Serialize)]
 pub struct SessionGradeResult {
     #[serde(flatten)]
-    srs: SRSResultWithLimits,
-    next_card: Option<ReviewItem>,
-    grade_options: Vec<GradePreview>,
-    session_done: bool,
-    remaining_count: usize,
+    result: SRSResult,
+    #[serde(flatten)]
+    progress: SessionProgress,
 }
 
+/// Self-graded path, used only for cards that cannot be quizzed (no meaning to check against).
 #[tauri::command]
 pub fn db_session_grade(
     app: tauri::AppHandle,
@@ -1092,31 +1144,12 @@ pub fn db_session_grade(
 ) -> Result<SessionGradeResult, String> {
     let conn = open_db(&app)?;
     let today = chrono::Local::now().date_naive().to_string();
-    let now = chrono::Utc::now().timestamp();
 
     let study_id = ensure_study(&conn, &today, &language, max_reviews, max_new_cards)?;
 
-    let result = grade_card_in_db(&conn, &card_id, &grade)?;
-    set_card_status(&conn, study_id, &card_id, "graded")?;
+    let result = apply_session_grade(&conn, study_id, &card_id, &grade)?;
+    clear_task(&conn, study_id, &card_id)?;
+    let progress = session_progress(&conn, study_id)?;
 
-    if result.state == "learning" || result.state == "relearning" {
-        set_card_status(&conn, study_id, &card_id, "pending")?;
-    }
-
-    let reviews_completed = count_reviewed(&conn, study_id)?;
-    let new_cards_seen = count_new_seen(&conn, study_id)?;
-    let remaining_count = count_pending(&conn, study_id)?;
-    let next_card = fetch_next_pending(&conn, study_id, now)?;
-    let grade_options = match &next_card {
-        Some(card) => compute_grade_previews(&conn, &card.id).unwrap_or_default(),
-        None => vec![],
-    };
-
-    Ok(SessionGradeResult {
-        srs: SRSResultWithLimits { result, reviews_completed, new_cards_seen },
-        next_card,
-        grade_options,
-        session_done: remaining_count == 0,
-        remaining_count,
-    })
+    Ok(SessionGradeResult { result, progress })
 }

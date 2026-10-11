@@ -30,13 +30,21 @@ No test framework configured.
 
 **State:** Component-local `useState` + `localStorage` for API credentials and preferences. Each page independently loads data from SQLite via Tauri commands on mount.
 
-**SRS duplication:** FSRS 5.2.0 (`fsrs` crate) in Rust (`src-tauri/src/lib.rs`, `schedule_card` fn) for persistence. TypeScript (`src/lib/srs.ts`) mirrors scheduling logic for immediate UI updates. Old SM-2 columns (EF, I, R) kept in DB for backward compat; SM-2 helpers (`compute_ef`, `format_next_review_minutes`) still used for display. Must keep TS/Rust in sync when modifying. Desired retention: 90%.
+**SRS:** FSRS 5.2.0 (`fsrs` crate) in Rust (`src-tauri/src/srs.rs`, `schedule_fsrs` fn). Old SM-2 columns (EF, I, R) kept in DB for backward compat; SM-2 helpers (`compute_ef`, `format_next_review_minutes`) still used for display. Desired retention: 90%.
+
+**Auto-graded review:** users don't rate themselves. `src-tauri/src/quiz.rs` gives each due card a question and turns the answer into the FSRS grade:
+- Question by card stage: new → intro + true/false; learning/relearning → pick the meaning; review → recall then confirm (sometimes "None of these" is the right answer); mature (review with stability ≥ 21 days) → rotates recall / pick the reading / meaning in context. Tiny decks fall back to true/false.
+- Cards without a meaning in `detail` use the old self-graded flip (`classic`).
+- Grade: wrong or "Don't know" → Again; hint used or slower than 2× the user's median time → Hard; otherwise Good. Easy only for fast answers on mature cards to recall or context questions. A wrong reading on a mature card is Hard (no lapse).
+- The issued question is stored in `study_card.task` (answer hidden from the frontend) and checked against on answer. Wrong picks are recorded in `review_confusions` and those words are used as harder wrong options later. One "I mis-tapped" fix per language per day restores the saved card state and re-grades.
 
 **Lindera dependency:** Japanese tokenization uses Lindera with embedded IPADIC dictionary, vendored as a git submodule at `lindera/` (pinned to upstream tag `v4.0.1`) and referenced as a path dep (`../lindera/lindera`). Run `git submodule update --init` after cloning (or clone with `--recurse-submodules`) for Rust builds to succeed.
 
 ## Rust Modules (`src-tauri/src/`)
 
 - `lib.rs` — all Tauri commands (~3500 lines), DB schema/migrations, SRS logic, grammar seeding
+- `srs.rs` — FSRS scheduling, daily study queue (`study`, `study_card`), session commands
+- `quiz.rs` — auto-graded review: question building, answer checking, grading, summary
 - `furigana.rs` — Lindera-based Japanese tokenization; `annotate()` produces `{kanji|reading}` format, `tokenize()` returns (surface, base_form) pairs
 - `google_drive.rs` — Google Drive backup/restore, Drive file ops
 - `google_auth/` — OAuth2 token management; desktop and mobile variants
@@ -45,7 +53,7 @@ No test framework configured.
 
 **Chat:** User message → `send()` builds system prompt (injects difficult words, known words, JLPT constraints, grammar patterns) → `invoke('llm_chat')` proxies OpenAI-compatible request through Rust → response rendered with furigana/grammar/word-tap highlighting → tapping word calls `invoke('db_upsert_review_item')`.
 
-**Review:** `invoke('db_get_review_items')` → local SRS scheduling in TS → `invoke('db_update_srs')` persists grade (Rust also computes FSRS independently).
+**Review:** `invoke('db_session_start')` → returns `next_card` + `next_task` (the question) → user answers → `invoke('db_session_answer')` checks it in Rust, grades, records the answer and returns the verdict plus the next card. `db_session_override` handles the mis-tap fix, `db_session_summary` feeds the end-of-session screen, and `db_session_grade` is the self-graded path for `classic` cards. UI in `src/components/ReviewQuiz.tsx`.
 
 **Message branching:** Messages support `parent_message_id` and `is_active_path` for branching conversations. `db_deactivate_message_branch` + `db_get_message_siblings` manage tree traversal.
 
@@ -95,6 +103,9 @@ DB path: `~/.app-data/langchef/langchef.db`. Schema created in `open_db()` in `s
 | `message_grammar_analysis` | message_id, analysis |
 | `user_message_feedback` | message_id, score, feedback |
 | `study_limits` | date, language, reviews_completed, new_cards_seen |
+| `study`, `study_card` | daily queue per language; `study_card.task` holds the open question |
+| `review_answers` | review_item_id, task, correct, elapsed_ms, hint_used, chosen, grade, mature, prev_state, overridden |
+| `review_confusions` | review_item_id, confused_with_id, count |
 | `telemetry_days` | legacy, migrated to user_activity |
 
 ## Important Notes

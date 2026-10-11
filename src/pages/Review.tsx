@@ -10,9 +10,10 @@ import {
   SettingOutlined,
   BulbOutlined,
 } from '@ant-design/icons'
-import type { ReviewItem } from '../lib/types'
+import type { AnswerResult, GradePreview, QuizAnswer, QuizTask, ReviewItem, SessionProgress, SessionSummary } from '../lib/types'
 import { parseDetailJson } from '../lib/types'
 import EditWordForm from '../components/EditWordForm'
+import { GRADE_COLORS, QuizVerdictView, ReviewQuiz, SessionSummaryView, useAutoAdvance } from '../components/ReviewQuiz'
 
 const LANGUAGES: Record<string, { label: string; flag: string }> = {
   ja: { label: 'Japanese', flag: '\u{1F1EF}\u{1F1F5}' },
@@ -36,44 +37,20 @@ function getMaxNewCards(): number {
 
 type GradeOption = { grade: Grade; label: string; nextLabel: string; color: string }
 
-const GRADE_COLORS: Record<string, string> = {
-  again: 'bg-red-500',
-  hard: 'bg-orange-500',
-  good: 'bg-blue-500',
-  easy: 'bg-green-500',
-}
-
-type RawGradePreview = {
-  grade: string
-  label: string
-  next_review_formatted: string
-  lapsed: boolean
-  graduated: boolean
-}
-
 type SessionStartResult = {
   total_cards: number
   next_card: ReviewItem | null
-  grade_options: RawGradePreview[]
+  next_task: QuizTask | null
+  grade_options: GradePreview[]
   reviews_remaining: number
   new_remaining: number
   reviews_completed: number
   new_cards_seen: number
 }
 
-type SessionGradeResult = {
-  EF: number; I: number; R: number
-  state: string; step: number; lapse_count: number
-  next_review: number; lapsed: boolean; graduated: boolean
-  fsrs_stability: number | null; fsrs_difficulty: number | null
-  reviews_completed: number; new_cards_seen: number
-  next_card: ReviewItem | null
-  grade_options: RawGradePreview[]
-  session_done: boolean
-  remaining_count: number
-}
+type SessionGradeResult = SessionProgress & { lapsed: boolean; graduated: boolean }
 
-function toGradeOptions(previews: RawGradePreview[]): GradeOption[] {
+function toGradeOptions(previews: GradePreview[]): GradeOption[] {
   return previews.map(p => ({
     grade: p.grade as Grade,
     label: p.label,
@@ -109,6 +86,12 @@ export default function Review() {
   const [reviewedToday, setReviewedToday] = useState(0)
   const [newCardsToday, setNewCardsToday] = useState(0)
   const [gradeOptions, setGradeOptions] = useState<GradeOption[]>([])
+  // Auto-graded question for the current card ('classic' means self-grade)
+  const [currentTask, setCurrentTask] = useState<QuizTask | null>(null)
+  const [answerResult, setAnswerResult] = useState<AnswerResult | null>(null)
+  const [answering, setAnswering] = useState(false)
+  const [overriding, setOverriding] = useState(false)
+  const [summary, setSummary] = useState<SessionSummary | null>(null)
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const isGrading = useRef(false)
@@ -138,6 +121,8 @@ export default function Review() {
         maxNewCards: getMaxNewCards(),
       })
       setCurrentCard(result.next_card ?? null)
+      setCurrentTask(result.next_task ?? null)
+      setAnswerResult(null)
       setGradeOptions(toGradeOptions(result.grade_options))
       setSessionTotal(result.total_cards)
       setSessionRemaining(result.total_cards)
@@ -192,14 +177,7 @@ export default function Review() {
 
       invoke('db_record_activity', { activityType: 'review' }).catch(() => {})
 
-      setReviewedToday(result.reviews_completed)
-      setNewCardsToday(result.new_cards_seen)
-      setCurrentCard(result.next_card ?? null)
-      setSessionRemaining(result.remaining_count)
-      setGradeOptions(toGradeOptions(result.grade_options))
-      setRevealed(false)
-      setShowMnemonic(false)
-
+      applyProgress(result)
       if (result.graduated && !result.lapsed) {
         setSessionCompleted(prev => prev + 1)
       }
@@ -207,6 +185,77 @@ export default function Review() {
 
     setTimeout(() => { isGrading.current = false }, 0)
   }
+
+  function applyProgress(p: SessionProgress) {
+    setReviewedToday(p.reviews_completed)
+    setNewCardsToday(p.new_cards_seen)
+    setCurrentCard(p.next_card ?? null)
+    setCurrentTask(p.next_task ?? null)
+    setSessionRemaining(p.remaining_count)
+    setGradeOptions(toGradeOptions(p.grade_options))
+    setAnswerResult(null)
+    setRevealed(false)
+    setShowMnemonic(false)
+  }
+
+  async function handleAnswer(answer: QuizAnswer) {
+    if (!currentCard || answering) return
+    setAnswering(true)
+    try {
+      const result = await invoke<AnswerResult>('db_session_answer', {
+        language: currentCard.language || selectedLang || 'ja',
+        cardId: currentCard.id,
+        answer,
+        maxReviews: getMaxReviews(),
+        maxNewCards: getMaxNewCards(),
+      })
+      invoke('db_record_activity', { activityType: 'review' }).catch(() => {})
+      if (result.card) setCurrentCard(result.card)
+      setReviewedToday(result.reviews_completed)
+      setNewCardsToday(result.new_cards_seen)
+      setAnswerResult(result)
+      if (result.graduated && !result.lapsed) {
+        setSessionCompleted(prev => prev + 1)
+      }
+    } catch (e) {
+      alert(`Could not check the answer: ${e}`)
+    }
+    setAnswering(false)
+  }
+
+  async function handleOverride() {
+    if (!answerResult || overriding) return
+    setOverriding(true)
+    try {
+      const result = await invoke<AnswerResult>('db_session_override', {
+        language: currentCard?.language || selectedLang || 'ja',
+        answerId: answerResult.verdict.answer_id,
+        maxReviews: getMaxReviews(),
+        maxNewCards: getMaxNewCards(),
+      })
+      if (result.card) setCurrentCard(result.card)
+      setReviewedToday(result.reviews_completed)
+      setNewCardsToday(result.new_cards_seen)
+      setAnswerResult(result)
+    } catch (e) {
+      alert(`${e}`)
+    }
+    setOverriding(false)
+  }
+
+  function handleNext() {
+    if (answerResult) applyProgress(answerResult)
+  }
+
+  const cancelAutoAdvance = useAutoAdvance(answerResult, handleNext)
+
+  // End-of-session numbers come from Rust; refresh whenever the queue runs out
+  useEffect(() => {
+    if (currentCard || !selectedLang || loading) return
+    invoke<SessionSummary>('db_session_summary', { language: selectedLang })
+      .then(setSummary)
+      .catch(() => setSummary(null))
+  }, [currentCard, selectedLang, loading])
 
   async function generateDetail() {
     if (!currentCard) return
@@ -631,6 +680,7 @@ export default function Review() {
       {!currentCard ? (
         <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-3">
           <SessionCompleteEffect sessionCompleted={sessionCompleted} />
+          {summary && summary.total > 0 && <SessionSummaryView summary={summary} />}
           <>
             <div className="text-4xl">🎉</div>
             <p className="text-sm text-center">All done for {LANGUAGES[selectedLang || '']?.label || selectedLang}!</p>
@@ -647,8 +697,29 @@ export default function Review() {
           </button>
         </div>
       ) : (
+        currentTask && currentTask.kind !== 'classic' ? (
+          <div className="flex-1 flex flex-col justify-center pb-6" onPointerDown={cancelAutoAdvance}>
+            {answerResult ? (
+              <QuizVerdictView
+                task={currentTask}
+                result={answerResult}
+                details={renderDetailContent(currentCard.detail)}
+                onNext={handleNext}
+                onOverride={handleOverride}
+                overriding={overriding}
+              />
+            ) : (
+              <ReviewQuiz
+                key={currentCard.id}
+                task={currentTask}
+                submitting={answering}
+                onAnswer={handleAnswer}
+              />
+            )}
+          </div>
+        ) : (
         <>
-          {/* Flashcard */}
+          {/* Flashcard (self-graded: card has no meaning to quiz on) */}
           <div className="flex-1 flex flex-col items-center justify-center pb-28 overflow-y-auto">
             <div
               onClick={() => setRevealed(true)}
@@ -675,7 +746,10 @@ export default function Review() {
               )}
 
               {!revealed ? (
-                <div className="text-sm text-gray-400 mt-4">Tap to reveal</div>
+                <>
+                  <div className="text-sm text-gray-400 mt-4">Tap to reveal</div>
+                  <div className="text-xs text-gray-300 mt-2">No meaning saved yet, so grade this one yourself. Add details to get auto-graded questions.</div>
+                </>
               ) : (
                 <>
                   {renderDetailContent(currentCard.detail)}
@@ -728,6 +802,7 @@ export default function Review() {
             )}
           </div>
         </>
+        )
       )}
     </div>
   )

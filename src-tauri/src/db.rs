@@ -116,6 +116,7 @@ pub fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
             chosen_item_id TEXT,
             grade TEXT NOT NULL,
             easy_allowed INTEGER NOT NULL DEFAULT 0,
+            mature INTEGER NOT NULL DEFAULT 0,
             prev_state TEXT,
             overridden INTEGER NOT NULL DEFAULT 0,
             answered_at INTEGER NOT NULL
