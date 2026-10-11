@@ -14,7 +14,7 @@ cd src-tauri && GOOGLE_CLIENT_ID=test GOOGLE_CLIENT_SECRET=test cargo clippy   #
 
 `GOOGLE_CLIENT_ID` and `GOOGLE_CLIENT_SECRET` must be set at compile time (they use `env!()` in `google_auth/mod.rs`). Use `test` as a placeholder for local verification — real values are only needed for Google Auth functionality.
 
-Rust builds require `lindera/` as a sibling directory to the repo root — if `cargo check` fails with a path error, the Lindera dep is missing.
+Rust builds require the `lindera/` git submodule — if `cargo check` fails with a path error, run `git submodule update --init`. Lindera releases after `v4.0.1` change the `lindera::tokenizer` API used by `furigana.rs`, so bumping the submodule also means updating that file.
 
 ## Adding a Tauri Command
 

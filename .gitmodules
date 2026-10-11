@@ -1,0 +1,3 @@
+[submodule "lindera"]
+	path = lindera
+	url = https://github.com/lindera/lindera.git

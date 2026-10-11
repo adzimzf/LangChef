@@ -32,7 +32,7 @@ No test framework configured.
 
 **SRS duplication:** FSRS 5.2.0 (`fsrs` crate) in Rust (`src-tauri/src/lib.rs`, `schedule_card` fn) for persistence. TypeScript (`src/lib/srs.ts`) mirrors scheduling logic for immediate UI updates. Old SM-2 columns (EF, I, R) kept in DB for backward compat; SM-2 helpers (`compute_ef`, `format_next_review_minutes`) still used for display. Must keep TS/Rust in sync when modifying. Desired retention: 90%.
 
-**Lindera dependency:** Japanese tokenization uses Lindera with embedded IPADIC dictionary, referenced as a local path dep (`../../lindera/lindera`). The `lindera/` directory must exist as a sibling to the repo root for Rust builds to succeed.
+**Lindera dependency:** Japanese tokenization uses Lindera with embedded IPADIC dictionary, vendored as a git submodule at `lindera/` (pinned to upstream tag `v4.0.1`) and referenced as a path dep (`../lindera/lindera`). Run `git submodule update --init` after cloning (or clone with `--recurse-submodules`) for Rust builds to succeed.
 
 ## Rust Modules (`src-tauri/src/`)
 

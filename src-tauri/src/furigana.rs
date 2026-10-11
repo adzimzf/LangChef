@@ -6,7 +6,7 @@ const IPADIC_SOURCE_URL: &str =
     "https://Lindera.dev/mecab-ipadic-2.7.0-20250920.tar.gz";
 const IPADIC_SOURCE_DIR: &str = "mecab-ipadic-2.7.0-20250920";
 const IPADIC_METADATA: &str =
-    include_str!("../../../lindera/lindera-ipadic/metadata.json");
+    include_str!("../../lindera/lindera-ipadic/metadata.json");
 
 pub struct FuriganaAnnotator {
     tokenizer: Tokenizer,
