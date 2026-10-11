@@ -66,6 +66,9 @@ jobs:
       - name: Setup Android SDK
         if: matrix.target == 'android'
         uses: android-actions/setup-android@v3
+        with:
+          # The default also installs the removed 'tools' package, which now fails.
+          packages: 'platform-tools'
 
       - name: Install NDK
         if: matrix.target == 'android'
