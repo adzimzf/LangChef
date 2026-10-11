@@ -13,13 +13,29 @@ val tauriProperties = Properties().apply {
     }
 }
 
+// Release signing credentials come from keystore.properties at the repo root
+// (gitignored) or from LANGCHEF_KEYSTORE_* environment variables. Never commit them.
+val keystoreProperties = Properties().apply {
+    val propFile = rootProject.file("../../../keystore.properties")
+    if (propFile.exists()) {
+        propFile.inputStream().use { load(it) }
+    }
+}
+
+fun signingValue(key: String, env: String): String? =
+    keystoreProperties.getProperty(key) ?: System.getenv(env)
+
+val releaseStoreFile = signingValue("storeFile", "LANGCHEF_KEYSTORE_FILE")
+
 android {
     signingConfigs {
-        create("release") {
-            storeFile = file("../../../../langchef-release.keystore")
-            storePassword = "langchef123"
-            keyAlias = "langchef"
-            keyPassword = "langchef123"
+        if (releaseStoreFile != null) {
+            create("release") {
+                storeFile = rootProject.file("../../../").resolve(releaseStoreFile)
+                storePassword = signingValue("storePassword", "LANGCHEF_KEYSTORE_PASSWORD")
+                keyAlias = signingValue("keyAlias", "LANGCHEF_KEY_ALIAS")
+                keyPassword = signingValue("keyPassword", "LANGCHEF_KEY_PASSWORD")
+            }
         }
     }
     compileSdk = 36
@@ -46,7 +62,7 @@ android {
         }
         getByName("release") {
             isMinifyEnabled = true
-            signingConfig = signingConfigs.getByName("release")
+            signingConfig = signingConfigs.findByName("release")
             proguardFiles(
                 *fileTree(".") { include("**/*.pro") }
                     .plus(getDefaultProguardFile("proguard-android-optimize.txt"))

@@ -103,7 +103,7 @@ DB path: `~/.app-data/langchef/langchef.db`. Schema created in `open_db()` in `s
 - Grammar data in `grammar/` dir — `ja/` has N5–N1, `id/` has A1–A2. MD for display, CSV for import.
 - `src/lib/intl-segmenter.d.ts` provides TS declarations for `Intl.Segmenter`
 - PRD is in `PRD.md`; feature specs in `PRDs/`, technical specs in `TRDs/`
-- `.keystore` files in `.gitignore` — signing key at project root for Android
+- Android release signing: keystore and credentials are never committed. Copy `keystore.properties.example` to `keystore.properties` (gitignored) or set `LANGCHEF_KEYSTORE_FILE` / `LANGCHEF_KEYSTORE_PASSWORD` / `LANGCHEF_KEY_ALIAS` / `LANGCHEF_KEY_PASSWORD`. Without them the release APK is built unsigned.
 - Google OAuth tokens stored at `~/.app-data/langchef/google_tokens.json`
 
 <!-- rtk-instructions v2 -->
