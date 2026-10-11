@@ -52,7 +52,7 @@ export default function ReviewBreakdown({ distribution, dueCount, lapsedCount }:
               </Pie>
               <Tooltip
                 contentStyle={{ fontSize: 12, borderRadius: 8 }}
-                formatter={(value: number, _name: string, props: { payload: { state: string } }) => [
+                formatter={(value, _name, props) => [
                   value,
                   STATE_LABELS[props.payload.state] || props.payload.state,
                 ]}

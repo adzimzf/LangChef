@@ -43,6 +43,14 @@ android {
     defaultConfig {
         manifestPlaceholders["usesCleartextTraffic"] = "false"
         applicationId = "app.langchef"
+        // CI preview builds set LANGCHEF_APPLICATION_ID_SUFFIX / LANGCHEF_APP_NAME so they
+        // install next to the release app instead of replacing it.
+        System.getenv("LANGCHEF_APPLICATION_ID_SUFFIX")?.takeIf { it.isNotBlank() }?.let {
+            applicationIdSuffix = it
+        }
+        val appName = System.getenv("LANGCHEF_APP_NAME")?.takeIf { it.isNotBlank() } ?: "LangChef"
+        resValue("string", "app_name", appName)
+        resValue("string", "main_activity_title", appName)
         minSdk = 24
         targetSdk = 36
         versionCode = tauriProperties.getProperty("tauri.android.versionCode", "1").toInt()
