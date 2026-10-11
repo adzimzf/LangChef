@@ -35,3 +35,4 @@ Thumbs.db
 
 # android
 *.keystore
+keystore.properties
