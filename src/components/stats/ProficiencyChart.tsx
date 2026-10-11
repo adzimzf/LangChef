@@ -39,7 +39,7 @@ export default function ProficiencyChart({ data, overallAvg }: Props) {
           <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" domain={[0, 5]} />
           <Tooltip
             contentStyle={{ fontSize: 12, borderRadius: 8 }}
-            formatter={(value: number, name: string) => [value, name === 'avgScore' ? 'Score' : name]}
+            formatter={(value, name) => [value, name === 'avgScore' ? 'Score' : name]}
           />
           {overallAvg !== null && (
             <ReferenceLine y={overallAvg} stroke="#fbbf24" strokeDasharray="5 5" strokeWidth={1} />

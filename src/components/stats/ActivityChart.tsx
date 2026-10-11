@@ -47,7 +47,7 @@ export default function ActivityChart({ data }: Props) {
           <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" allowDecimals={false} />
           <Tooltip
             contentStyle={{ fontSize: 12, borderRadius: 8 }}
-            formatter={(value: number, name: string) => [value, name === 'movingAvg' ? 'Avg' : name]}
+            formatter={(value, name) => [value, name === 'movingAvg' ? 'Avg' : name]}
           />
           <Bar dataKey="chat" stackId="a" fill="#60a5fa" radius={[0, 0, 0, 0]} />
           <Bar dataKey="review" stackId="a" fill="#4ade80" radius={[4, 4, 0, 0]} />
