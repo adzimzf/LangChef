@@ -1,7 +1,7 @@
 name: 'pr-build'
 
-# Builds the app on every pull request (macOS arm64/x86_64 + Android), following the
-# release matrix. PR builds are rebranded to a separate package so they install next to
+# Builds the app on every pull request (macOS arm64/x86_64 + Android arm64), following the
+# release matrix, then comments on the PR with download links. PR builds are rebranded to a separate package so they install next to
 # the release app instead of replacing it:
 #   Android: app.langchef.pr  ("LangChef PR #<n>")
 #   macOS:   app.langchef.pr  ("LangChef PR")
@@ -30,7 +30,8 @@ jobs:
             rust-target: x86_64-apple-darwin
           - platform: 'ubuntu-22.04'
             target: 'android'
-            rust-target: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+            # PR builds compile arm64 only (real devices); the universal APK costs ~4x the Rust build.
+            rust-target: aarch64-linux-android
 
     runs-on: ${{ matrix.platform }}
     env:
@@ -142,16 +143,15 @@ jobs:
         if: matrix.target == 'android'
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.11902837
-        run: npm run tauri -- android build --apk
+        run: npm run tauri -- android build --apk --target aarch64
 
       - name: Collect artifacts
         run: |
           mkdir -p ./pr-assets
           SUFFIX="pr${PR_NUMBER:-manual}-${GITHUB_SHA::7}"
           if [ "${{ matrix.target }}" = "android" ]; then
-            APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*universal-release*.apk' | head -n 1)
-            [ -n "$APK" ] || APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*.apk' | head -n 1)
-            cp "$APK" "./pr-assets/LangChef_${SUFFIX}.apk"
+            APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*-release.apk' | head -n 1)
+            cp "$APK" "./pr-assets/LangChef_${SUFFIX}_arm64.apk"
           else
             for f in src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg/*.dmg; do
               cp "$f" "./pr-assets/LangChef_${SUFFIX}_${{ matrix.rust-target }}.dmg"
@@ -166,3 +166,95 @@ jobs:
           path: ./pr-assets/*
           if-no-files-found: error
           retention-days: 14
+
+  comment:
+    needs: build-tauri
+    if: always() && github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      pull-requests: write
+    # Fork PRs get a read-only token and cannot comment; don't fail the run for that.
+    continue-on-error: true
+    steps:
+      - name: Comment download links
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const runId = context.runId;
+            const prNumber = context.payload.pull_request.number;
+            const sha = context.payload.pull_request.head.sha.slice(0, 7);
+            const runUrl = `https://github.com/${owner}/${repo}/actions/runs/${runId}`;
+
+            const { data: { artifacts } } = await github.rest.actions.listWorkflowRunArtifacts({ owner, repo, run_id: runId });
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, { owner, repo, run_id: runId });
+
+            const targets = [
+              { label: 'Android (arm64 APK)', artifact: 'langchef-android', job: 'android' },
+              { label: 'macOS Apple Silicon (DMG)', artifact: 'langchef-aarch64-apple-darwin', job: 'aarch64-apple-darwin' },
+              { label: 'macOS Intel (DMG)', artifact: 'langchef-x86_64-apple-darwin', job: 'x86_64-apple-darwin' },
+            ];
+            const icon = { success: '✅', failure: '❌', cancelled: '⚪', skipped: '⚪' };
+            const rows = targets.map(t => {
+              const job = jobs.find(j => j.name.startsWith('build-tauri') && j.name.includes(t.job));
+              const status = job ? (icon[job.conclusion] || '⏳') + ' ' + (job.conclusion || job.status) : '—';
+              const a = artifacts.find(x => x.name === t.artifact);
+              const link = a ? `[${a.name}.zip](${runUrl}/artifacts/${a.id})` : '_not available_';
+              return `| ${t.label} | ${status} | ${link} |`;
+            });
+
+            const marker = '<!-- langchef-pr-build -->';
+            const body = [
+              marker,
+              `### 📦 PR build for \`${sha}\``,
+              '',
+              '| Target | Build | Download |',
+              '|---|---|---|',
+              ...rows,
+              '',
+              `Artifacts expire after 14 days. Downloading requires being signed in to GitHub. [Workflow run](${runUrl})`,
+              '',
+              '<details><summary>Install the Android APK</summary>',
+              '',
+              '1. Download `langchef-android.zip` above and unzip it to get `LangChef_pr<N>-<sha>_arm64.apk`.',
+              `2. Copy the APK to an arm64 Android phone (or run \`adb install -r LangChef_pr*.apk\`) and open it; allow "Install unknown apps" if prompted.`,
+              `3. It installs as **LangChef PR #${prNumber}** (\`app.langchef.pr\`) next to the release app, with its own data. Google sign-in does not work in PR builds.`,
+              '4. If the install fails with a signature conflict, uninstall the previous LangChef PR build first (happens when no preview signing key is configured).',
+              '',
+              '</details>',
+              '',
+              '<details><summary>Install on macOS</summary>',
+              '',
+              '1. Download the DMG zip for your Mac, unzip, open the DMG and drag **LangChef PR** to Applications.',
+              '2. The build is unsigned: on first launch right-click the app → **Open**, or run `xattr -dr com.apple.quarantine "/Applications/LangChef PR.app"`.',
+              '',
+              '</details>',
+              '',
+              '<details><summary>Build this PR locally</summary>',
+              '',
+              '```bash',
+              `git fetch origin pull/${prNumber}/head:pr-${prNumber} && git checkout pr-${prNumber}`,
+              'git submodule update --init',
+              'npm ci',
+              'export GOOGLE_CLIENT_ID=test GOOGLE_CLIENT_SECRET=test   # real values only needed for Google sign-in',
+              '',
+              '# Desktop',
+              'npm run tauri:build',
+              '',
+              '# Android (needs Android SDK + NDK, NDK_HOME set); same package rename as CI',
+              `LANGCHEF_APPLICATION_ID_SUFFIX=.pr LANGCHEF_APP_NAME="LangChef PR #${prNumber}" npm run tauri -- android build --apk --target aarch64`,
+              '```',
+              '',
+              'Signing for local release APKs: copy `keystore.properties.example` to `keystore.properties` (or set `LANGCHEF_KEYSTORE_*`), otherwise the APK is unsigned.',
+              '',
+              '</details>',
+            ].join('\n');
+
+            const comments = await github.paginate(github.rest.issues.listComments, { owner, repo, issue_number: prNumber });
+            const existing = comments.find(c => c.body && c.body.includes(marker));
+            if (existing) {
+              await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+            } else {
+              await github.rest.issues.createComment({ owner, repo, issue_number: prNumber, body });
+            }
