@@ -1,5 +1,5 @@
 use crate::db::open_db;
-use crate::quiz::{clear_task, issue_task, QuizTask};
+use crate::quiz::{cards_missing_meaning, clear_task, issue_task, QuizTask};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -859,6 +859,8 @@ pub struct SessionStartResult {
     pub new_remaining: i64,
     pub reviews_completed: i64,
     pub new_cards_seen: i64,
+    /// Words in today's queue with no meaning yet, for the "Generate all" banner.
+    pub missing_meaning: Vec<String>,
 }
 
 pub(crate) fn ensure_study(
@@ -1111,6 +1113,7 @@ pub fn db_session_start(
 
     let total_cards = count_total(&conn, study_id)?;
     let progress = session_progress(&conn, study_id)?;
+    let missing_meaning = cards_missing_meaning(&conn, study_id)?.into_iter().map(|(_, word)| word).collect();
 
     Ok(SessionStartResult {
         total_cards,
@@ -1121,6 +1124,7 @@ pub fn db_session_start(
         new_remaining: (max_new_cards - progress.new_cards_seen).max(0),
         reviews_completed: progress.reviews_completed,
         new_cards_seen: progress.new_cards_seen,
+        missing_meaning,
     })
 }
 

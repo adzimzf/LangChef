@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { BulbOutlined } from '@ant-design/icons'
 import { NONE_ANSWER } from '../lib/types'
-import type { AnswerResult, QuizAnswer, QuizTask, SessionSummary } from '../lib/types'
+import type { AnswerResult, CardDetail, QuizAnswer, QuizTask, SessionSummary } from '../lib/types'
 
 export const GRADE_COLORS: Record<string, string> = {
   again: 'bg-red-500',
@@ -345,6 +345,148 @@ export function SessionSummaryView({ summary }: { summary: SessionSummary }) {
       {listCard('Mixed up today', summary.mixed_up.map(m => ({ left: `${m.word} ↔ ${m.other}`, right: `${m.count}×`, tone: 'text-red-500' })))}
       {listCard('Reading slips', summary.reading_slips.map(s => ({ left: `${s.word} ${s.reading}`, right: `picked ${s.picked}`, tone: 'text-orange-500' })))}
       {listCard('Missed in context', summary.context_misses.map(m => ({ left: m.word, right: `picked ${m.other}'s meaning`, tone: 'text-red-500' })))}
+    </div>
+  )
+}
+
+const EMPTY_DETAIL: CardDetail = { reading: '', meaning: '', part_of_speech: '', example: '', example_meaning: '' }
+
+const DETAIL_FIELDS: { key: keyof CardDetail; label: string; placeholder: string }[] = [
+  { key: 'meaning', label: 'Meaning', placeholder: 'walk; stroll' },
+  { key: 'reading', label: 'Reading', placeholder: 'さんぽ' },
+  { key: 'part_of_speech', label: 'Part of speech', placeholder: 'noun' },
+  { key: 'example', label: 'Example sentence', placeholder: '毎朝、公園を散歩します。' },
+  { key: 'example_meaning', label: 'Example translation', placeholder: 'I take a walk in the park every morning.' },
+]
+
+/** A card with no meaning yet: generate or write the back, check it, then it is quizzed later. */
+export function MeaningSetup({ task, hasApi, generating, saving, error, onGenerate, onSave, onSkip, onOpenSettings }: {
+  task: QuizTask
+  hasApi: boolean
+  generating: boolean
+  saving: boolean
+  error: string | null
+  onGenerate: () => void
+  onSave: (detail: CardDetail) => void
+  onSkip: () => void
+  onOpenSettings: () => void
+}) {
+  const [editing, setEditing] = useState<CardDetail | null>(null)
+  const draft = task.draft
+
+  const label = (
+    <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-orange-50 text-orange-500">
+      {editing ? 'Edit the back' : draft ? 'Check the back' : 'No meaning yet'}
+    </span>
+  )
+
+  if (editing) {
+    return (
+      <div className="flex flex-col gap-3 w-full max-w-sm mx-auto">
+        <div className="bg-white rounded-2xl shadow-md px-5 py-5 flex flex-col gap-3">
+          <div className="text-center flex flex-col items-center gap-1">
+            {label}
+            <div className="text-3xl font-semibold">{task.word}</div>
+          </div>
+          {DETAIL_FIELDS.map(f => (
+            <label key={f.key} className="flex flex-col gap-1">
+              <span className="text-xs text-gray-400">{f.label}{f.key === 'meaning' ? ' (required)' : ''}</span>
+              <input
+                id={`meaning-${f.key}`}
+                value={editing[f.key]}
+                placeholder={f.placeholder}
+                onChange={e => setEditing({ ...editing, [f.key]: e.target.value })}
+                className="px-3 py-2 rounded-xl bg-gray-50 text-sm outline-none focus:ring-2 focus:ring-blue-200"
+              />
+            </label>
+          ))}
+        </div>
+        {error && <p className="text-xs text-center text-red-500">{error}</p>}
+        <div className="grid grid-cols-2 gap-2">
+          <button type="button" className={secondaryBtn} onClick={() => setEditing(null)}>Cancel</button>
+          <button type="button" className={primaryBtn} disabled={saving || !editing.meaning.trim()} onClick={() => onSave(editing)}>
+            {saving ? 'Saving…' : 'Save, quiz me later'}
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  if (generating) {
+    return (
+      <div className="flex flex-col gap-3 w-full max-w-sm mx-auto">
+        <div className="bg-white rounded-2xl shadow-md px-6 py-8 text-center flex flex-col items-center gap-3">
+          <div className="text-4xl font-semibold">{task.word}</div>
+          <div className="w-full flex flex-col items-center gap-2 animate-pulse">
+            <div className="h-2.5 w-2/5 rounded bg-gray-100" />
+            <div className="h-2.5 w-3/4 rounded bg-gray-100" />
+            <div className="h-2.5 w-4/5 rounded bg-gray-100" />
+          </div>
+          <span className="text-xs text-gray-400">Generating reading, meaning and an example…</span>
+        </div>
+      </div>
+    )
+  }
+
+  if (draft) {
+    return (
+      <div className="flex flex-col gap-3 w-full max-w-sm mx-auto">
+        <div className="bg-white rounded-2xl shadow-md px-5 py-6 flex flex-col gap-3">
+          <div className="text-center flex flex-col items-center gap-1">
+            {label}
+            <Word word={task.word} reading={draft.reading} showReading size="text-3xl" />
+          </div>
+          <div className="flex flex-col gap-1 text-sm">
+            <div className="flex justify-between gap-3"><span className="text-gray-400">Meaning</span><span className="font-semibold text-right">{draft.meaning}</span></div>
+            {draft.part_of_speech && (
+              <div className="flex justify-between gap-3"><span className="text-gray-400">Type</span><span className="text-right">{draft.part_of_speech}</span></div>
+            )}
+          </div>
+          {draft.example && (
+            <div className="bg-gray-50 rounded-xl p-2.5 text-sm">
+              <div>{draft.example}</div>
+              {draft.example_meaning && <div className="text-xs text-gray-500 mt-0.5">{draft.example_meaning}</div>}
+            </div>
+          )}
+        </div>
+        {error && <p className="text-xs text-center text-red-500">{error}</p>}
+        <button type="button" className={primaryBtn} disabled={saving} onClick={() => onSave(draft)}>
+          {saving ? 'Saving…' : 'Looks right, quiz me later'}
+        </button>
+        <div className="grid grid-cols-2 gap-2">
+          <button type="button" className={secondaryBtn} onClick={() => setEditing({ ...draft })}>✎ Edit</button>
+          <button type="button" className={secondaryBtn} disabled={!hasApi} onClick={onGenerate}>↻ Regenerate</button>
+        </div>
+        <button type="button" className="py-1 text-xs text-gray-400 hover:text-gray-600" onClick={onSkip}>Skip for today</button>
+      </div>
+    )
+  }
+
+  return (
+    <div className="flex flex-col gap-3 w-full max-w-sm mx-auto">
+      <div className="bg-white rounded-2xl shadow-md px-6 py-8 text-center flex flex-col items-center gap-2">
+        {label}
+        <div className="text-4xl font-semibold">{task.word}</div>
+        <span className="text-xs text-gray-400 mt-1">
+          {hasApi
+            ? 'Add the back of this card and it will be quizzed later in this session.'
+            : 'AI generation needs an API key. Add one in Settings, or write the meaning yourself.'}
+        </span>
+      </div>
+      {error && <p className="text-xs text-center text-red-500">{error}</p>}
+      {hasApi ? (
+        <button type="button" className={primaryBtn} onClick={onGenerate}>✨ Generate meaning</button>
+      ) : (
+        <button type="button" className={primaryBtn} onClick={() => setEditing({ ...EMPTY_DETAIL })}>Write it myself</button>
+      )}
+      <div className="grid grid-cols-2 gap-2">
+        {hasApi ? (
+          <button type="button" className={secondaryBtn} onClick={() => setEditing({ ...EMPTY_DETAIL })}>Write it myself</button>
+        ) : (
+          <button type="button" className={secondaryBtn} onClick={onOpenSettings}>Open Settings</button>
+        )}
+        <button type="button" className={secondaryBtn} onClick={onSkip}>Skip for today</button>
+      </div>
     </div>
   )
 }

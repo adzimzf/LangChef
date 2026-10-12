@@ -28,7 +28,16 @@ export type Grade = 'again' | 'hard' | 'good' | 'easy'
 export type CardState = 'new' | 'learning' | 'review' | 'relearning'
 
 /** Question kinds for auto-graded review (see src-tauri/src/quiz.rs) */
-export type QuizKind = 'classic' | 'intro_tf' | 'true_false' | 'choice' | 'recall_confirm' | 'reading' | 'context'
+export type QuizKind = 'classic' | 'needs_meaning' | 'intro_tf' | 'true_false' | 'choice' | 'recall_confirm' | 'reading' | 'context'
+
+/** Back of a card, as saved in `review_items.detail` */
+export type CardDetail = {
+  reading: string
+  meaning: string
+  part_of_speech: string
+  example: string
+  example_meaning: string
+}
 
 /** Value sent for "None of these" in recall → confirm */
 export const NONE_ANSWER = '__none'
@@ -45,6 +54,8 @@ export type QuizTask = {
   sentence: { before: string; target: string; after: string; translation: string } | null
   hint_available: boolean
   mature: boolean
+  /** needs_meaning: AI-generated back waiting for approval */
+  draft: CardDetail | null
 }
 
 export type QuizAnswer = {

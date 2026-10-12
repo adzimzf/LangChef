@@ -34,7 +34,7 @@ No test framework configured.
 
 **Auto-graded review:** users don't rate themselves. `src-tauri/src/quiz.rs` gives each due card a question and turns the answer into the FSRS grade:
 - Question by card stage: new → intro + true/false; learning/relearning → pick the meaning; review → recall then confirm (sometimes "None of these" is the right answer); mature (review with stability ≥ 21 days) → rotates recall / pick the reading / meaning in context. Tiny decks fall back to true/false.
-- Cards without a meaning in `detail` use the old self-graded flip (`classic`).
+- Cards without a meaning in `detail` get `needs_meaning`: the user generates the back (`db_generate_detail` with `draft: true` writes `review_items.draft_detail`) or writes it, checks/edits it, and `db_session_save_meaning` saves it and moves the card to the end of today's queue without grading; it comes back as a real question (new cards skip the intro). "Skip for today" (`db_session_skip_card`) takes it out of today's queue ungraded. A session-start banner offers `db_generate_missing_meanings` for all of them. The self-graded flip (`classic`) only remains for decks with fewer than 2 words with meanings.
 - Grade: wrong or "Don't know" → Again; hint used or slower than 2× the user's median time → Hard; otherwise Good. Easy only for fast answers on mature cards to recall or context questions. A wrong reading on a mature card is Hard (no lapse).
 - The issued question is stored in `study_card.task` (answer hidden from the frontend) and checked against on answer. Wrong picks are recorded in `review_confusions` and those words are used as harder wrong options later. One "I mis-tapped" fix per language per day restores the saved card state and re-grades.
 
@@ -53,7 +53,7 @@ No test framework configured.
 
 **Chat:** User message → `send()` builds system prompt (injects difficult words, known words, JLPT constraints, grammar patterns) → `invoke('llm_chat')` proxies OpenAI-compatible request through Rust → response rendered with furigana/grammar/word-tap highlighting → tapping word calls `invoke('db_upsert_review_item')`.
 
-**Review:** `invoke('db_session_start')` → returns `next_card` + `next_task` (the question) → user answers → `invoke('db_session_answer')` checks it in Rust, grades, records the answer and returns the verdict plus the next card. `db_session_override` handles the mis-tap fix, `db_session_summary` feeds the end-of-session screen, and `db_session_grade` is the self-graded path for `classic` cards. UI in `src/components/ReviewQuiz.tsx`.
+**Review:** `invoke('db_session_start')` → returns `next_card` + `next_task` (the question) → user answers → `invoke('db_session_answer')` checks it in Rust, grades, records the answer and returns the verdict plus the next card. `db_session_override` handles the mis-tap fix, `db_session_summary` feeds the end-of-session screen, `db_session_save_meaning` / `db_session_skip_card` / `db_generate_missing_meanings` handle cards without a meaning, and `db_session_grade` is the self-graded path for `classic` cards. UI in `src/components/ReviewQuiz.tsx`.
 
 **Message branching:** Messages support `parent_message_id` and `is_active_path` for branching conversations. `db_deactivate_message_branch` + `db_get_message_siblings` manage tree traversal.
 
@@ -95,7 +95,7 @@ DB path: `~/.app-data/langchef/langchef.db`. Schema created in `open_db()` in `s
 |-------|------------|
 | `messages` | id, role, content, session_id, parent_message_id, is_active_path |
 | `chat_sessions` | id, title, language, level, selected_grammar |
-| `review_items` | id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, mnemonic, stability, difficulty |
+| `review_items` | id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, draft_detail, mnemonic, stability, difficulty |
 | `known_words` | word (PK) |
 | `grammar_items` | id, pattern, detail, language, level, is_default |
 | `user_activity` | date, activity_type, count |

@@ -5,16 +5,19 @@
 use crate::db::open_db;
 use crate::srs::{
     apply_session_grade, ensure_study, fetch_review_item, format_next_review_minutes,
-    session_progress, ReviewItem, SessionProgress,
+    session_progress, set_card_status, ReviewItem, SessionProgress,
 };
-use crate::words::is_cjk;
+use crate::words::{generate_detail_text, is_cjk};
 use rand::seq::SliceRandom;
 use rand::Rng;
 use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
+/// Self-graded flip; only when the deck has no other meanings to build wrong options from.
 pub const KIND_CLASSIC: &str = "classic";
+/// The card has no meaning yet: generate or write the back, approve it, and it comes back later.
+pub const KIND_NEEDS_MEANING: &str = "needs_meaning";
 pub const KIND_INTRO_TF: &str = "intro_tf";
 pub const KIND_TRUE_FALSE: &str = "true_false";
 pub const KIND_CHOICE: &str = "choice";
@@ -38,8 +41,8 @@ const MIN_TIMING_SAMPLES: usize = 8;
 // Card detail parsing
 // ---------------------------------------------------------------------------
 
-#[derive(Default, Clone)]
-pub(crate) struct CardDetail {
+#[derive(Default, Clone, Serialize, Deserialize)]
+pub struct CardDetail {
     pub reading: String,
     pub meaning: String,
     pub part_of_speech: String,
@@ -49,7 +52,7 @@ pub(crate) struct CardDetail {
 
 /// Parses `review_items.detail`: the JSON object written by `db_generate_detail`, or the plain
 /// text meaning from a CSV import (`word,meaning`).
-pub(crate) fn parse_detail(detail: Option<&str>) -> CardDetail {
+pub fn parse_detail(detail: Option<&str>) -> CardDetail {
     let Some(d) = detail.map(str::trim).filter(|d| !d.is_empty()) else {
         return CardDetail::default();
     };
@@ -116,6 +119,9 @@ pub struct QuizTask {
     /// Furigana can be revealed as a hint (counts against the grade).
     pub hint_available: bool,
     pub mature: bool,
+    /// Needs-meaning: an AI-generated back waiting for approval.
+    #[serde(default)]
+    pub draft: Option<CardDetail>,
     #[serde(skip_serializing, default)]
     answer: String,
     #[serde(skip_serializing, default)]
@@ -136,6 +142,7 @@ impl QuizTask {
             sentence: None,
             hint_available: false,
             mature: false,
+            draft: None,
             answer: detail.meaning.clone(),
             statement_true: false,
             easy_allowed: false,
@@ -301,10 +308,22 @@ fn split_sentence(example: &str, word: &str, translation: &str) -> Option<Senten
     })
 }
 
-fn build_task(conn: &Connection, card: &ReviewItem, rng: &mut impl Rng) -> Result<QuizTask, String> {
+fn load_draft(conn: &Connection, id: &str) -> Result<Option<CardDetail>, String> {
+    let draft: Option<String> = conn
+        .query_row("SELECT draft_detail FROM review_items WHERE id = ?1", params![id], |row| row.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?
+        .flatten();
+    Ok(Some(parse_detail(draft.as_deref())).filter(|d| !d.meaning.is_empty()))
+}
+
+/// `meaning_just_shown`: the user has just approved this card's back, so a new card skips the intro.
+fn build_task(conn: &Connection, card: &ReviewItem, meaning_just_shown: bool, rng: &mut impl Rng) -> Result<QuizTask, String> {
     let detail = parse_detail(card.detail.as_deref());
     if detail.meaning.is_empty() {
-        return Ok(QuizTask::base(KIND_CLASSIC, card, &detail));
+        let mut task = QuizTask::base(KIND_NEEDS_MEANING, card, &detail);
+        task.draft = load_draft(conn, &card.id)?;
+        return Ok(task);
     }
 
     let candidates = load_candidates(conn, card)?;
@@ -319,9 +338,10 @@ fn build_task(conn: &Connection, card: &ReviewItem, rng: &mut impl Rng) -> Resul
 
     let kind = if pool.is_empty() {
         KIND_CLASSIC
-    } else if card.state == "new" {
+    } else if card.state == "new" && !meaning_just_shown {
         KIND_INTRO_TF
-    } else if pool.len() < 3 {
+    } else if card.state == "new" || pool.len() < 3 {
+        // New card whose meaning was just approved, or too few words for 4 options.
         KIND_TRUE_FALSE
     } else if card.state != "review" {
         KIND_CHOICE
@@ -398,10 +418,15 @@ fn load_task(conn: &Connection, study_id: i64, card_id: &str) -> Result<Option<Q
 /// Returns the open question for a card, creating and storing one if needed. Storing it means a
 /// reload shows the same question and the answer is checked against what was actually shown.
 pub(crate) fn issue_task(conn: &Connection, study_id: i64, card: &ReviewItem) -> Result<QuizTask, String> {
-    if let Some(task) = load_task(conn, study_id, &card.id)? {
-        return Ok(task);
+    match load_task(conn, study_id, &card.id)? {
+        // Cards without a quiz are re-checked each time: a meaning or more cards may have been added since.
+        Some(task) if task.kind != KIND_NEEDS_MEANING && task.kind != KIND_CLASSIC => Ok(task),
+        _ => store_new_task(conn, study_id, card, false),
     }
-    let task = build_task(conn, card, &mut rand::thread_rng())?;
+}
+
+fn store_new_task(conn: &Connection, study_id: i64, card: &ReviewItem, meaning_just_shown: bool) -> Result<QuizTask, String> {
+    let task = build_task(conn, card, meaning_just_shown, &mut rand::thread_rng())?;
     let json = serde_json::to_string(&StoredTask(&task)).map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE study_card SET task = ?1 WHERE study_id = ?2 AND review_item_id = ?3",
@@ -427,7 +452,7 @@ impl Serialize for StoredTask<'_> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
         let t = self.0;
-        let mut st = s.serialize_struct("QuizTask", 13)?;
+        let mut st = s.serialize_struct("QuizTask", 14)?;
         st.serialize_field("kind", &t.kind)?;
         st.serialize_field("word", &t.word)?;
         st.serialize_field("reading", &t.reading)?;
@@ -437,6 +462,7 @@ impl Serialize for StoredTask<'_> {
         st.serialize_field("sentence", &t.sentence)?;
         st.serialize_field("hint_available", &t.hint_available)?;
         st.serialize_field("mature", &t.mature)?;
+        st.serialize_field("draft", &t.draft)?;
         st.serialize_field("answer", &t.answer)?;
         st.serialize_field("statement_true", &t.statement_true)?;
         st.serialize_field("easy_allowed", &t.easy_allowed)?;
@@ -729,8 +755,8 @@ pub fn db_session_answer(
     let study_id = ensure_study(&conn, &today(), &language, max_reviews, max_new_cards)?;
     let task = load_task(&conn, study_id, &card_id)?
         .ok_or("This card has no open question. Pull to refresh the review.")?;
-    if task.kind == KIND_CLASSIC {
-        return Err("This card has no meaning to check against. Grade it yourself.".into());
+    if task.kind == KIND_CLASSIC || task.kind == KIND_NEEDS_MEANING {
+        return Err("This card has no question to answer yet.".into());
     }
 
     let (correct, chosen, other_id) = check_answer(&task, &answer);
@@ -885,6 +911,129 @@ pub fn db_session_override(
         lapsed: srs.lapsed,
         progress: session_progress(&conn, study_id)?,
     })
+}
+
+/// Saves the approved back of a card that had no meaning and moves it to the end of today's
+/// queue. Not graded: it comes back later in the session as a real question.
+#[tauri::command]
+pub fn db_session_save_meaning(
+    app: tauri::AppHandle,
+    language: String,
+    card_id: String,
+    meaning: CardDetail,
+    max_reviews: i64,
+    max_new_cards: i64,
+) -> Result<SessionProgress, String> {
+    let clean = |s: &str| s.trim().to_string();
+    let detail = CardDetail {
+        reading: clean(&meaning.reading),
+        meaning: clean(&meaning.meaning),
+        part_of_speech: clean(&meaning.part_of_speech),
+        example: clean(&meaning.example),
+        example_meaning: clean(&meaning.example_meaning),
+    };
+    if detail.meaning.is_empty() {
+        return Err("Add a meaning before saving.".into());
+    }
+    let json = serde_json::to_string(&detail).map_err(|e| e.to_string())?;
+
+    let conn = open_db(&app)?;
+    conn.execute(
+        "UPDATE review_items SET detail = ?1, draft_detail = NULL WHERE id = ?2",
+        params![json, card_id],
+    )
+    .map_err(|e| e.to_string())?;
+
+    let study_id = ensure_study(&conn, &today(), &language, max_reviews, max_new_cards)?;
+    let card = fetch_review_item(&conn, &card_id)?.ok_or("That card no longer exists.")?;
+    store_new_task(&conn, study_id, &card, true)?;
+    // Re-marking it pending bumps update_time, which puts it behind every other pending card.
+    set_card_status(&conn, study_id, &card_id, "pending")?;
+    session_progress(&conn, study_id)
+}
+
+/// "Skip for today": takes a card out of today's queue without grading it.
+#[tauri::command]
+pub fn db_session_skip_card(
+    app: tauri::AppHandle,
+    language: String,
+    card_id: String,
+    max_reviews: i64,
+    max_new_cards: i64,
+) -> Result<SessionProgress, String> {
+    let conn = open_db(&app)?;
+    let study_id = ensure_study(&conn, &today(), &language, max_reviews, max_new_cards)?;
+    clear_task(&conn, study_id, &card_id)?;
+    set_card_status(&conn, study_id, &card_id, "skipped")?;
+    session_progress(&conn, study_id)
+}
+
+/// Cards still waiting in today's queue that have neither a meaning nor a draft.
+pub(crate) fn cards_missing_meaning(conn: &Connection, study_id: i64) -> Result<Vec<(String, String)>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT r.id, r.content, r.detail, r.draft_detail FROM study_card sc
+             JOIN review_items r ON r.id = sc.review_item_id
+             WHERE sc.study_id = ?1 AND sc.status = 'pending'
+             ORDER BY sc.update_time",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![study_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .filter_map(|r| r.ok())
+        .filter(|(_, _, detail, draft)| {
+            parse_detail(detail.as_deref()).meaning.is_empty() && parse_detail(draft.as_deref()).meaning.is_empty()
+        })
+        .map(|(id, content, _, _)| (id, content))
+        .collect())
+}
+
+#[derive(Serialize)]
+pub struct GenerateAllResult {
+    pub generated: usize,
+    pub failed: Vec<String>,
+}
+
+/// "Generate all": drafts a back for every card in today's queue that has no meaning. Each draft
+/// still waits for the user's approval when its card comes up.
+#[tauri::command]
+pub async fn db_generate_missing_meanings(
+    app: tauri::AppHandle,
+    api_host: String,
+    api_key: String,
+    model: String,
+    language: String,
+    max_reviews: i64,
+    max_new_cards: i64,
+) -> Result<GenerateAllResult, String> {
+    let missing = {
+        let conn = open_db(&app)?;
+        let study_id = ensure_study(&conn, &today(), &language, max_reviews, max_new_cards)?;
+        cards_missing_meaning(&conn, study_id)?
+    };
+    let mut generated = 0;
+    let mut failed = Vec::new();
+    for (id, content) in missing {
+        match generate_detail_text(&api_host, &api_key, &model, &content, &language).await {
+            Ok(text) if !parse_detail(Some(&text)).meaning.is_empty() => {
+                let conn = open_db(&app)?;
+                conn.execute("UPDATE review_items SET draft_detail = ?1 WHERE id = ?2", params![text, id])
+                    .map_err(|e| e.to_string())?;
+                generated += 1;
+            }
+            _ => failed.push(content),
+        }
+    }
+    Ok(GenerateAllResult { generated, failed })
 }
 
 #[derive(Serialize)]
@@ -1058,6 +1207,59 @@ mod tests {
         assert!(reading_variants("ふつう").contains(&"ふっつう".to_string()));
     }
 
+    fn card(id: &str, content: &str, state: &str, detail: Option<&str>) -> ReviewItem {
+        ReviewItem {
+            id: id.into(),
+            content: content.into(),
+            EF: -1.0,
+            I: 0,
+            R: 0,
+            state: state.into(),
+            step: 0,
+            lapse_count: 0,
+            next_review: None,
+            language: Some("ja".into()),
+            detail: detail.map(String::from),
+            mnemonic: None,
+            fsrs_stability: None,
+            fsrs_difficulty: None,
+            difficulty_bg_class: String::new(),
+            difficulty_label: String::new(),
+            state_label: String::new(),
+            next_review_formatted: String::new(),
+        }
+    }
+
+    fn deck() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE review_items(id TEXT PRIMARY KEY, content TEXT, language TEXT, detail TEXT, draft_detail TEXT);
+             CREATE TABLE review_confusions(review_item_id TEXT, confused_with_id TEXT, count INTEGER, last_at INTEGER);
+             INSERT INTO review_items VALUES
+               ('a', '散歩', 'ja', NULL, '{\"reading\":\"さんぽ\",\"meaning\":\"walk\"}'),
+               ('b', '先生', 'ja', 'teacher', NULL),
+               ('c', '学生', 'ja', 'student', NULL);",
+        )
+        .unwrap();
+        conn
+    }
+
+    #[test]
+    fn card_without_meaning_asks_for_one_and_shows_draft() {
+        let conn = deck();
+        let t = build_task(&conn, &card("a", "散歩", "new", None), false, &mut rand::thread_rng()).unwrap();
+        assert_eq!(t.kind, KIND_NEEDS_MEANING);
+        assert_eq!(t.draft.unwrap().meaning, "walk");
+    }
+
+    #[test]
+    fn new_card_skips_intro_after_meaning_was_approved() {
+        let conn = deck();
+        let c = card("b", "先生", "new", Some("teacher"));
+        assert_eq!(build_task(&conn, &c, false, &mut rand::thread_rng()).unwrap().kind, KIND_INTRO_TF);
+        assert_eq!(build_task(&conn, &c, true, &mut rand::thread_rng()).unwrap().kind, KIND_TRUE_FALSE);
+    }
+
     #[test]
     fn stored_task_keeps_hidden_answer() {
         let t = QuizTask {
@@ -1070,6 +1272,7 @@ mod tests {
             sentence: None,
             hint_available: true,
             mature: true,
+            draft: None,
             answer: NONE_ANSWER.into(),
             statement_true: false,
             easy_allowed: true,

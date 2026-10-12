@@ -182,6 +182,9 @@ pub fn run() {
             quiz::db_session_answer,
             quiz::db_session_override,
             quiz::db_session_summary,
+            quiz::db_session_save_meaning,
+            quiz::db_session_skip_card,
+            quiz::db_generate_missing_meanings,
             // Words
             words::db_list_known_words,
             words::db_add_known_word,
