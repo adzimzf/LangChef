@@ -103,6 +103,32 @@ pub fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
             PRIMARY KEY (study_id, review_item_id)
         );
         CREATE INDEX IF NOT EXISTS idx_study_card_status ON study_card(study_id, status);
+        CREATE TABLE IF NOT EXISTS review_answers(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            review_item_id TEXT NOT NULL,
+            language TEXT,
+            task TEXT NOT NULL,
+            correct INTEGER NOT NULL,
+            dont_know INTEGER NOT NULL DEFAULT 0,
+            elapsed_ms INTEGER NOT NULL,
+            hint_used INTEGER NOT NULL DEFAULT 0,
+            chosen TEXT,
+            chosen_item_id TEXT,
+            grade TEXT NOT NULL,
+            easy_allowed INTEGER NOT NULL DEFAULT 0,
+            mature INTEGER NOT NULL DEFAULT 0,
+            prev_state TEXT,
+            overridden INTEGER NOT NULL DEFAULT 0,
+            answered_at INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_review_answers_lang_time ON review_answers(language, answered_at);
+        CREATE TABLE IF NOT EXISTS review_confusions(
+            review_item_id TEXT NOT NULL,
+            confused_with_id TEXT NOT NULL,
+            count INTEGER NOT NULL DEFAULT 1,
+            last_at INTEGER NOT NULL,
+            PRIMARY KEY (review_item_id, confused_with_id)
+        );
         CREATE TABLE IF NOT EXISTS reading_sessions(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             language TEXT NOT NULL,
@@ -130,6 +156,9 @@ pub fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN step INTEGER DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN lapse_count INTEGER DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN mnemonic TEXT", []);
+    let _ = conn.execute("ALTER TABLE study_card ADD COLUMN task TEXT", []);
+    // AI-generated back of a card waiting for the user to approve it in review.
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN draft_detail TEXT", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN fsrs_stability REAL", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN fsrs_difficulty REAL", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN created_at INTEGER", []);

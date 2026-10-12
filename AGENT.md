@@ -30,7 +30,7 @@ All schema changes go in `open_db()` in `src-tauri/src/lib.rs`. Use `ALTER TABLE
 
 ## SRS Changes
 
-`src/lib/srs.ts` and the `schedule_card` fn in `src-tauri/src/lib.rs` must stay in sync. FSRS 5.2.0 is the engine; SM-2 columns (EF, I, R) are legacy display-only. Desired retention constant: 90%.
+FSRS 5.2.0 in `src-tauri/src/srs.rs` is the engine; SM-2 columns (EF, I, R) are legacy display-only. Desired retention constant: 90%. Review grades come from `src-tauri/src/quiz.rs` (`compute_grade`), not from the user; its rules are covered by `cargo test --lib quiz`.
 
 ## Grammar Files
 
