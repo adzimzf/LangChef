@@ -3,7 +3,7 @@ name: 'pr-build'
 # Builds the app on every pull request (macOS arm64/x86_64 + Android arm64), following the
 # release matrix, then comments on the PR with download links. PR builds are rebranded to a separate package so they install next to
 # the release app instead of replacing it:
-#   Android: app.langchef.pr  ("LangChef PR #<n>")
+#   Android: app.langchef.pr  ("LangChef PR")
 #   macOS:   app.langchef.pr  ("LangChef PR")
 
 on:
@@ -38,8 +38,8 @@ jobs:
       # Compile-time env!() values. Secrets are unavailable on fork PRs, so fall back to a placeholder.
       GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID || 'test' }}
       GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET || 'test' }}
-      PR_NUMBER: ${{ github.event.pull_request.number }}
       LANGCHEF_APPLICATION_ID_SUFFIX: '.pr'
+      LANGCHEF_APP_NAME: 'LangChef PR'
 
     steps:
       - uses: actions/checkout@v4
@@ -74,14 +74,6 @@ jobs:
       - name: Install NDK
         if: matrix.target == 'android'
         run: sdkmanager "ndk;27.0.11902837"
-
-      - name: Set PR app name
-        run: |
-          if [ -n "$PR_NUMBER" ]; then
-            echo "LANGCHEF_APP_NAME=LangChef PR #$PR_NUMBER" >> "$GITHUB_ENV"
-          else
-            echo "LANGCHEF_APP_NAME=LangChef PR" >> "$GITHUB_ENV"
-          fi
 
       - name: Prepare android signing key
         if: matrix.target == 'android'
@@ -148,7 +140,7 @@ jobs:
       - name: Collect artifacts
         run: |
           mkdir -p ./pr-assets
-          SUFFIX="pr${PR_NUMBER:-manual}-${GITHUB_SHA::7}"
+          SUFFIX="pr-${GITHUB_SHA::7}"
           if [ "${{ matrix.target }}" = "android" ]; then
             APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*-release.apk' | head -n 1)
             cp "$APK" "./pr-assets/LangChef_${SUFFIX}_arm64.apk"
@@ -217,9 +209,9 @@ jobs:
               '',
               '<details><summary>Install the Android APK</summary>',
               '',
-              '1. Download `langchef-android.zip` above and unzip it to get `LangChef_pr<N>-<sha>_arm64.apk`.',
+              '1. Download `langchef-android.zip` above and unzip it to get `LangChef_pr-<sha>_arm64.apk`.',
               `2. Copy the APK to an arm64 Android phone (or run \`adb install -r LangChef_pr*.apk\`) and open it; allow "Install unknown apps" if prompted.`,
-              `3. It installs as **LangChef PR #${prNumber}** (\`app.langchef.pr\`) next to the release app, with its own data. Google sign-in does not work in PR builds.`,
+              `3. It installs as **LangChef PR** (\`app.langchef.pr\`) next to the release app, with its own data. Google sign-in does not work in PR builds.`,
               '4. If the install fails with a signature conflict, uninstall the previous LangChef PR build first (happens when no preview signing key is configured).',
               '',
               '</details>',
@@ -243,7 +235,7 @@ jobs:
               'npm run tauri:build',
               '',
               '# Android (needs Android SDK + NDK, NDK_HOME set); same package rename as CI',
-              `LANGCHEF_APPLICATION_ID_SUFFIX=.pr LANGCHEF_APP_NAME="LangChef PR #${prNumber}" npm run tauri -- android build --apk --target aarch64`,
+              `LANGCHEF_APPLICATION_ID_SUFFIX=.pr LANGCHEF_APP_NAME="LangChef PR" npm run tauri -- android build --apk --target aarch64`,
               '```',
               '',
               'Signing for local release APKs: copy `keystore.properties.example` to `keystore.properties` (or set `LANGCHEF_KEYSTORE_*`), otherwise the APK is unsigned.',

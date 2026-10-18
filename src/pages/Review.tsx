@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState, useRef } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
 import type { Grade } from '../lib/types'
 import {
@@ -10,9 +11,10 @@ import {
   SettingOutlined,
   BulbOutlined,
 } from '@ant-design/icons'
-import type { ReviewItem } from '../lib/types'
+import type { AnswerResult, CardDetail, GradePreview, QuizAnswer, QuizTask, ReviewItem, SessionProgress, SessionSummary } from '../lib/types'
 import { parseDetailJson } from '../lib/types'
 import EditWordForm from '../components/EditWordForm'
+import { GRADE_COLORS, MeaningSetup, QuizVerdictView, ReviewQuiz, SessionSummaryView, useAutoAdvance } from '../components/ReviewQuiz'
 
 const LANGUAGES: Record<string, { label: string; flag: string }> = {
   ja: { label: 'Japanese', flag: '\u{1F1EF}\u{1F1F5}' },
@@ -36,44 +38,28 @@ function getMaxNewCards(): number {
 
 type GradeOption = { grade: Grade; label: string; nextLabel: string; color: string }
 
-const GRADE_COLORS: Record<string, string> = {
-  again: 'bg-red-500',
-  hard: 'bg-orange-500',
-  good: 'bg-blue-500',
-  easy: 'bg-green-500',
-}
-
-type RawGradePreview = {
-  grade: string
-  label: string
-  next_review_formatted: string
-  lapsed: boolean
-  graduated: boolean
-}
-
 type SessionStartResult = {
   total_cards: number
   next_card: ReviewItem | null
-  grade_options: RawGradePreview[]
+  next_task: QuizTask | null
+  grade_options: GradePreview[]
   reviews_remaining: number
   new_remaining: number
   reviews_completed: number
   new_cards_seen: number
+  missing_meaning: string[]
 }
 
-type SessionGradeResult = {
-  EF: number; I: number; R: number
-  state: string; step: number; lapse_count: number
-  next_review: number; lapsed: boolean; graduated: boolean
-  fsrs_stability: number | null; fsrs_difficulty: number | null
-  reviews_completed: number; new_cards_seen: number
-  next_card: ReviewItem | null
-  grade_options: RawGradePreview[]
-  session_done: boolean
-  remaining_count: number
+type SessionGradeResult = SessionProgress & { lapsed: boolean; graduated: boolean }
+
+function getApiConfig() {
+  const apiHost = localStorage.getItem('api_host') || ''
+  const apiKey = localStorage.getItem('api_key') || ''
+  const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
+  return { apiHost, apiKey, model, ready: !!apiHost && !!apiKey }
 }
 
-function toGradeOptions(previews: RawGradePreview[]): GradeOption[] {
+function toGradeOptions(previews: GradePreview[]): GradeOption[] {
   return previews.map(p => ({
     grade: p.grade as Grade,
     label: p.label,
@@ -109,6 +95,20 @@ export default function Review() {
   const [reviewedToday, setReviewedToday] = useState(0)
   const [newCardsToday, setNewCardsToday] = useState(0)
   const [gradeOptions, setGradeOptions] = useState<GradeOption[]>([])
+  // Auto-graded question for the current card ('classic' means self-grade)
+  const [currentTask, setCurrentTask] = useState<QuizTask | null>(null)
+  const [answerResult, setAnswerResult] = useState<AnswerResult | null>(null)
+  const [answering, setAnswering] = useState(false)
+  const [overriding, setOverriding] = useState(false)
+  const [summary, setSummary] = useState<SessionSummary | null>(null)
+  // Cards with no meaning: generate/write the back, approve, re-queue
+  const [missingMeaning, setMissingMeaning] = useState<string[]>([])
+  const [bannerDismissed, setBannerDismissed] = useState(false)
+  const [generatingAll, setGeneratingAll] = useState(false)
+  const [meaningBusy, setMeaningBusy] = useState<'generating' | 'saving' | null>(null)
+  const [meaningError, setMeaningError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const navigate = useNavigate()
 
   const fileInputRef = useRef<HTMLInputElement>(null)
   const isGrading = useRef(false)
@@ -138,6 +138,9 @@ export default function Review() {
         maxNewCards: getMaxNewCards(),
       })
       setCurrentCard(result.next_card ?? null)
+      setCurrentTask(result.next_task ?? null)
+      setAnswerResult(null)
+      setMissingMeaning(result.missing_meaning)
       setGradeOptions(toGradeOptions(result.grade_options))
       setSessionTotal(result.total_cards)
       setSessionRemaining(result.total_cards)
@@ -192,14 +195,7 @@ export default function Review() {
 
       invoke('db_record_activity', { activityType: 'review' }).catch(() => {})
 
-      setReviewedToday(result.reviews_completed)
-      setNewCardsToday(result.new_cards_seen)
-      setCurrentCard(result.next_card ?? null)
-      setSessionRemaining(result.remaining_count)
-      setGradeOptions(toGradeOptions(result.grade_options))
-      setRevealed(false)
-      setShowMnemonic(false)
-
+      applyProgress(result)
       if (result.graduated && !result.lapsed) {
         setSessionCompleted(prev => prev + 1)
       }
@@ -207,6 +203,182 @@ export default function Review() {
 
     setTimeout(() => { isGrading.current = false }, 0)
   }
+
+  function applyProgress(p: SessionProgress) {
+    setReviewedToday(p.reviews_completed)
+    setNewCardsToday(p.new_cards_seen)
+    setCurrentCard(p.next_card ?? null)
+    setCurrentTask(p.next_task ?? null)
+    setSessionRemaining(p.remaining_count)
+    setGradeOptions(toGradeOptions(p.grade_options))
+    setAnswerResult(null)
+    setRevealed(false)
+    setShowMnemonic(false)
+    setMeaningError(null)
+  }
+
+  // Short-lived message above the card (e.g. "moved to the end of today's queue")
+  useEffect(() => {
+    if (!notice) return
+    const t = setTimeout(() => setNotice(null), 4000)
+    return () => clearTimeout(t)
+  }, [notice])
+
+  async function generateMeaning() {
+    if (!currentCard || !currentTask) return
+    const api = getApiConfig()
+    if (!api.ready) return
+    setMeaningBusy('generating')
+    setMeaningError(null)
+    try {
+      const text = await invoke<string>('db_generate_detail', {
+        apiHost: api.apiHost, apiKey: api.apiKey, model: api.model,
+        content: currentCard.content,
+        language: currentCard.language || selectedLang || 'ja',
+        draft: true,
+      })
+      const parsed = parseDetailJson(text)
+      if (!parsed?.meaning) {
+        setMeaningError("Couldn't read a meaning from the AI's answer. Try again, or write it yourself.")
+      } else {
+        setCurrentTask({
+          ...currentTask,
+          draft: {
+            reading: parsed.reading || '',
+            meaning: parsed.meaning,
+            part_of_speech: parsed.part_of_speech || '',
+            example: parsed.example || '',
+            example_meaning: parsed.example_meaning || '',
+          },
+        })
+      }
+    } catch (e) {
+      setMeaningError(`Generation failed: ${e}`)
+    }
+    setMeaningBusy(null)
+  }
+
+  async function saveMeaning(detail: CardDetail) {
+    if (!currentCard) return
+    const word = currentCard.content
+    setMeaningBusy('saving')
+    setMeaningError(null)
+    try {
+      const result = await invoke<SessionProgress>('db_session_save_meaning', {
+        language: currentCard.language || selectedLang || 'ja',
+        cardId: currentCard.id,
+        meaning: detail,
+        maxReviews: getMaxReviews(),
+        maxNewCards: getMaxNewCards(),
+      })
+      applyProgress(result)
+      setMissingMeaning(prev => prev.filter(w => w !== word))
+      setNotice(result.next_card?.content === word
+        ? `Saved. ${word} is the last card left, so here it is.`
+        : `Saved, not graded. ${word} moved to the end of today's queue.`)
+    } catch (e) {
+      setMeaningError(`${e}`)
+    }
+    setMeaningBusy(null)
+  }
+
+  async function skipCard() {
+    if (!currentCard) return
+    const word = currentCard.content
+    try {
+      const result = await invoke<SessionProgress>('db_session_skip_card', {
+        language: currentCard.language || selectedLang || 'ja',
+        cardId: currentCard.id,
+        maxReviews: getMaxReviews(),
+        maxNewCards: getMaxNewCards(),
+      })
+      applyProgress(result)
+      setMissingMeaning(prev => prev.filter(w => w !== word))
+      setNotice(`Skipped ${word} for today.`)
+    } catch (e) {
+      setMeaningError(`${e}`)
+    }
+  }
+
+  async function generateAllMeanings() {
+    const api = getApiConfig()
+    if (!api.ready || !selectedLang) return
+    setGeneratingAll(true)
+    try {
+      const result = await invoke<{ generated: number; failed: string[] }>('db_generate_missing_meanings', {
+        apiHost: api.apiHost, apiKey: api.apiKey, model: api.model,
+        language: selectedLang,
+        maxReviews: getMaxReviews(),
+        maxNewCards: getMaxNewCards(),
+      })
+      setNotice(result.failed.length
+        ? `Generated ${result.generated}. Couldn't generate: ${result.failed.join(', ')}.`
+        : `Generated ${result.generated}. Check each one when it comes up.`)
+      await startSession(selectedLang)
+    } catch (e) {
+      setNotice(`Generation failed: ${e}`)
+    }
+    setGeneratingAll(false)
+  }
+
+  async function handleAnswer(answer: QuizAnswer) {
+    if (!currentCard || answering) return
+    setAnswering(true)
+    try {
+      const result = await invoke<AnswerResult>('db_session_answer', {
+        language: currentCard.language || selectedLang || 'ja',
+        cardId: currentCard.id,
+        answer,
+        maxReviews: getMaxReviews(),
+        maxNewCards: getMaxNewCards(),
+      })
+      invoke('db_record_activity', { activityType: 'review' }).catch(() => {})
+      if (result.card) setCurrentCard(result.card)
+      setReviewedToday(result.reviews_completed)
+      setNewCardsToday(result.new_cards_seen)
+      setAnswerResult(result)
+      if (result.graduated && !result.lapsed) {
+        setSessionCompleted(prev => prev + 1)
+      }
+    } catch (e) {
+      alert(`Could not check the answer: ${e}`)
+    }
+    setAnswering(false)
+  }
+
+  async function handleOverride() {
+    if (!answerResult || overriding) return
+    setOverriding(true)
+    try {
+      const result = await invoke<AnswerResult>('db_session_override', {
+        language: currentCard?.language || selectedLang || 'ja',
+        answerId: answerResult.verdict.answer_id,
+        maxReviews: getMaxReviews(),
+        maxNewCards: getMaxNewCards(),
+      })
+      if (result.card) setCurrentCard(result.card)
+      setReviewedToday(result.reviews_completed)
+      setNewCardsToday(result.new_cards_seen)
+      setAnswerResult(result)
+    } catch (e) {
+      alert(`${e}`)
+    }
+    setOverriding(false)
+  }
+
+  function handleNext() {
+    if (answerResult) applyProgress(answerResult)
+  }
+
+  const cancelAutoAdvance = useAutoAdvance(answerResult, handleNext)
+
+  // End-of-session numbers come from Rust; refresh whenever the queue runs out
+  useEffect(() => {
+    if (currentCard || !selectedLang || loading) return
+    invoke<SessionSummary>('db_session_summary', { language: selectedLang })
+      .then(setSummary)
+      .catch(() => setSummary(null))
+  }, [currentCard, selectedLang, loading])
 
   async function generateDetail() {
     if (!currentCard) return
@@ -631,6 +803,7 @@ export default function Review() {
       {!currentCard ? (
         <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-3">
           <SessionCompleteEffect sessionCompleted={sessionCompleted} />
+          {summary && summary.total > 0 && <SessionSummaryView summary={summary} />}
           <>
             <div className="text-4xl">🎉</div>
             <p className="text-sm text-center">All done for {LANGUAGES[selectedLang || '']?.label || selectedLang}!</p>
@@ -647,8 +820,64 @@ export default function Review() {
           </button>
         </div>
       ) : (
+        currentTask && currentTask.kind !== 'classic' ? (
+          <div className="flex-1 flex flex-col justify-center gap-3 pb-6" onPointerDown={cancelAutoAdvance}>
+            {missingMeaning.length > 0 && !bannerDismissed && getApiConfig().ready && (
+              <div className="w-full max-w-sm mx-auto rounded-2xl bg-orange-50 p-3 flex flex-col gap-2">
+                <div className="text-sm font-semibold text-gray-700">
+                  {missingMeaning.length} {missingMeaning.length === 1 ? 'card has' : 'cards have'} no meaning yet
+                </div>
+                <div className="text-xs text-gray-500">
+                  {missingMeaning.slice(0, 5).join(', ')}{missingMeaning.length > 5 ? '…' : ''}. Generate them now so they can be quizzed.
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <button type="button" onClick={() => setBannerDismissed(true)} className="py-2 rounded-xl bg-white text-gray-600 text-sm font-medium">Later</button>
+                  <button type="button" disabled={generatingAll} onClick={generateAllMeanings} className="py-2 rounded-xl bg-blue-500 text-white text-sm font-medium disabled:opacity-50">
+                    {generatingAll ? 'Generating…' : 'Generate all'}
+                  </button>
+                </div>
+              </div>
+            )}
+            {/* Floating, so it appearing or fading out never moves the buttons under the thumb */}
+            {notice && (
+              <div className="fixed top-24 left-4 right-4 z-50 flex justify-center pointer-events-none">
+                <div className="max-w-sm w-full rounded-2xl bg-green-50 border border-green-100 shadow-sm px-3 py-2 text-xs text-gray-600">{notice}</div>
+              </div>
+            )}
+            {currentTask.kind === 'needs_meaning' ? (
+              <MeaningSetup
+                key={currentCard.id}
+                task={currentTask}
+                hasApi={getApiConfig().ready}
+                generating={meaningBusy === 'generating'}
+                saving={meaningBusy === 'saving'}
+                error={meaningError}
+                onGenerate={generateMeaning}
+                onSave={saveMeaning}
+                onSkip={skipCard}
+                onOpenSettings={() => navigate('/settings')}
+              />
+            ) : answerResult ? (
+              <QuizVerdictView
+                task={currentTask}
+                result={answerResult}
+                details={renderDetailContent(currentCard.detail)}
+                onNext={handleNext}
+                onOverride={handleOverride}
+                overriding={overriding}
+              />
+            ) : (
+              <ReviewQuiz
+                key={currentCard.id}
+                task={currentTask}
+                submitting={answering}
+                onAnswer={handleAnswer}
+              />
+            )}
+          </div>
+        ) : (
         <>
-          {/* Flashcard */}
+          {/* Flashcard (self-graded: card has no meaning to quiz on) */}
           <div className="flex-1 flex flex-col items-center justify-center pb-28 overflow-y-auto">
             <div
               onClick={() => setRevealed(true)}
@@ -675,7 +904,10 @@ export default function Review() {
               )}
 
               {!revealed ? (
-                <div className="text-sm text-gray-400 mt-4">Tap to reveal</div>
+                <>
+                  <div className="text-sm text-gray-400 mt-4">Tap to reveal</div>
+                  <div className="text-xs text-gray-300 mt-2">Quiz questions need at least 2 words with meanings in this deck, so grade this one yourself.</div>
+                </>
               ) : (
                 <>
                   {renderDetailContent(currentCard.detail)}
@@ -728,6 +960,7 @@ export default function Review() {
             )}
           </div>
         </>
+        )
       )}
     </div>
   )

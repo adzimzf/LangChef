@@ -1,5 +1,6 @@
 use crate::chat::{build_url, ChatMessage, ChatRequest, ChatResponse};
 use crate::db::open_db;
+use crate::quiz::{parse_detail, CardDetail};
 use crate::srs::{row_to_review_item, ReviewItem};
 use reqwest::Client;
 use rusqlite::params;
@@ -77,15 +78,7 @@ fn find_mnemonic_matches(
         if !is_known { continue; }
         if content == target_content { continue; }
 
-        let v = detail.as_ref().and_then(|d| serde_json::from_str::<serde_json::Value>(d).ok());
-        let reading = v.as_ref()
-            .and_then(|v| v.get("reading").and_then(|r| r.as_str()))
-            .unwrap_or("")
-            .to_string();
-        let meaning = v.as_ref()
-            .and_then(|v| v.get("meaning").and_then(|m| m.as_str()))
-            .unwrap_or("")
-            .to_string();
+        let CardDetail { reading, meaning, .. } = parse_detail(detail.as_deref());
 
         all_words.push(KnownWord { word: content, reading, meaning });
     }
@@ -166,7 +159,7 @@ fn is_small_kana(c: char) -> bool {
     matches!(c, 'ゃ' | 'ゅ' | 'ょ' | 'ぁ' | 'ぃ' | 'ぅ' | 'ぇ' | 'ぉ' | 'ャ' | 'ュ' | 'ョ' | 'ァ' | 'ィ' | 'ゥ' | 'ェ' | 'ォ')
 }
 
-fn is_cjk(c: char) -> bool {
+pub(crate) fn is_cjk(c: char) -> bool {
     matches!(c,
         '\u{4E00}'..='\u{9FFF}' |
         '\u{3400}'..='\u{4DBF}' |
@@ -205,12 +198,7 @@ pub async fn db_generate_mnemonic(
     language: String,
     detail: Option<String>,
 ) -> Result<String, String> {
-    let (target_reading, target_meaning) = detail.as_ref().map(|d| {
-        let v = serde_json::from_str::<serde_json::Value>(d).ok();
-        let reading = v.as_ref().and_then(|v| v.get("reading").and_then(|r| r.as_str())).unwrap_or("").to_string();
-        let meaning = v.as_ref().and_then(|v| v.get("meaning").and_then(|m| m.as_str())).unwrap_or("").to_string();
-        (reading, meaning)
-    }).unwrap_or_default();
+    let CardDetail { reading: target_reading, meaning: target_meaning, .. } = parse_detail(detail.as_deref());
 
     let target_info = format!(
         "{}{}{}",
@@ -647,12 +635,12 @@ pub fn db_import_review_items(app: tauri::AppHandle, items: Vec<ImportItem>) -> 
     Ok(format!("Imported {} items", imported))
 }
 
-#[tauri::command]
-pub async fn db_generate_detail(app: tauri::AppHandle, api_host: String, api_key: String, model: String, content: String, language: String) -> Result<String, String> {
-    let lang_name = match language.as_str() {
+/// Asks the LLM for a card's back (reading, meaning, part of speech, example) as a JSON string.
+pub(crate) async fn generate_detail_text(api_host: &str, api_key: &str, model: &str, content: &str, language: &str) -> Result<String, String> {
+    let lang_name = match language {
         "ja" => "Japanese",
         "id" => "Indonesian",
-        _ => &language,
+        _ => language,
     };
     let prompt = format!(
         "You are a language learning assistant. For the {} word/phrase \"{}\", provide a detailed vocabulary card in this exact JSON format:\n\
@@ -660,10 +648,10 @@ pub async fn db_generate_detail(app: tauri::AppHandle, api_host: String, api_key
         Return ONLY the JSON object, nothing else.",
         lang_name, content, lang_name
     );
-    let url = build_url(&api_host, "chat/completions");
+    let url = build_url(api_host, "chat/completions");
     let client = Client::new();
     let req = ChatRequest {
-        model: &model,
+        model,
         messages: &vec![ChatMessage { role: "user".to_string(), content: prompt }],
     };
     let resp = client
@@ -679,11 +667,25 @@ pub async fn db_generate_detail(app: tauri::AppHandle, api_host: String, api_key
         return Err(format!("API error: {} — {}", status, body.trim()));
     }
     let parsed: ChatResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
-    let text = parsed.choices.get(0).map(|c| c.message.content.clone()).unwrap_or_default();
+    Ok(parsed.choices.get(0).map(|c| c.message.content.clone()).unwrap_or_default())
+}
 
+/// Generates a card's back. With `draft`, it is kept aside for the user to approve in review
+/// instead of being saved as the card's detail.
+#[tauri::command]
+pub async fn db_generate_detail(
+    app: tauri::AppHandle,
+    api_host: String,
+    api_key: String,
+    model: String,
+    content: String,
+    language: String,
+    draft: Option<bool>,
+) -> Result<String, String> {
+    let text = generate_detail_text(&api_host, &api_key, &model, &content, &language).await?;
+    let column = if draft.unwrap_or(false) { "draft_detail" } else { "detail" };
     let conn = open_db(&app)?;
-    conn.execute("UPDATE review_items SET detail=?1 WHERE content=?2", params![text, content])
+    conn.execute(&format!("UPDATE review_items SET {}=?1 WHERE content=?2", column), params![text, content])
         .map_err(|e| e.to_string())?;
-
     Ok(text)
 }
