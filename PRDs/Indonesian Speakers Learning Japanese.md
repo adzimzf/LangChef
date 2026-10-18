@@ -11,7 +11,7 @@ LangChef already teaches Japanese and Indonesian, but it quietly assumes the lea
 - **Chat:** the partner replies in Japanese only, and there is no "translate this" or "help me say this", so a beginner with no shared language with the app is stuck.
 - **Setup:** the first thing a new user sees is an API host / key / model form with English-only provider docs.
 
-Indonesia is one of the largest groups of Japanese learners in the world. Much of that demand comes from people going to work in Japan (Specified Skilled Worker / *Tokutei Ginou*, technical intern trainees / *magang*), who need roughly N4 / JFT-Basic (A2) level and often studied no English beyond school. Today they can't use LangChef at all.
+Indonesia is one of the largest groups of Japanese learners in the world. Much of that demand comes from people going to work in Japan (Specified Skilled Worker / *Tokutei Ginou*, technical intern trainees / *magang*), who need roughly N4 level and often studied no English beyond school. Today they can't use LangChef at all.
 
 ## Goal
 
@@ -24,7 +24,7 @@ Indonesia is one of the largest groups of Japanese learners in the world. Much o
 | Strings in core flows (onboarding, Home, Chats, Chat, Review, Words, Grammar, Reading, Stats, Settings) translated to Indonesian | 100% (enforced by a key check) |
 | LLM explanations in Indonesian when the explanation language is Indonesian (sampled audit of card backs, feedback, grammar analysis, reading feedback) | ≥ 98% |
 | Moderated test: 5 Indonesian-only speakers finish onboarding → first chat → first review session unaided | 5 / 5 |
-| Bundled grammar explained in Indonesian | N5 + N4 at launch (P1), N3–N1 later |
+| Bundled grammar explained in Indonesian (AI-translated, labelled) | N5 + N4 at launch (P1), N3–N1 later |
 | Quiz options in one card always share the same meaning language | 100% (unit-tested) |
 
 ### Non-goals
@@ -48,6 +48,8 @@ Introduce a second language axis next to the existing **target language** (`ja` 
 
 On first run on a device whose locale is `id-*`, the explanation language defaults to Indonesian and the target language to Japanese.
 
+The setting is **app-wide**: when the user switches it, everything switches at once, including UI, AI explanations, chat hints, grammar notes, reading feedback and card meanings. Nothing is set per chat or per screen.
+
 Then add the learning aids a no-English beginner needs: translate any chat message, write in Indonesian and get it in Japanese ("Bantu saya menjawab"), Indonesian grammar notes, and optional romaji for absolute beginners.
 
 ### Key design decisions
@@ -60,11 +62,11 @@ Then add the learning aids a no-English beginner needs: translate any chat messa
 
 4. **Rust returns codes, React renders words.** Today `compute_grade` builds English reason strings and the summary formats "None of these: …". Per AGENT.md the backend owns logic and the frontend owns rendering, so Rust returns structured reasons (`{ "code": "slower_than_usual", "ms": 4200, "usual_ms": 2100 }`, `{ "code": "none_of_these" }`) and the frontend turns them into text with `t()`. Same for errors: Rust maps known failures to codes (`api_unauthorized`, `api_rate_limited`, `api_unreachable`, `api_bad_response`, `db_error`) and keeps the raw message in a `detail` field shown under "Detail teknis". This keeps all language-specific text in one place, the dictionaries.
 
-5. **Meanings carry their language.** A card's back gets a meaning language. New `review_items.meaning_lang` column (`'en'` default for existing rows, so no data changes meaning silently). `generate_detail_text` takes `explain_lang` and stamps it. The quiz only builds wrong options from cards with the same `meaning_lang` as the card being asked, so it never mixes English and Indonesian options. Cards whose meaning language differs from the user's current one are treated like cards without a meaning: the existing `needs_meaning` flow offers "Terjemahkan arti" (generate a translated back for approval), and the session-start banner offers a batch translation (an extension of `db_generate_missing_meanings`).
+5. **Meanings carry their language.** A card's back gets a meaning language. New `review_items.meaning_lang` column (`'en'` default for existing rows, so no data changes meaning silently). `generate_detail_text` takes `explain_lang` and stamps it. The quiz only builds wrong options from cards with the same `meaning_lang` as the card being asked, so it never mixes English and Indonesian options. Cards whose meaning language differs from the user's current one are **treated as empty** (no meaning). When such a card comes up in review, the existing `needs_meaning` flow asks the user to regenerate the back in the current language (or write it), approve it, and continue. Nothing is translated or restored behind the user's back. This works the same in both directions (English → Indonesian and back).
 
 6. **Grammar keeps one row per explanation language.** New `grammar_items.explain_lang` column (`'en'` for existing rows). Bundled Indonesian explanations live at `grammar/ja/id/N5.md` … and are seeded by an extended `seed_bundled_grammar_if_empty`, which checks `(language, level, explain_lang)` instead of `(language, level)`. Grammar list, chat grammar picker and reading show rows in the user's explanation language. If a level has none, they fall back to English rows with a "Terjemahkan dengan AI" button. User-added grammar items get the user's current explanation language.
 
-7. **Bundled Indonesian grammar is AI-drafted, human-reviewed.** N5 and N4 (~200 patterns) are drafted with an LLM from the English files, then reviewed by a native Indonesian speaker who knows Japanese before they ship. Examples keep the Japanese sentence and replace the English gloss with Indonesian. Explanations compare with Indonesian where it helps (e.g. は vs が against *-nya* / *yang*, Japanese SOV vs Indonesian SVO, no tenses in Indonesian vs Japanese past ～ました, counters vs Indonesian *buah / orang / ekor*) instead of English.
+7. **Indonesian content is AI-translated and labelled as such.** The Indonesian UI copy and the bundled grammar notes (N5 and N4 first, ~200 patterns) are translated with an LLM from the English sources. No manual review is required before shipping. Instead, every AI-translated piece says so: grammar entries show a small "Diterjemahkan oleh AI" badge, and Settings → Bahasa shows "Terjemahan aplikasi ini dibuat dengan AI dan mungkin belum sempurna" with a way to report a bad translation (opens an issue / feedback form). Examples keep the Japanese sentence and replace the English gloss with Indonesian. Explanations compare with Indonesian where it helps (e.g. は vs が against *-nya* / *yang*, Japanese SOV vs Indonesian SVO, no tenses in Indonesian vs Japanese past ～ました, counters vs Indonesian *buah / orang / ekor*) instead of English.
 
 8. **All LLM prompts go through one helper.** Add `fn explain_instruction(explain_lang: &str) -> &'static str` next to the existing `lang_name` matches (reused rather than adding another match). Every prompt that writes something meant for the learner appends it. Prompts whose output must stay in the target language (the chat reply itself, reading passages, reading questions) don't get it. The Japanese chat partner still speaks Japanese, and only the help text is Indonesian.
 
@@ -83,7 +85,7 @@ Launch (device locale id-ID)
       ├─ Saya ingin belajar: [Jepang 🇯🇵 ✓]            (Indonesian hidden when Bahasa Anda = Indonesia)
       ├─ Level saya: [Belum bisa sama sekali] [Bisa hiragana] [N5] [N4] [N3+]
       │     "Belum bisa sama sekali" → turns romaji on + suggests Kana starter (P2)
-      ├─ Hubungkan AI: provider presets + step-by-step guide in Indonesian
+      ├─ Hubungkan AI: OpenRouter preselected + step-by-step guide in Indonesian
       │     [Tes koneksi] → localized success / error ("Kunci API salah", "Kuota habis", …)
       └─ Mulai → Home
 ```
@@ -112,9 +114,9 @@ Feedback on the learner's message → summary, notes and suggestion in Indonesia
 Quiz options in Indonesian ("makan", "minum", "tidur", "Tidak ada yang benar")
 Buttons: "Tidak tahu", "Petunjuk", "Saya salah tekan"
 Result reasons: "Dijawab dalam 3 dtk · tanpa petunjuk"
-Card meaning in English while explanation language is Indonesian →
-   "Arti kartu ini masih dalam bahasa Inggris" [Terjemahkan arti] [Lewati hari ini]
-Session-start banner: "12 kartu masih berbahasa Inggris" [Terjemahkan semua]
+Card meaning in English while explanation language is Indonesian → shown as empty:
+   "Kartu ini belum punya arti dalam Bahasa Indonesia" [Buat arti dengan AI] [Tulis sendiri] [Lewati hari ini]
+   → generated back shown for approval → saved → card returns later in the session as a real question
 ```
 
 ---
@@ -126,7 +128,7 @@ Session-start banner: "12 kartu masih berbahasa Inggris" [Terjemahkan semua]
 #### FR1: Explanation language setting
 - **FR1.1** The app SHALL store an explanation language `explain_lang` ∈ {`en`, `id`} in `localStorage` and pass it to every Tauri command that produces learner-facing text or content.
 - **FR1.2** On first launch, `explain_lang` SHALL default to `id` when `navigator.language` starts with `id`, otherwise `en`. Existing installs (any of `api_host`, `api_key` present) SHALL default to `en`.
-- **FR1.3** Settings SHALL let the user change it ("Bahasa Anda / Your language"). Changing it SHALL save and reload the app.
+- **FR1.3** Settings SHALL let the user change it ("Bahasa Anda / Your language"). Changing it SHALL show a confirm dialog (UI, AI explanations, chat hints and grammar all switch; card meanings in the old language become empty and are regenerated as cards show), then save and reload the app. The setting is app-wide, with no per-chat or per-screen override.
 - **FR1.4** The target-language picker SHALL hide the target that equals the explanation language (no Indonesian → Indonesian).
 
 #### FR2: Interface translation
@@ -136,6 +138,7 @@ Session-start banner: "12 kartu masih berbahasa Inggris" [Terjemahkan semua]
 - **FR2.4** `npm run i18n:check` SHALL fail on missing / extra keys between `en.json` and `id.json` and on untranslated JSX text literals.
 - **FR2.5** Indonesian copy SHALL use plain, friendly everyday Indonesian ("Anda", short sentences), avoid English loanwords where a common Indonesian word exists ("Pengaturan", not "Settings"; "Kartu", not "Flashcard"), and keep unavoidable technical terms (API, JLPT) with a short explanation the first time they appear.
 - **FR2.6** Language and level names SHALL be localized (Jepang, Indonesia; "N5 — Dasar: salam, perkenalan diri"). The `description` fields in `src/lib/jlpt.ts` move into the dictionaries. `promptRule` stays English because the LLM reads it.
+- **FR2.7** The Indonesian dictionary is AI-translated (decision 7). Settings SHALL show a note saying so, with a "Laporkan terjemahan salah" link.
 
 #### FR3: Backend codes instead of English text
 - **FR3.1** `compute_grade` and the session summary SHALL return reason codes with numeric params instead of English sentences. Existing `cargo test --lib quiz` tests SHALL be updated to assert codes.
@@ -148,14 +151,14 @@ Session-start banner: "12 kartu masih berbahasa Inggris" [Terjemahkan semua]
 - **FR4.3** `review_items` SHALL get `meaning_lang TEXT NOT NULL DEFAULT 'en'`, set on every save of a detail (generated, edited in `EditWordForm`, saved via `db_session_save_meaning`, CSV import).
 - **FR4.4** CSV import (`word,meaning`) SHALL take the meaning language from an import-dialog choice that defaults to `explain_lang`.
 - **FR4.5** `meaning_distractors` SHALL only use candidate cards with the same `meaning_lang` as the asked card. The "fewer than 2 words with meanings → classic" fallback SHALL count per meaning language.
-- **FR4.6** A card whose `meaning_lang` ≠ `explain_lang` SHALL be treated as `needs_meaning`, with a "translate" variant of the existing UI. The draft (`draft_detail`) is a translation of the existing back. Approving saves it with the new `meaning_lang` and keeps the old detail in a new `review_items.detail_prev` column so it can be undone.
-- **FR4.7** The session-start banner SHALL count and batch-translate such cards, reusing the `db_generate_missing_meanings` loop with a `translate_from` mode.
-- **FR4.8** Words list SHALL show the meaning in the user's language and offer "Terjemahkan semua arti" for the deck.
+- **FR4.6** A card whose `meaning_lang` ≠ `explain_lang` SHALL be treated as having an empty meaning (`needs_meaning`). This check is done in Rust when the task is built, so switching language needs no migration and works in both directions.
+- **FR4.7** When such a card shows in review, the user SHALL be asked to regenerate the back in the current language (`db_generate_detail` with `draft: true`) or write it, then approve it via `db_session_save_meaning`, which overwrites the old back and sets the new `meaning_lang`. "Lewati hari ini" stays available.
+- **FR4.8** Words list SHALL show such cards as "Belum ada arti" (no meaning yet) with the same regenerate action, and they count toward the existing missing-meaning banner at session start.
 
 #### FR5: LLM explanations in Indonesian
 - **FR5.1** These prompts SHALL append `explain_instruction(explain_lang)`: card detail (`words.rs`), grammar analysis (`grammar.rs`), message feedback `summary` / `note` fields (`feedback.rs`, keeping `suggestion` in the target language), reading answer feedback (`reading.rs`), and the new translate / help-me-reply commands.
 - **FR5.2** The in-prompt examples in `feedback.rs` SHALL have an Indonesian variant so the model isn't steered back to English by an English example.
-- **FR5.3** The chat system prompt SHALL stay target-language-only for the partner's reply. When the session level is N5 and the learner chose "Belum bisa sama sekali" / "Bisa hiragana", the system prompt MAY allow one short Indonesian hint in parentheses per reply (toggle "Petunjuk bahasa Indonesia di chat", default on for those learners, off otherwise).
+- **FR5.3** The chat system prompt SHALL stay target-language-only for the partner's reply. A single app-wide toggle "Petunjuk di chat" (Settings, default on for learners who chose "Belum bisa sama sekali" / "Bisa hiragana") lets the partner add one short hint in parentheses per reply, always in the current explanation language. It is not set per chat.
 - **FR5.4** If a response comes back in the wrong language (cheap check: for `id`, a feedback `summary` with no common Indonesian function words and mostly English stopwords), the command SHALL retry once with a stronger instruction before returning.
 
 #### FR6: Chat aids
@@ -170,7 +173,8 @@ Session-start banner: "12 kartu masih berbahasa Inggris" [Terjemahkan semua]
 - **FR7.3** `db_get_grammar_*` commands SHALL take `explain_lang` and return rows in that language, falling back per level to `en` with a `fallback: true` flag.
 - **FR7.4** Fallback rows SHALL offer "Terjemahkan dengan AI", which saves a translated copy as a new row with `explain_lang='id'` and `is_default=0`.
 - **FR7.5** Each Indonesian grammar entry SHALL have: pattern, *Arti* (one line), *Cara pakai* (formation, e.g. "KK bentuk-te + います"), *Contoh* (2–3 Japanese sentences with furigana + Indonesian translation), and *Catatan* (common mistakes for Indonesian speakers) where useful.
-- **FR7.6** N3, N2, N1 Indonesian files follow in a later release using the same process.
+- **FR7.6** Bundled Indonesian entries and user-triggered translations SHALL both carry an `ai_translated` flag, and the UI SHALL show "Diterjemahkan oleh AI" on them.
+- **FR7.7** N3, N2, N1 Indonesian files follow in a later release using the same process.
 
 #### FR8: Reading in Indonesian
 - **FR8.1** Reading answer feedback (`evaluate_reading_answer`) SHALL be in `explain_lang`. Questions and expected answers stay in Japanese.
@@ -179,7 +183,7 @@ Session-start banner: "12 kartu masih berbahasa Inggris" [Terjemahkan semua]
 
 #### FR9: AI provider setup in Indonesian
 - **FR9.1** Onboarding and Settings SHALL include an Indonesian step-by-step guide for getting an API key from each preset provider, with a "Tes koneksi" button.
-- **FR9.2** Provider presets SHALL fill `api_host` and suggest a model so the learner only pastes a key. Presets are data (a JSON list in the frontend), so adding one needs no code change.
+- **FR9.2** **OpenRouter is the default provider**: preselected in onboarding, with `api_host` = `https://openrouter.ai/api/v1` and a default model filled in, so the learner only signs up and pastes a key. The Indonesian guide covers creating an OpenRouter account and key. Other OpenAI-compatible providers stay available under "Provider lain" (custom host / key / model, as today). Presets are data (a JSON list in the frontend), so adding one needs no code change.
 - **FR9.3** Errors during setup SHALL use the FR3.2 codes with Indonesian guidance ("Kunci API salah — salin ulang dari halaman provider", "Kuota habis — tunggu atau isi saldo").
 
 #### FR10: Beginner support (P2)
@@ -203,8 +207,8 @@ Session-start banner: "12 kartu masih berbahasa Inggris" [Terjemahkan semua]
 
 | Table | Change |
 |---|---|
-| `review_items` | `+ meaning_lang TEXT NOT NULL DEFAULT 'en'`, `+ detail_prev TEXT` |
-| `grammar_items` | `+ explain_lang TEXT NOT NULL DEFAULT 'en'` |
+| `review_items` | `+ meaning_lang TEXT NOT NULL DEFAULT 'en'` |
+| `grammar_items` | `+ explain_lang TEXT NOT NULL DEFAULT 'en'`, `+ ai_translated INTEGER NOT NULL DEFAULT 0` |
 | `message_translations` | new: `message_id TEXT, lang TEXT, text TEXT, created_at`, PK `(message_id, lang)` |
 | `reading_sessions` | `+ translation TEXT` |
 | `user_activity` | new activity types: `translate`, `help_reply` (no schema change) |
@@ -215,7 +219,7 @@ Session-start banner: "12 kartu masih berbahasa Inggris" [Terjemahkan semua]
 
 | Command | Change |
 |---|---|
-| `db_generate_detail`, `db_generate_missing_meanings` | `+ explain_lang`; `db_generate_missing_meanings` `+ translate_from` mode |
+| `db_generate_detail`, `db_generate_missing_meanings` | `+ explain_lang` (missing meanings now include cards whose `meaning_lang` ≠ `explain_lang`) |
 | `db_session_start`, `db_session_answer`, `db_session_summary` | `+ explain_lang` (to detect wrong-language cards); reasons returned as codes |
 | `db_session_save_meaning`, `db_upsert_review_item`, CSV import | write `meaning_lang` |
 | `analyze_grammar`, feedback, `evaluate_reading_answer` | `+ explain_lang` |
@@ -239,7 +243,7 @@ New TS types in `src/lib/types.ts`: `GradeReason`, `AppError`, `HelpReply`, `Exp
 | Phase | Scope | Exit criteria |
 |---|---|---|
 | **P0: Usable without English** | FR1, FR2, FR3, FR4, FR5, FR9 | Indonesian-only tester can onboard, chat (with tap-to-see meaning), and finish a review session with Indonesian options |
-| **P1: Learnable without English** | FR6 (translate, help-reply, topics), FR7 (N5 + N4 Indonesian grammar, human-reviewed), FR8 | A beginner can follow a chat, understand grammar notes and get reading feedback in Indonesian |
+| **P1: Learnable without English** | FR6 (translate, help-reply, topics), FR7 (N5 + N4 Indonesian grammar, AI-translated and labelled), FR8 | A beginner can follow a chat, understand grammar notes and get reading feedback in Indonesian |
 | **P2: From zero** | FR10 (romaji, kana starter, romaji input), FR7.6 (N3–N1 grammar) | Someone who can't read kana can start on day one |
 
 ---
@@ -249,17 +253,20 @@ New TS types in `src/lib/types.ts`: `GradeReason`, `AppError`, `HelpReply`, `Exp
 | Risk | Mitigation |
 |---|---|
 | Smaller / cheaper models drift back to English | Explicit instruction in every prompt, Indonesian in-prompt examples, one automatic retry (FR5.4), and the onboarding recommends models that handle Indonesian well |
+| Switching language empties every card's meaning, which feels like lost work | Regeneration happens one card at a time as cards come up (or in bulk from the existing banner); the confirm dialog on switching says "Arti kartu akan dibuat ulang dalam bahasa baru saat kartu muncul" |
 | Bad Indonesian glosses for Japanese words (LLM translating via English, e.g. picking an odd sense) | Prompt asks for direct JA→ID glosses; the user approves every generated back (existing approval flow); "Laporkan arti salah" opens the edit form |
 | Mixed-language decks confuse the quiz | `meaning_lang` filter on wrong options (FR4.5) with unit tests |
-| AI-drafted grammar notes contain errors | Native-speaker review before bundling; marked "Diperiksa" in UI; AI-translated user copies are marked "Terjemahan AI" |
+| AI-translated grammar notes or UI copy contain errors | Everything AI-translated is labelled "Diterjemahkan oleh AI"; "Laporkan terjemahan salah" link; fixes ship as dictionary / grammar-file updates |
 | Hardcoded strings creep back | `i18n:check` lints JSX literals; PR checklist item |
 | Text overflow on small Android screens | NFR5 check at 360 px; shorter Indonesian labels for the bottom nav (Beranda, Chat, Ulas, Kata, Statistik) |
 | API key setup still too hard for non-technical users | Indonesian guide with screenshots per preset; error codes with concrete fixes. Out of scope here but noted: a hosted option would remove this step entirely |
 
-## Open questions
+## Decisions log
 
-1. Which providers go in the presets list for launch? Ideally ones with a free tier usable from Indonesia and good Indonesian output.
-2. Who does the native-speaker review of the N5/N4 grammar notes and the UI copy? Budget and timeline.
-3. Should the chat Indonesian hints (FR5.3) be per-session or a global preference?
-4. Should we add JFT-Basic as a level option next to JLPT (it maps roughly to A2 / between N5 and N4), given how many Indonesian learners target it for work visas?
-5. When a user switches explanation language back to English, should translated cards offer "restore English meaning" from `detail_prev`, or regenerate?
+| Question | Decision |
+|---|---|
+| Default AI provider | OpenRouter (FR9.2) |
+| Manual review of Indonesian translations | Not required; AI translation is fine as long as it is labelled "Diterjemahkan oleh AI" (decision 7, FR2.7, FR7.6) |
+| Per-chat or global language / hints | Global: one switch changes everything in the app (FR1.3, FR5.3) |
+| JFT-Basic level | Not added; JLPT levels only |
+| Card meanings after switching language | Treated as empty; the user regenerates them when the card shows (FR4.6–FR4.8) |
