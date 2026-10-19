@@ -22,15 +22,18 @@ A dedicated **Urai** / **Break down** tab (`/breakdown`) in the bottom nav.
    - **Word for word:** gloss strip (with readings for Japanese).
    - **Check yourself:** one multiple-choice question that can only be answered by reading the structure right, graded in Rust, with an explanation pointing at the part of the sentence that gives the answer.
    - Full translation behind a button, last.
+   Each section is its own small AI request; all are sent at once and each section appears as soon as it arrives (a skeleton until then, its own retry if it fails). The sentence itself shows immediately and gets its colors when the chunks arrive.
 4. **History.** Breakdowns are cached per sentence + target language + explanation language and listed under "Recently broken down" with their structure tags and check result. They can be reopened (no new AI call) or deleted.
 
 ## Backend
 
 - Module `src-tauri/src/breakdown.rs`.
-- Commands: `breakdown_split_sentences`, `llm_sentence_breakdown`, `db_list_sentence_breakdowns`, `db_get_sentence_breakdown`, `db_check_breakdown_answer`, `db_delete_sentence_breakdown`.
-- Table `sentence_breakdowns(id, language, explain_lang, sentence, data, checked, created_at)`, unique on `(language, explain_lang, sentence)`. `data` is the cleaned LLM JSON, including the check answer, which never leaves the backend.
-- The prompt asks for strict JSON. `clean()` maps unknown roles to `other` and drops an invalid check question. `chunks_match` says whether the chunks spell out the sentence; if they don't, the page shows the plain sentence instead of the colored one.
-- Uses `complete_explained`, so learner-facing text follows `explain_lang` (with the Indonesian retry).
+- Sections (`SECTIONS`): `chunks`, `core` (translation, core, note, tip, structure tags), `layers`, `order`, `notes`, `gloss`, `check`. One shared intro plus a short per-section instruction, so each answer is small and fast.
+- Commands: `breakdown_split_sentences`, `db_start_sentence_breakdown` (find or create; returns cached parts and the `missing` sections), `llm_breakdown_section`, `db_list_sentence_breakdowns`, `db_get_sentence_breakdown`, `db_check_breakdown_answer`, `db_delete_sentence_breakdown`.
+- Tables `breakdowns(id, language, explain_lang, sentence, checked, created_at)`, unique on `(language, explain_lang, sentence)`, and `breakdown_parts(breakdown_id, section, data)`. The check part keeps its answer and explanation in the backend until the learner answers.
+- `clean_section` maps unknown roles to `other` and rejects an unusable answer (no chunks, no core, invalid check) so the page offers a retry. `chunks_match` says whether the chunks spell out the sentence; if they don't, the page shows the plain sentence instead of the colored one.
+- Uses `complete_explained`, so learner-facing text follows `explain_lang`; the Indonesian retry now repeats only the section that came back in English.
+- `open_db` sets a 5 s busy timeout so the parallel section writes wait for the lock instead of failing.
 
 ## Not in this version
 

@@ -215,28 +215,31 @@ export type BreakdownRole =
 
 export type BreakdownChunk = { text: string; role: BreakdownRole; label: string; meaning: string; implied: boolean }
 
-export type SentenceBreakdown = {
-  id: number
-  sentence: string
-  language: string
-  translation: string
-  core: string
-  core_note: string
-  tip: string
-  chunks: BreakdownChunk[]
-  /** The chunks spell out the sentence, so it can be shown colored by chunk */
-  chunks_match: boolean
+export type BreakdownSection = 'chunks' | 'core' | 'layers' | 'order' | 'notes' | 'gloss' | 'check'
+
+/** Each section comes from its own request and arrives on its own */
+export type BreakdownParts = {
+  chunks: { chunks: BreakdownChunk[]; chunks_match: boolean }
+  core: { translation: string; core: string; core_note: string; tip: string; structures: string[] }
   /** Nesting from the main clause inwards */
-  layers: { text: string; meaning: string }[]
+  layers: { layers: { text: string; meaning: string }[] }
   order: {
     target: { text: string; role: BreakdownRole }[]
     native: { text: string; role: BreakdownRole }[]
     note: string
   }
-  notes: { text: string; note: string }[]
-  gloss: { text: string; reading: string; meaning: string }[]
-  structures: string[]
-  check: { question: string; options: string[] } | null
+  notes: { notes: { text: string; note: string }[] }
+  gloss: { gloss: { text: string; reading: string; meaning: string }[] }
+  check: { question: string; options: string[] }
+}
+
+export type SentenceBreakdown = {
+  id: number
+  sentence: string
+  language: string
+  parts: Partial<BreakdownParts>
+  /** Sections not generated yet */
+  missing: BreakdownSection[]
   checked: boolean | null
 }
 

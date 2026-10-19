@@ -1,16 +1,16 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import {
   ArrowLeftOutlined, LoadingOutlined, DeleteOutlined, SnippetsOutlined, CloseOutlined,
-  CheckCircleOutlined, CloseCircleOutlined, PartitionOutlined,
+  CheckCircleOutlined, CloseCircleOutlined, PartitionOutlined, ReloadOutlined,
 } from '@ant-design/icons'
 import type {
-  BreakdownCheckResult, BreakdownRole, BreakdownSummary, SentenceBreakdown,
+  BreakdownCheckResult, BreakdownParts, BreakdownRole, BreakdownSection, BreakdownSummary, SentenceBreakdown,
 } from '../lib/types'
 import { t, errorText, formatDay } from '../lib/i18n'
 import { TARGET_LANGUAGES } from '../lib/languages'
 
-type Phase = 'input' | 'pick' | 'loading' | 'result'
+type Phase = 'input' | 'pick' | 'result'
 
 const LANG_STORAGE_KEY = 'breakdown_language'
 
@@ -37,6 +37,17 @@ function sqliteDate(value: string): Date {
   return new Date(value.includes('T') ? value : `${value.replace(' ', 'T')}Z`)
 }
 
+/** Grey bars standing in for a section while its request runs. */
+function Skeleton({ lines = 2 }: { lines?: number }) {
+  return (
+    <div className="flex flex-col gap-2 animate-pulse" aria-hidden="true">
+      {Array.from({ length: lines }, (_, i) => (
+        <div key={i} className={`h-4 rounded bg-gray-200 ${i === lines - 1 ? 'w-2/3' : 'w-full'}`} />
+      ))}
+    </div>
+  )
+}
+
 export default function Breakdown() {
   const [phase, setPhase] = useState<Phase>('input')
   const [language, setLanguage] = useState(() => {
@@ -47,10 +58,17 @@ export default function Breakdown() {
   const [sentences, setSentences] = useState<string[]>([])
   const [history, setHistory] = useState<BreakdownSummary[]>([])
   const [result, setResult] = useState<SentenceBreakdown | null>(null)
+  const [parts, setParts] = useState<Partial<BreakdownParts>>({})
+  const [pending, setPending] = useState<BreakdownSection[]>([])
+  const [failed, setFailed] = useState<Partial<Record<BreakdownSection, string>>>({})
   const [error, setError] = useState('')
   const [showTranslation, setShowTranslation] = useState(false)
   const [checkResult, setCheckResult] = useState<BreakdownCheckResult | null>(null)
   const [chosen, setChosen] = useState<number | null>(null)
+  /** The breakdown on screen; answers for one the learner already left are dropped. */
+  const shownId = useRef<number | null>(null)
+  /** `id:section` requests still running, so reopening a breakdown doesn't ask the AI twice. */
+  const inFlight = useRef(new Set<string>())
 
   const apiHost = localStorage.getItem('api_host') || ''
   const apiKey = localStorage.getItem('api_key') || ''
@@ -71,24 +89,49 @@ export default function Breakdown() {
     localStorage.setItem(LANG_STORAGE_KEY, code)
   }
 
+  /** Requests one section; every missing section is requested at the same time. */
+  async function fetchSection(id: number, section: BreakdownSection) {
+    setPending((p) => [...p, section])
+    setFailed((f) => ({ ...f, [section]: undefined }))
+    const key = `${id}:${section}`
+    if (inFlight.current.has(key)) return
+    inFlight.current.add(key)
+    try {
+      const value = await invoke<BreakdownParts[typeof section]>('llm_breakdown_section', { apiHost, apiKey, model, id, section })
+      if (shownId.current !== id) return
+      setParts((p) => ({ ...p, [section]: value }))
+      if (section === 'core') loadHistory()
+    } catch (e) {
+      if (shownId.current === id) setFailed((f) => ({ ...f, [section]: errorText(e) }))
+    } finally {
+      inFlight.current.delete(key)
+      if (shownId.current === id) setPending((p) => p.filter((s) => s !== section))
+    }
+  }
+
   function show(b: SentenceBreakdown) {
+    shownId.current = b.id
     setResult(b)
+    setParts(b.parts)
+    setPending([])
+    setFailed({})
     setShowTranslation(false)
     setCheckResult(null)
     setChosen(null)
     setPhase('result')
+    if (b.missing.length > 0 && !apiKey) { setError(t('common.apiMissing')); return }
+    setError('')
+    b.missing.forEach((section) => fetchSection(b.id, section))
   }
 
   async function analyze(sentence: string) {
     if (!apiKey) { setError(t('common.apiMissing')); return }
     setError('')
-    setPhase('loading')
     try {
-      show(await invoke<SentenceBreakdown>('llm_sentence_breakdown', { apiHost, apiKey, model, sentence, language }))
+      show(await invoke<SentenceBreakdown>('db_start_sentence_breakdown', { sentence, language }))
       loadHistory()
     } catch (e) {
       setError(errorText(e))
-      setPhase(sentences.length > 1 ? 'pick' : 'input')
     }
   }
 
@@ -130,17 +173,31 @@ export default function Breakdown() {
   }
 
   function backToInput() {
+    shownId.current = null
     setError('')
     setPhase('input')
   }
 
-  // ─── Loading ───────────────────────────────────────────────────────────────
-  if (phase === 'loading') {
+  /** A section's frame: its content once it arrived, a skeleton while it loads, or the error with a retry. */
+  function section(name: BreakdownSection, title: string | null, body: ReactNode, lines = 2) {
+    const loaded = parts[name] !== undefined
+    const failure = failed[name]
+    if (!loaded && !failure && !pending.includes(name)) return null
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-4 text-gray-500">
-        <LoadingOutlined className="text-3xl" spin />
-        <p className="text-sm">{t('breakdown.loading')}</p>
-      </div>
+      <section className="flex flex-col gap-2">
+        {title && <h2 className="text-[15px] font-bold text-gray-900">{title}</h2>}
+        {loaded ? body : failure ? (
+          <div className="flex items-center justify-between gap-3 bg-red-50 border border-red-200 rounded-xl px-3.5 py-2.5 text-sm text-red-700">
+            <span>{failure}</span>
+            <button
+              onClick={() => result && fetchSection(result.id, name)}
+              className="shrink-0 flex items-center gap-1.5 font-semibold text-red-700 active:text-red-900"
+            >
+              <ReloadOutlined /> {t('common.retry')}
+            </button>
+          </div>
+        ) : <Skeleton lines={lines} />}
+      </section>
     )
   }
 
@@ -178,9 +235,9 @@ export default function Breakdown() {
 
   // ─── Result ────────────────────────────────────────────────────────────────
   if (phase === 'result' && result) {
-    const r = result
-    const rolesShown = [...new Set(r.chunks.filter((c) => !c.implied).map((c) => c.role))]
-      .filter((role) => role !== 'other' && role !== 'connector')
+    const { chunks, core, layers, order, notes, gloss, check } = parts
+    const said = chunks?.chunks.filter((c) => !c.implied) ?? []
+    const rolesShown = [...new Set(said.map((c) => c.role))].filter((role) => role !== 'other' && role !== 'connector')
     return (
       <div className="h-full overflow-y-auto">
         <div className="flex flex-col pt-6 pb-8 gap-6 max-w-lg mx-auto">
@@ -188,19 +245,20 @@ export default function Breakdown() {
             <button onClick={backToInput} aria-label={t('common.back')} className="text-gray-400 active:text-gray-600 p-1">
               <ArrowLeftOutlined className="text-xl" />
             </button>
-            <h1 className="text-xl font-bold text-gray-900">{t('breakdown.resultTitle')}</h1>
+            <h1 className="flex-1 text-xl font-bold text-gray-900">{t('breakdown.resultTitle')}</h1>
+            {pending.length > 0 && <LoadingOutlined className="text-gray-400" spin aria-label={t('breakdown.loading')} />}
           </div>
 
-          {/* The sentence, colored by chunk */}
+          {/* The sentence: shown at once, colored by chunk when the chunks arrive */}
           <section className="flex flex-col gap-2">
             <p className="text-[19px] leading-[2.3] text-gray-900">
-              {r.chunks_match
-                ? r.chunks.map((c, i) => c.implied
+              {chunks?.chunks_match
+                ? chunks.chunks.map((c, i) => c.implied
                   ? <span key={i} className="mx-0.5 px-1 rounded border border-dashed border-gray-400 text-gray-500 text-sm">{c.text}</span>
                   : <span key={i} className={`px-0.5 rounded ${ROLE_STYLE[c.role].mark}`}>{c.text}</span>)
-                : r.sentence}
+                : result.sentence}
             </p>
-            {r.chunks_match && (
+            {chunks?.chunks_match && (
               <div className="flex flex-wrap gap-x-3 gap-y-1 text-xs text-gray-600">
                 {rolesShown.map((role) => (
                   <span key={role} className="flex items-center gap-1.5">
@@ -208,7 +266,7 @@ export default function Breakdown() {
                     {t(`breakdown.role.${role}`)}
                   </span>
                 ))}
-                {r.chunks.some((c) => c.implied) && (
+                {chunks.chunks.some((c) => c.implied) && (
                   <span className="flex items-center gap-1.5">
                     <span className="w-3 h-3 rounded-sm border border-dashed border-gray-500" />
                     {t('breakdown.implied')}
@@ -218,104 +276,84 @@ export default function Breakdown() {
             )}
           </section>
 
-          {/* Core */}
-          {r.core && (
-            <section className="bg-blue-50 rounded-2xl px-4 py-3.5 flex flex-col gap-1.5">
+          {error && <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">{error}</div>}
+
+          {section('core', null, core && (
+            <div className="bg-blue-50 rounded-2xl px-4 py-3.5 flex flex-col gap-1.5">
               <p className="text-[11px] font-bold text-blue-700 uppercase tracking-wide">{t('breakdown.core')}</p>
-              <p className="text-[17px] font-bold text-gray-900 leading-snug">{r.core}</p>
-              {r.core_note && <p className="text-sm text-gray-700 leading-relaxed">{r.core_note}</p>}
-              {r.tip && <p className="text-[13px] text-gray-600 leading-relaxed">{r.tip}</p>}
-            </section>
-          )}
+              <p className="text-[17px] font-bold text-gray-900 leading-snug">{core.core}</p>
+              {core.core_note && <p className="text-sm text-gray-700 leading-relaxed">{core.core_note}</p>}
+              {core.tip && <p className="text-[13px] text-gray-600 leading-relaxed">{core.tip}</p>}
+            </div>
+          ), 3)}
 
-          {/* Nesting */}
-          {r.layers.length > 0 && (
-            <section className="flex flex-col gap-2">
-              <h2 className="text-[15px] font-bold text-gray-900">{t('breakdown.layers')}</h2>
-              {r.layers.reduceRight<ReactNode>((inner, layer, i) => (
-                <div className={`border-2 ${LAYER_BORDERS[i % LAYER_BORDERS.length]} rounded-xl p-3 flex flex-col gap-1.5 bg-white`}>
-                  <span className="text-[15px] text-gray-900">{layer.text}</span>
-                  <span className="text-xs text-gray-600">{layer.meaning}</span>
-                  {inner}
-                </div>
-              ), null)}
-            </section>
-          )}
+          {section('layers', t('breakdown.layers'), layers && layers.layers.reduceRight<ReactNode>((inner, layer, i) => (
+            <div className={`border-2 ${LAYER_BORDERS[i % LAYER_BORDERS.length]} rounded-xl p-3 flex flex-col gap-1.5 bg-white`}>
+              <span className="text-[15px] text-gray-900">{layer.text}</span>
+              <span className="text-xs text-gray-600">{layer.meaning}</span>
+              {inner}
+            </div>
+          ), null), 4)}
 
-          {/* Word order */}
-          {r.order.target.length > 0 && r.order.native.length > 0 && (
-            <section className="flex flex-col gap-2">
-              <h2 className="text-[15px] font-bold text-gray-900">{t('breakdown.order')}</h2>
+          {section('order', t('breakdown.order'), order && (
+            <>
               <p className="text-xs text-gray-500">{t('breakdown.orderTarget')}</p>
               <div className="flex flex-wrap gap-1.5">
-                {r.order.target.map((p, i) => (
+                {order.target.map((p, i) => (
                   <span key={i} className={`text-[13px] px-2.5 py-1.5 rounded-lg ${ROLE_STYLE[p.role].chip}`}>{p.text}</span>
                 ))}
               </div>
               <p className="text-xs text-gray-500 mt-1">{t('breakdown.orderNative')}</p>
               <div className="flex flex-wrap gap-1.5">
-                {r.order.native.map((p, i) => (
+                {order.native.map((p, i) => (
                   <span key={i} className={`text-[13px] px-2.5 py-1.5 rounded-lg ${ROLE_STYLE[p.role].chip}`}>{p.text}</span>
                 ))}
               </div>
-              {r.order.note && <p className="text-[13px] text-gray-600 leading-relaxed mt-1">{r.order.note}</p>}
-            </section>
-          )}
+              {order.note && <p className="text-[13px] text-gray-600 leading-relaxed mt-1">{order.note}</p>}
+            </>
+          ), 3)}
 
-          {/* Chunks */}
-          <section className="flex flex-col gap-2">
-            <h2 className="text-[15px] font-bold text-gray-900">{t('breakdown.chunks')}</h2>
-            {r.chunks.map((c, i) => (
-              <div key={i} className="bg-white border border-gray-100 shadow-sm rounded-2xl px-4 py-3 flex flex-col gap-1">
-                <div className="flex justify-between items-start gap-2">
-                  <span className={`text-[16px] ${c.implied ? 'text-gray-500' : ROLE_STYLE[c.role].text}`}>{c.text}</span>
-                  {c.label && (
-                    <span className={`shrink-0 text-[11px] font-semibold px-2 py-0.5 rounded-full ${ROLE_STYLE[c.role].chip}`}>{c.label}</span>
-                  )}
+          {section('chunks', t('breakdown.chunks'), chunks && chunks.chunks.map((c, i) => (
+            <div key={i} className="bg-white border border-gray-100 shadow-sm rounded-2xl px-4 py-3 flex flex-col gap-1">
+              <div className="flex justify-between items-start gap-2">
+                <span className={`text-[16px] ${c.implied ? 'text-gray-500' : ROLE_STYLE[c.role].text}`}>{c.text}</span>
+                {c.label && (
+                  <span className={`shrink-0 text-[11px] font-semibold px-2 py-0.5 rounded-full ${ROLE_STYLE[c.role].chip}`}>{c.label}</span>
+                )}
+              </div>
+              {c.meaning && <span className="text-sm text-gray-600">{c.meaning}</span>}
+            </div>
+          )), 4)}
+
+          {section('notes', t('breakdown.notes'), notes && (
+            <div className="grid grid-cols-[minmax(0,7rem)_minmax(0,1fr)] gap-x-3 gap-y-2.5 text-sm leading-relaxed">
+              {notes.notes.map((n, i) => (
+                <div key={i} className="contents">
+                  <span className="text-[15px] font-semibold text-gray-900 break-words">{n.text}</span>
+                  <span className="text-gray-700">{n.note}</span>
                 </div>
-                {c.meaning && <span className="text-sm text-gray-600">{c.meaning}</span>}
-              </div>
-            ))}
-          </section>
+              ))}
+            </div>
+          ), 4)}
 
-          {/* Particles and endings */}
-          {r.notes.length > 0 && (
-            <section className="flex flex-col gap-2">
-              <h2 className="text-[15px] font-bold text-gray-900">{t('breakdown.notes')}</h2>
-              <div className="grid grid-cols-[minmax(0,7rem)_minmax(0,1fr)] gap-x-3 gap-y-2.5 text-sm leading-relaxed">
-                {r.notes.map((n, i) => (
-                  <div key={i} className="contents">
-                    <span className="text-[15px] font-semibold text-gray-900 break-words">{n.text}</span>
-                    <span className="text-gray-700">{n.note}</span>
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
+          {section('gloss', t('breakdown.gloss'), gloss && (
+            <div className="flex flex-wrap gap-1.5">
+              {gloss.gloss.map((g, i) => (
+                <div key={i} className="flex flex-col items-center bg-white border border-gray-100 rounded-lg px-2 py-1.5">
+                  {g.reading && g.reading !== g.text && <span className="text-[10px] text-gray-500">{g.reading}</span>}
+                  <span className="text-[15px] text-gray-900">{g.text}</span>
+                  <span className="text-[11px] text-gray-600">{g.meaning}</span>
+                </div>
+              ))}
+            </div>
+          ), 2)}
 
-          {/* Word for word */}
-          {r.gloss.length > 0 && (
-            <section className="flex flex-col gap-2">
-              <h2 className="text-[15px] font-bold text-gray-900">{t('breakdown.gloss')}</h2>
-              <div className="flex flex-wrap gap-1.5">
-                {r.gloss.map((g, i) => (
-                  <div key={i} className="flex flex-col items-center bg-white border border-gray-100 rounded-lg px-2 py-1.5">
-                    {g.reading && g.reading !== g.text && <span className="text-[10px] text-gray-500">{g.reading}</span>}
-                    <span className="text-[15px] text-gray-900">{g.text}</span>
-                    <span className="text-[11px] text-gray-600">{g.meaning}</span>
-                  </div>
-                ))}
-              </div>
-            </section>
-          )}
-
-          {/* Check yourself */}
-          {r.check && (
-            <section className="bg-white border border-gray-100 shadow-sm rounded-2xl px-4 py-4 flex flex-col gap-3">
+          {section('check', null, check && (
+            <div className="bg-white border border-gray-100 shadow-sm rounded-2xl px-4 py-4 flex flex-col gap-3">
               <p className="text-[11px] font-bold text-blue-700 uppercase tracking-wide">{t('breakdown.check')}</p>
-              <p className="text-[17px] font-bold text-gray-900 leading-snug">{r.check.question}</p>
+              <p className="text-[17px] font-bold text-gray-900 leading-snug">{check.question}</p>
               <div className="flex flex-col gap-2">
-                {r.check.options.map((o, i) => {
+                {check.options.map((o, i) => {
                   const isAnswer = checkResult?.answer === i
                   const isWrongPick = checkResult && chosen === i && !checkResult.correct
                   return (
@@ -341,16 +379,14 @@ export default function Breakdown() {
                   {checkResult.explanation}
                 </div>
               )}
-              {!checkResult && r.checked !== null && (
-                <p className="text-xs text-gray-500">{r.checked ? t('breakdown.checkedRight') : t('breakdown.checkedWrong')}</p>
+              {!checkResult && result.checked !== null && (
+                <p className="text-xs text-gray-500">{result.checked ? t('breakdown.checkedRight') : t('breakdown.checkedWrong')}</p>
               )}
-            </section>
-          )}
-
-          {error && <div className="bg-red-50 border border-red-200 rounded-xl px-4 py-3 text-sm text-red-700">{error}</div>}
+            </div>
+          ), 3)}
 
           <div className="flex flex-col gap-2">
-            {r.translation && (
+            {core?.translation && (
               <button
                 onClick={() => setShowTranslation((v) => !v)}
                 className="w-full py-3 rounded-xl border border-gray-200 bg-white text-gray-700 font-semibold text-[15px] active:bg-gray-50"
@@ -358,7 +394,9 @@ export default function Breakdown() {
                 {showTranslation ? t('breakdown.hideTranslation') : t('breakdown.showTranslation')}
               </button>
             )}
-            {showTranslation && <p className="text-[15px] text-gray-800 bg-white rounded-xl border border-gray-100 px-4 py-3 leading-relaxed">{r.translation}</p>}
+            {showTranslation && core && (
+              <p className="text-[15px] text-gray-800 bg-white rounded-xl border border-gray-100 px-4 py-3 leading-relaxed">{core.translation}</p>
+            )}
             <button
               onClick={() => { setText(''); backToInput() }}
               className="w-full py-3 rounded-xl text-blue-600 font-semibold text-[15px] active:text-blue-700"
