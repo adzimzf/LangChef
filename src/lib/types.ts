@@ -208,3 +208,47 @@ export function parseDetailJson(detail: string): {
     return null
   }
 }
+/** Chunk roles of a sentence breakdown (see src-tauri/src/breakdown.rs) */
+export type BreakdownRole =
+  | 'topic' | 'subject' | 'object' | 'modifier' | 'purpose' | 'reason' | 'condition'
+  | 'time' | 'place' | 'connector' | 'predicate' | 'other'
+
+export type BreakdownChunk = { text: string; role: BreakdownRole; label: string; meaning: string; implied: boolean }
+
+export type BreakdownSection = 'chunks' | 'core' | 'layers' | 'order' | 'notes' | 'gloss' | 'check'
+
+/** Each section comes from its own request and arrives on its own */
+export type BreakdownParts = {
+  chunks: { chunks: BreakdownChunk[]; chunks_match: boolean }
+  core: { translation: string; core: string; core_note: string; tip: string; structures: string[] }
+  /** Nesting from the main clause inwards */
+  layers: { layers: { text: string; meaning: string }[] }
+  order: {
+    target: { text: string; role: BreakdownRole }[]
+    native: { text: string; role: BreakdownRole }[]
+    note: string
+  }
+  notes: { notes: { text: string; note: string }[] }
+  gloss: { gloss: { text: string; reading: string; meaning: string }[] }
+  check: { question: string; options: string[] }
+}
+
+export type SentenceBreakdown = {
+  id: number
+  sentence: string
+  language: string
+  parts: Partial<BreakdownParts>
+  /** Sections not generated yet */
+  missing: BreakdownSection[]
+  checked: boolean | null
+}
+
+export type BreakdownSummary = {
+  id: number
+  sentence: string
+  structures: string[]
+  checked: boolean | null
+  created_at: string
+}
+
+export type BreakdownCheckResult = { correct: boolean; answer: number; explanation: string }

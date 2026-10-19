@@ -12,6 +12,8 @@ pub fn db_file(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 pub fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let path = db_file(app)?;
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    // Breakdown sections are written by parallel requests; wait for a lock instead of failing.
+    conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS messages(
@@ -153,6 +155,21 @@ pub fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
             phase TEXT NOT NULL DEFAULT 'reading',
             current_q INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (date('now'))
+        );
+        CREATE TABLE IF NOT EXISTS breakdowns(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            language TEXT NOT NULL,
+            explain_lang TEXT NOT NULL,
+            sentence TEXT NOT NULL,
+            checked INTEGER,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (language, explain_lang, sentence)
+        );
+        CREATE TABLE IF NOT EXISTS breakdown_parts(
+            breakdown_id INTEGER NOT NULL,
+            section TEXT NOT NULL,
+            data TEXT NOT NULL,
+            PRIMARY KEY (breakdown_id, section)
         );
         "
     ).map_err(|e| e.to_string())?;

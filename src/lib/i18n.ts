@@ -147,6 +147,15 @@ export function formatDate(value: Date | number | string, options?: Intl.DateTim
   return new Intl.DateTimeFormat(locale, options ?? { day: 'numeric', month: 'short', year: 'numeric' }).format(d)
 }
 
+/** "Today", "Yesterday", else the date. */
+export function formatDay(value: Date | number | string): string {
+  const d = value instanceof Date ? value : new Date(value)
+  const diffDays = Math.floor((Date.now() - d.getTime()) / 86400000)
+  if (diffDays <= 0) return t('time.today')
+  if (diffDays === 1) return t('time.yesterday')
+  return formatDate(d)
+}
+
 export function formatNumber(n: number, options?: Intl.NumberFormatOptions): string {
   return new Intl.NumberFormat(locale, options).format(n)
 }

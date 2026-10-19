@@ -16,7 +16,7 @@ import type {
   ReadingSessionSummary,
   ReviewItem,
 } from '../lib/types'
-import { t, lang as explainLang, errorText, formatDate, languageName } from '../lib/i18n'
+import { t, lang as explainLang, errorText, formatDay, languageName } from '../lib/i18n'
 import { TARGET_LANGUAGES } from '../lib/languages'
 import { readFlag, writeFlag, READING_ANSWER_NATIVE_KEY } from '../lib/prefs'
 
@@ -39,14 +39,6 @@ const LANG_FLAGS: Record<string, string> = { ja: '🇯🇵', id: '🇮🇩' }
 
 function defaultFurigana(level: string): boolean {
   return ['N5', 'N4', 'N3'].includes(level)
-}
-
-function relativeDate(dateStr: string): string {
-  const date = new Date(dateStr)
-  const diffDays = Math.floor((Date.now() - date.getTime()) / 86400000)
-  if (diffDays <= 0) return t('time.today')
-  if (diffDays === 1) return t('time.yesterday')
-  return formatDate(date)
 }
 
 /** Source badge: RSS feed name, or AI-written ("ai", or "AI Generated" in older sessions). */
@@ -348,7 +340,7 @@ export default function Reading() {
                     <span className="text-[11px] text-gray-300">·</span>
                     <span className="text-[11px] text-gray-400">{sourceLabel(s.source)}</span>
                     <span className="text-[11px] text-gray-300">·</span>
-                    <span className="text-[11px] text-gray-400">{relativeDate(s.created_at)}</span>
+                    <span className="text-[11px] text-gray-400">{formatDay(s.created_at)}</span>
                     {isInProgress && s.total_questions > 0 && (
                       <>
                         <span className="text-[11px] text-gray-300">·</span>
