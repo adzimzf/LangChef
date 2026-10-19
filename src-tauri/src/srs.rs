@@ -928,7 +928,9 @@ fn top_up_queue(
             CASE WHEN state IN ('learning','relearning') THEN 0
                  WHEN state = 'review' THEN 1
                  ELSE 2 END,
-            next_review ASC NULLS LAST"
+            next_review ASC NULLS LAST,
+            -- New cards: the most recently added come first.
+            created_at DESC"
     ).map_err(|e| e.to_string())?;
 
     let candidates: Vec<(String, String)> = stmt
@@ -982,7 +984,8 @@ fn fetch_next_pending(
                 WHEN r.state = 'review' THEN 1
                 WHEN r.state IN ('learning','relearning') THEN 2
                 ELSE 3
-            END
+            END,
+            r.created_at DESC
          LIMIT 1", review_cols("r.")),
         params![study_id, now],
         row_to_review_item,
