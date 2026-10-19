@@ -8,6 +8,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 LangChef — conversational language learning app (Japanese + Indonesian). LLM-driven chat with FSRS spaced repetition. Built with Tauri v2 (Rust backend + React frontend), targeting desktop and Android.
 
+The app runs in English or Bahasa Indonesia ("explanation language", see below), so someone who reads only Indonesian can learn Japanese. Spec: `PRDs/Indonesian Speakers Learning Japanese.md`.
+
 ## Commands
 
 ```bash
@@ -18,6 +20,7 @@ npm run tauri:build      # Tauri production build
 npm run tauri:android:dev  # Android dev via Tauri
 npm run tauri:android:build # Android release build
 npx tsc --noEmit         # Type check only
+npm run i18n:check       # en.json / id.json in sync, no hardcoded UI text
 ```
 
 No test framework configured.
@@ -29,6 +32,10 @@ No test framework configured.
 **Frontend-Backend IPC:** All data flows through `invoke()` from `@tauri-apps/api/core`. Rust commands registered in `src-tauri/src/lib.rs`. Every persistent read/write is a Tauri command call — no global state, no context providers, no state management library.
 
 **State:** Component-local `useState` + `localStorage` for API credentials and preferences. Each page independently loads data from SQLite via Tauri commands on mount.
+
+**Explanation language (i18n):** `explain_lang` ∈ `en` | `id` is the language of the UI, of every AI explanation and of card meanings — one app-wide switch. Frontend: `src/lib/i18n.ts` exports `t(key, params)` (plain module, no context); dictionaries are `src/locales/en.json` (source of truth) and `id.json`; `{name}` placeholders, `key_one`/`key_other` plurals; `Intl` for dates/numbers. The value lives in `localStorage.explain_lang`, is mirrored into the `app_settings` table on startup (`db_set_explain_lang`), and changing it reloads the app. Backend: `src-tauri/src/locale.rs` (`explain_lang(conn)`, `explain_instruction()` appended to learner-facing prompts, `app_error(code, detail)`). Rust returns codes, React renders words: errors are `{"code","detail"}` JSON rendered with `errorText()`, grade reasons are `{code, ms}`, part of speech is a code (`pos.*`). Every user-visible string goes through `t()`.
+
+**Meaning language:** `review_items.meaning_lang` records the language of `detail`. A meaning in another language than `explain_lang` counts as empty (`effective_detail_sql` / `review_cols` in SQL), so after switching language the card shows as `needs_meaning` and the user regenerates it. Quiz options only come from cards whose meaning is in the current language.
 
 **SRS:** FSRS 5.2.0 (`fsrs` crate) in Rust (`src-tauri/src/srs.rs`, `schedule_fsrs` fn). Old SM-2 columns (EF, I, R) kept in DB for backward compat; SM-2 helpers (`compute_ef`, `format_next_review_minutes`) still used for display. Desired retention: 90%.
 
@@ -42,7 +49,13 @@ No test framework configured.
 
 ## Rust Modules (`src-tauri/src/`)
 
-- `lib.rs` — all Tauri commands (~3500 lines), DB schema/migrations, SRS logic, grammar seeding
+- `lib.rs` — module list and `generate_handler!` registration of all Tauri commands
+- `db.rs` — `open_db()`: schema, migrations, bundled grammar seeding (per explanation language)
+- `locale.rs` — explanation language setting, prompt language rule, error codes, `effective_detail_sql`
+- `chat.rs` — `complete()`: the one LLM request helper (all prompts go through it; maps HTTP failures to error codes), `llm_chat`, `llm_translate` (cached in `translations`), `llm_help_reply`
+- `words.rs` — deck commands, `generate_detail_text` (card back in the explanation language), mnemonics
+- `grammar.rs` — grammar CRUD, per-language rows with English fallback, AI translation of grammar rows, analysis
+- `romaji.rs` — kana↔romaji, `to_romaji`, `romaji_to_kana_input`, kana starter deck
 - `srs.rs` — FSRS scheduling, daily study queue (`study`, `study_card`), session commands
 - `quiz.rs` — auto-graded review: question building, answer checking, grading, summary
 - `furigana.rs` — Lindera-based Japanese tokenization; `annotate()` produces `{kanji|reading}` format, `tokenize()` returns (surface, base_form) pairs
@@ -51,7 +64,7 @@ No test framework configured.
 
 ## Key Data Flows
 
-**Chat:** User message → `send()` builds system prompt (injects difficult words, known words, JLPT constraints, grammar patterns) → `invoke('llm_chat')` proxies OpenAI-compatible request through Rust → response rendered with furigana/grammar/word-tap highlighting → tapping word calls `invoke('db_upsert_review_item')`.
+**Chat:** User message → `send()` builds system prompt (injects difficult words, known words, JLPT constraints, grammar patterns, optional 💡 hint line in the explanation language) → `invoke('llm_chat')` proxies OpenAI-compatible request through Rust → response rendered with furigana/grammar/word-tap highlighting, optional romaji, and a cached "Translate" (`llm_translate`) → tapping a word opens `WordSheet` (meaning in the explanation language, "Add to cards" → `db_upsert_review_item`). "Help me reply" (`HelpReplySheet` → `llm_help_reply`) turns what the learner writes in their language into a target-language reply.
 
 **Review:** `invoke('db_session_start')` → returns `next_card` + `next_task` (the question) → user answers → `invoke('db_session_answer')` checks it in Rust, grades, records the answer and returns the verdict plus the next card. `db_session_override` handles the mis-tap fix, `db_session_summary` feeds the end-of-session screen, `db_session_save_meaning` / `db_session_skip_card` / `db_generate_missing_meanings` handle cards without a meaning, and `db_session_grade` is the self-graded path for `classic` cards. UI in `src/components/ReviewQuiz.tsx`.
 
@@ -83,7 +96,9 @@ All wrapped in `Layout` (bottom tab nav). Chat page hides bottom nav.
 | `/words` | WordsList | Browsable word deck |
 | `/grammar` | Grammar | Grammar pattern CRUD + CSV import |
 | `/stats` | UserStats | Stats dashboard (charts: activity, mastery, proficiency) |
-| `/settings` | Settings | API provider config, review limits |
+| `/settings` | Settings | Your language, learning aids, API provider (OpenRouter preset), review limits |
+
+First run (no API key, `onboarding_done` unset) shows `Onboarding` instead of the routes: language → target & level → connect AI.
 
 `/telemetry` redirects to `/stats`.
 
@@ -106,12 +121,17 @@ DB path: `~/.app-data/langchef/langchef.db`. Schema created in `open_db()` in `s
 | `study`, `study_card` | daily queue per language; `study_card.task` holds the open question |
 | `review_answers` | review_item_id, task, correct, elapsed_ms, hint_used, chosen, grade, mature, prev_state, overridden |
 | `review_confusions` | review_item_id, confused_with_id, count |
+| `app_settings` | key, value (`explain_lang`) |
+| `translations` | kind (`message` / `reading`), ref_id, lang, text |
 | `telemetry_days` | legacy, migrated to user_activity |
+
+`review_items.meaning_lang`, `grammar_items.explain_lang` / `ai_translated`, and `lang` on `message_grammar_analysis` / `user_message_feedback` (cached AI output is reused only in the same language).
 
 ## Important Notes
 
-- API config stored in `localStorage` keys: `api_host`, `api_key`, `api_model`
-- Grammar data in `grammar/` dir — `ja/` has N5–N1, `id/` has A1–A2. MD for display, CSV for import.
+- API config stored in `localStorage` keys: `api_host`, `api_key`, `api_model`; provider presets (OpenRouter default) in `src/lib/providers.ts`
+- Learning aids in `localStorage` (`src/lib/prefs.ts`): `chat_hints`, `romaji_enabled`, `romaji_input`, `reading_answer_native`
+- Grammar data in `grammar/` dir — `ja/` has N5–N1, `id/` has A1–A2, `ja/id/` has Indonesian explanations for N5–N4 (AI-translated, shown with a "Diterjemahkan oleh AI" badge). MD for display, CSV for import.
 - `src/lib/intl-segmenter.d.ts` provides TS declarations for `Intl.Segmenter`
 - PRD is in `PRD.md`; feature specs in `PRDs/`, technical specs in `TRDs/`
 - Android release signing: keystore and credentials are never committed. Copy `keystore.properties.example` to `keystore.properties` (gitignored) or set `LANGCHEF_KEYSTORE_FILE` / `LANGCHEF_KEYSTORE_PASSWORD` / `LANGCHEF_KEY_ALIAS` / `LANGCHEF_KEY_PASSWORD`. Without them the release APK is built unsigned.

@@ -69,6 +69,7 @@ export type QuizAnswer = {
 export type GradePreview = {
   grade: string
   label: string
+  next_minutes: number
   next_review_formatted: string
   lapsed: boolean
   graduated: boolean
@@ -92,13 +93,19 @@ export type AnswerVerdict = {
   correct: boolean
   dont_know: boolean
   correct_answer: string
+  /** Recall → confirm where "None of these" was right */
+  none_correct: boolean
   chosen: string | null
-  reasons: string[]
+  reasons: GradeReason[]
   next_review_formatted: string
+  next_minutes: number
   can_override: boolean
   overridden: boolean
   confused_with: { word: string; reading: string; meaning: string } | null
 }
+
+/** Why a card got its grade (code from quiz.rs `compute_grade`, translated by the frontend) */
+export type GradeReason = { code: string; ms?: number }
 
 export type AnswerResult = SessionProgress & {
   verdict: AnswerVerdict
@@ -174,6 +181,20 @@ export type ReadingSession = {
   phase: string
   current_q: number
   created_at: string
+}
+
+export type GrammarItem = {
+  id: string
+  pattern: string
+  detail: string
+  language: string
+  level: string
+  is_default: number
+  /** Language the explanation is written in */
+  explain_lang: string
+  ai_translated: boolean
+  /** English row shown because the level has nothing in the learner's language yet */
+  fallback: boolean
 }
 
 export function parseDetailJson(detail: string): {

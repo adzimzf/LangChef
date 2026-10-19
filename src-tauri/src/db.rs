@@ -129,6 +129,17 @@ pub fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
             last_at INTEGER NOT NULL,
             PRIMARY KEY (review_item_id, confused_with_id)
         );
+        CREATE TABLE IF NOT EXISTS app_settings(
+            key TEXT PRIMARY KEY,
+            value TEXT NOT NULL
+        );
+        CREATE TABLE IF NOT EXISTS translations(
+            kind TEXT NOT NULL,
+            ref_id INTEGER NOT NULL,
+            lang TEXT NOT NULL,
+            text TEXT NOT NULL,
+            PRIMARY KEY (kind, ref_id, lang)
+        );
         CREATE TABLE IF NOT EXISTS reading_sessions(
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             language TEXT NOT NULL,
@@ -173,6 +184,14 @@ pub fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
          WHERE mastered_at IS NULL AND state = 'review'",
         [],
     );
+    // Language of the meaning in `detail`; a meaning in another language than the learner's counts as empty.
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN meaning_lang TEXT NOT NULL DEFAULT 'en'", []);
+    // Language grammar explanations are written in, and whether an AI translated them.
+    let _ = conn.execute("ALTER TABLE grammar_items ADD COLUMN explain_lang TEXT NOT NULL DEFAULT 'en'", []);
+    let _ = conn.execute("ALTER TABLE grammar_items ADD COLUMN ai_translated INTEGER NOT NULL DEFAULT 0", []);
+    // Cached AI output is only reused while the learner reads the same language.
+    let _ = conn.execute("ALTER TABLE message_grammar_analysis ADD COLUMN lang TEXT NOT NULL DEFAULT 'en'", []);
+    let _ = conn.execute("ALTER TABLE user_message_feedback ADD COLUMN lang TEXT NOT NULL DEFAULT 'en'", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN parent_message_id INTEGER", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN is_active_path INTEGER DEFAULT 1", []);
     let _ = conn.execute("UPDATE review_items SET state = 'review' WHERE state IS NULL OR state = ''", []);
@@ -309,14 +328,17 @@ fn migrate_sm2_to_fsrs(conn: &Connection) {
     eprintln!("[fsrs] Migration complete: {} succeeded, {} failed", success, failures);
 }
 
-static BUNDLED_GRAMMAR: &[(&str, &str, &str)] = &[
-    ("ja", "N5", include_str!("../../grammar/ja/N5.md")),
-    ("ja", "N4", include_str!("../../grammar/ja/N4.md")),
-    ("ja", "N3", include_str!("../../grammar/ja/N3.md")),
-    ("ja", "N2", include_str!("../../grammar/ja/N2.md")),
-    ("ja", "N1", include_str!("../../grammar/ja/N1.md")),
-    ("id", "A1", include_str!("../../grammar/id/A1.md")),
-    ("id", "A2", include_str!("../../grammar/id/A2.md")),
+/// (language, level, explanation language, content). Indonesian explanations are AI-translated.
+static BUNDLED_GRAMMAR: &[(&str, &str, &str, &str)] = &[
+    ("ja", "N5", "en", include_str!("../../grammar/ja/N5.md")),
+    ("ja", "N4", "en", include_str!("../../grammar/ja/N4.md")),
+    ("ja", "N3", "en", include_str!("../../grammar/ja/N3.md")),
+    ("ja", "N2", "en", include_str!("../../grammar/ja/N2.md")),
+    ("ja", "N1", "en", include_str!("../../grammar/ja/N1.md")),
+    ("ja", "N5", "id", include_str!("../../grammar/ja/id/N5.md")),
+    ("ja", "N4", "id", include_str!("../../grammar/ja/id/N4.md")),
+    ("id", "A1", "en", include_str!("../../grammar/id/A1.md")),
+    ("id", "A2", "en", include_str!("../../grammar/id/A2.md")),
 ];
 
 fn parse_grammar_md(content: &str) -> Vec<(String, String)> {
@@ -357,10 +379,10 @@ fn parse_grammar_md(content: &str) -> Vec<(String, String)> {
 }
 
 fn seed_bundled_grammar_if_empty(conn: &Connection) {
-    for &(lang, level, csv) in BUNDLED_GRAMMAR {
+    for &(lang, level, explain, csv) in BUNDLED_GRAMMAR {
         let count: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM grammar_items WHERE language=?1 AND level=?2",
-            params![lang, level],
+            "SELECT COUNT(*) FROM grammar_items WHERE language=?1 AND level=?2 AND explain_lang=?3",
+            params![lang, level, explain],
             |row| row.get(0),
         ).unwrap_or(0);
 
@@ -369,16 +391,37 @@ fn seed_bundled_grammar_if_empty(conn: &Connection) {
         }
 
         let items = parse_grammar_md(csv);
-        eprintln!("[seed] grammar/{}/{level}: parsed {} items", lang, items.len());
+        eprintln!("[seed] grammar/{}/{level} ({explain}): parsed {} items", lang, items.len());
+        let ai_translated = explain != "en";
         for (pattern, detail) in items {
             let id = uuid::Uuid::new_v4().to_string();
             match conn.execute(
-                "INSERT INTO grammar_items(id, pattern, detail, language, level, is_default) VALUES (?1, ?2, ?3, ?4, ?5, 1)",
-                params![id, pattern, detail, lang, level],
+                "INSERT INTO grammar_items(id, pattern, detail, language, level, is_default, explain_lang, ai_translated)
+                 VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",
+                params![id, pattern, detail, lang, level, explain, ai_translated],
             ) {
                 Ok(_) => {}
                 Err(e) => eprintln!("[seed] FAILED to insert '{}': {}", pattern, e),
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundled_indonesian_grammar_matches_english() {
+        for &(lang, level, explain, content) in BUNDLED_GRAMMAR.iter().filter(|g| g.2 == "id") {
+            let english = BUNDLED_GRAMMAR
+                .iter()
+                .find(|g| g.0 == lang && g.1 == level && g.2 == "en")
+                .map(|g| parse_grammar_md(g.3))
+                .unwrap_or_default();
+            let translated = parse_grammar_md(content);
+            assert_eq!(translated.len(), english.len(), "{lang}/{level} ({explain})");
+            assert!(translated.iter().all(|(p, d)| !p.is_empty() && !d.is_empty()));
         }
     }
 }

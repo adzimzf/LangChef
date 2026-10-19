@@ -1,8 +1,8 @@
-use crate::chat::{build_url, ChatMessage, ChatRequest, ChatResponse};
+use crate::chat::{complete_explained, json_part};
 use crate::db::open_db;
+use crate::locale::{app_error, effective_detail_sql, explain_lang, lang_name};
 use crate::quiz::{parse_detail, CardDetail};
-use crate::srs::{row_to_review_item, ReviewItem};
-use reqwest::Client;
+use crate::srs::{review_cols, row_to_review_item, ReviewItem};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +17,8 @@ pub struct ImportItem {
     pub content: String,
     pub language: Option<String>,
     pub detail: Option<String>,
+    /// Language of `detail`; defaults to the learner's explanation language.
+    pub meaning_lang: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,9 +59,10 @@ fn find_mnemonic_matches(
 
     let mut all_words: Vec<KnownWord> = Vec::new();
 
-    let mut stmt = conn.prepare(
-        "SELECT content, EF, R, detail, fsrs_difficulty FROM review_items WHERE language=?1"
-    ).map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(&format!(
+        "SELECT content, EF, R, {}, fsrs_difficulty FROM review_items WHERE language=?1",
+        effective_detail_sql("")
+    )).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![language], |row| {
         let content: String = row.get(0)?;
         let ef: f64 = row.get(1)?;
@@ -211,23 +214,21 @@ pub async fn db_generate_mnemonic(
         &app, &language, &content, &target_reading
     )?;
 
-    let lang_name = match language.as_str() {
-        "ja" => "Japanese",
-        "id" => "Indonesian",
-        _ => &language,
-    };
+    let explain = explain_lang(&open_db(&app)?);
+    let lang_name = lang_name(&language);
+    let explain_name = lang_name_of(&explain);
 
     let prompt = if matched.is_empty() {
         format!(
             "Create a mnemonic to help remember the {} word: \"{}\"\n\n\
             No known words share sounds or kanji with this word.\n\
-            Use a sound-alike from English or another familiar word that sounds like the reading.\n\n\
+            Use a sound-alike from {explain_name} or another familiar word that sounds like the reading.\n\n\
             Example: 公式 (こうしき, formula) — sounds like \"COZY-sheeki\" — imagine a COZY formula you can solve in bed.\n\n\
             RULES:\n\
-            - Base the mnemonic on how the reading SOUNDS — find an English word or phrase that sounds similar\n\
+            - Base the mnemonic on how the reading SOUNDS — find a {explain_name} word or phrase that sounds similar\n\
             - Always show the target word's reading in the mnemonic\n\
             - Keep it to 1-2 short sentences — natural and easy to recall\n\
-            - Write in English\n\
+            - Write in {explain_name}\n\
             - Return ONLY the mnemonic text. No JSON, no labels, no quotes, no explanation.",
             lang_name, target_info
         )
@@ -251,33 +252,14 @@ pub async fn db_generate_mnemonic(
             - You MUST use one of the matched words listed above — explain the shared kanji or reading\n\
             - Always show both the target's reading and the matched word's reading in the mnemonic\n\
             - Keep it to 1-2 short sentences — natural and easy to recall\n\
-            - Write in English\n\
+            - Write in {explain_name}\n\
             - Return ONLY the mnemonic text. No JSON, no labels, no quotes, no explanation.",
             lang_name, target_info,
             matches_str.join("\n")
         )
     };
 
-    let url = build_url(&api_host, "chat/completions");
-    let client = Client::new();
-    let req = ChatRequest {
-        model: &model,
-        messages: &vec![ChatMessage { role: "user".to_string(), content: prompt }],
-    };
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&req)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {}", e))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("API error: {} — {}", status, body.trim()));
-    }
-    let parsed: ChatResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
-    let mnemonic = parsed.choices.get(0).map(|c| c.message.content.clone()).unwrap_or_default();
+    let mnemonic = complete_explained(&api_host, &api_key, &model, &prompt, &explain, |t| t.to_string()).await?;
 
     let conn = open_db(&app)?;
     conn.execute("UPDATE review_items SET mnemonic=?1 WHERE id=?2", params![mnemonic, id])
@@ -297,15 +279,18 @@ pub fn db_update_mnemonic(app: tauri::AppHandle, id: String, mnemonic: String) -
 #[tauri::command]
 pub fn db_update_review_detail(app: tauri::AppHandle, id: String, detail: String) -> Result<(), String> {
     let conn = open_db(&app)?;
-    conn.execute("UPDATE review_items SET detail=?1 WHERE id=?2", params![detail, id])
-        .map_err(|e| e.to_string())?;
+    conn.execute(
+        "UPDATE review_items SET detail=?1, meaning_lang=?2 WHERE id=?3",
+        params![detail, explain_lang(&conn), id],
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
 #[tauri::command]
 pub fn db_get_review_items_by_language(app: tauri::AppHandle, language: String) -> Result<Vec<ReviewItem>, String> {
     let conn = open_db(&app)?;
-    let mut stmt = conn.prepare("SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE language=?1").map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(&format!("SELECT {} FROM review_items WHERE language=?1", review_cols(""))).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![language], row_to_review_item).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
     for r in rows {
@@ -373,8 +358,8 @@ pub fn db_search_review_items(
         .map_err(|e| e.to_string())?;
 
     let data_sql = format!(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items{}{} LIMIT ?{} OFFSET ?{}",
-        where_clause, order_clause,
+        "SELECT {} FROM review_items{}{} LIMIT ?{} OFFSET ?{}",
+        review_cols(""), where_clause, order_clause,
         filter_params.len() + 1, filter_params.len() + 2,
     );
 
@@ -451,10 +436,11 @@ pub fn db_get_due_review_items(
     };
     let limit_val = limit.unwrap_or(200);
 
-    let mut sql = String::from(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
+    let mut sql = format!(
+        "SELECT {}
          FROM review_items
-         WHERE (next_review IS NULL OR next_review <= ?1)"
+         WHERE (next_review IS NULL OR next_review <= ?1)",
+        review_cols("")
     );
 
     if language.is_some() {
@@ -520,7 +506,7 @@ pub fn db_get_difficult_and_known_words(
 ) -> Result<WordClassification, String> {
     let conn = open_db(&app)?;
 
-    let cols = "id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty";
+    let cols = review_cols("");
 
     let (difficult_sql, known_sql) = if language.is_some() {
         (
@@ -604,7 +590,7 @@ pub fn db_update_review_item(app: tauri::AppHandle, item: UpdateReviewItem) -> R
             |row| row.get(0),
         ).ok();
         if existing_id.is_some() {
-            return Err(format!("A word with content \"{}\" already exists.", content));
+            return Err(app_error("word_exists", content));
         }
         conn.execute("UPDATE review_items SET content=?1 WHERE id=?2", params![content, item.id])
             .map_err(|e| e.to_string())?;
@@ -619,55 +605,60 @@ pub fn db_update_review_item(app: tauri::AppHandle, item: UpdateReviewItem) -> R
 #[tauri::command]
 pub fn db_import_review_items(app: tauri::AppHandle, items: Vec<ImportItem>) -> Result<String, String> {
     let conn = open_db(&app)?;
+    let explain = explain_lang(&conn);
     let mut imported = 0u32;
     for item in items {
         let id = uuid::Uuid::new_v4().to_string();
+        let meaning_lang = item.meaning_lang.unwrap_or_else(|| explain.clone());
         let result = conn.execute(
-            "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, fsrs_stability, fsrs_difficulty, created_at)
-             VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, ?4, NULL, NULL, CAST(strftime('%s', 'now') * 1000 AS INTEGER))
+            "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, meaning_lang, fsrs_stability, fsrs_difficulty, created_at)
+             VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, ?4, ?5, NULL, NULL, CAST(strftime('%s', 'now') * 1000 AS INTEGER))
              ON CONFLICT(content) DO NOTHING",
-            params![id, item.content, item.language, item.detail],
+            params![id, item.content, item.language, item.detail, meaning_lang],
         );
         if let Ok(n) = result {
             if n > 0 { imported += 1; }
         }
     }
-    Ok(format!("Imported {} items", imported))
+    Ok(imported.to_string())
 }
 
-/// Asks the LLM for a card's back (reading, meaning, part of speech, example) as a JSON string.
-pub(crate) async fn generate_detail_text(api_host: &str, api_key: &str, model: &str, content: &str, language: &str) -> Result<String, String> {
-    let lang_name = match language {
-        "ja" => "Japanese",
-        "id" => "Indonesian",
-        _ => language,
+/// Part-of-speech codes the frontend translates; the LLM must pick one of these.
+pub const PART_OF_SPEECH_CODES: &[&str] = &[
+    "noun", "verb", "i_adjective", "na_adjective", "adjective", "adverb", "particle", "pronoun",
+    "counter", "conjunction", "interjection", "expression", "prefix", "suffix", "other",
+];
+
+fn lang_name_of(code: &str) -> String {
+    lang_name(code).to_string()
+}
+
+/// Asks the LLM for a card's back (reading, meaning, part of speech, example) as a JSON string,
+/// with the meaning and example translation in the learner's explanation language.
+pub(crate) async fn generate_detail_text(api_host: &str, api_key: &str, model: &str, content: &str, language: &str, explain: &str) -> Result<String, String> {
+    let lang_name = lang_name(language);
+    let explain_name = lang_name_of(explain);
+    let meaning_hint = match explain {
+        "id" => "short Indonesian meaning, the way an Indonesian dictionary glosses it (e.g. 食べる → makan, 駅 → stasiun)".to_string(),
+        _ => format!("short {} translation", explain_name),
     };
     let prompt = format!(
-        "You are a language learning assistant. For the {} word/phrase \"{}\", provide a detailed vocabulary card in this exact JSON format:\n\
-        {{\"reading\": \"hiragana reading for Japanese (e.g., たべる for 食べる, しょくどう for 食堂), or IPA/romaji for non-Japanese\", \"meaning\": \"English translation\", \"part_of_speech\": \"noun/verb/adj/etc\", \"example\": \"a natural example sentence in {}\", \"example_meaning\": \"English translation of the example\"}}\n\
+        "You are a language learning assistant. For the {lang_name} word/phrase \"{content}\", provide a vocabulary card in this exact JSON format:\n\
+        {{\"reading\": \"hiragana reading for Japanese (e.g., たべる for 食べる, しょくどう for 食堂), or IPA/romaji for non-Japanese\", \"meaning\": \"{meaning_hint}\", \"part_of_speech\": \"one of: {pos}\", \"example\": \"a natural example sentence in {lang_name}\", \"example_meaning\": \"{explain_name} translation of the example\"}}\n\
+        Translate directly from {lang_name} into {explain_name}, not via another language.\n\
         Return ONLY the JSON object, nothing else.",
-        lang_name, content, lang_name
+        pos = PART_OF_SPEECH_CODES.join(", "),
     );
-    let url = build_url(api_host, "chat/completions");
-    let client = Client::new();
-    let req = ChatRequest {
-        model,
-        messages: &vec![ChatMessage { role: "user".to_string(), content: prompt }],
+    let meaning_of = |raw: &str| {
+        serde_json::from_str::<serde_json::Value>(json_part(raw))
+            .ok()
+            .map(|v| {
+                let f = |k: &str| v.get(k).and_then(|x| x.as_str()).unwrap_or("").to_string();
+                format!("{} {}", f("meaning"), f("example_meaning"))
+            })
+            .unwrap_or_default()
     };
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&req)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {}", e))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("API error: {} — {}", status, body.trim()));
-    }
-    let parsed: ChatResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
-    Ok(parsed.choices.get(0).map(|c| c.message.content.clone()).unwrap_or_default())
+    complete_explained(api_host, api_key, model, &prompt, explain, meaning_of).await
 }
 
 /// Generates a card's back. With `draft`, it is kept aside for the user to approve in review
@@ -682,10 +673,17 @@ pub async fn db_generate_detail(
     language: String,
     draft: Option<bool>,
 ) -> Result<String, String> {
-    let text = generate_detail_text(&api_host, &api_key, &model, &content, &language).await?;
-    let column = if draft.unwrap_or(false) { "draft_detail" } else { "detail" };
+    let explain = explain_lang(&open_db(&app)?);
+    let text = generate_detail_text(&api_host, &api_key, &model, &content, &language, &explain).await?;
     let conn = open_db(&app)?;
-    conn.execute(&format!("UPDATE review_items SET {}=?1 WHERE content=?2", column), params![text, content])
-        .map_err(|e| e.to_string())?;
+    if draft.unwrap_or(false) {
+        conn.execute("UPDATE review_items SET draft_detail=?1 WHERE content=?2", params![text, content])
+    } else {
+        conn.execute(
+            "UPDATE review_items SET detail=?1, meaning_lang=?2 WHERE content=?3",
+            params![text, explain, content],
+        )
+    }
+    .map_err(|e| e.to_string())?;
     Ok(text)
 }

@@ -15,11 +15,8 @@ import type { AnswerResult, CardDetail, GradePreview, QuizAnswer, QuizTask, Revi
 import { parseDetailJson } from '../lib/types'
 import EditWordForm from '../components/EditWordForm'
 import { GRADE_COLORS, MeaningSetup, QuizVerdictView, ReviewQuiz, SessionSummaryView, useAutoAdvance } from '../components/ReviewQuiz'
-
-const LANGUAGES: Record<string, { label: string; flag: string }> = {
-  ja: { label: 'Japanese', flag: '\u{1F1EF}\u{1F1F5}' },
-  id: { label: 'Indonesian', flag: '\u{1F1EE}\u{1F1E9}' },
-}
+import { t, lang as explainLang, errorText, partOfSpeechLabel as posLabel, formatInMinutes, formatDate, formatNumber, languageName, type ExplainLang } from '../lib/i18n'
+import { TARGET_LANGUAGES, languageLabel } from '../lib/languages'
 
 const MAX_REVIEWS_DEFAULT = 100
 const MAX_REVIEWS_KEY = 'max_reviews_per_day'
@@ -62,8 +59,8 @@ function getApiConfig() {
 function toGradeOptions(previews: GradePreview[]): GradeOption[] {
   return previews.map(p => ({
     grade: p.grade as Grade,
-    label: p.label,
-    nextLabel: p.next_review_formatted,
+    label: t(`grade.${p.grade}`),
+    nextLabel: formatInMinutes(p.next_minutes),
     color: GRADE_COLORS[p.grade] || 'bg-gray-500',
   }))
 }
@@ -82,7 +79,8 @@ export default function Review() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [showImport, setShowImport] = useState(false)
   const [importText, setImportText] = useState('')
-  const [importLang, setImportLang] = useState('ja')
+  const [importLang, setImportLang] = useState(TARGET_LANGUAGES[0]?.code ?? 'ja')
+  const [importMeaningLang, setImportMeaningLang] = useState<ExplainLang>(explainLang)
   const [importing, setImporting] = useState(false)
   const [importResult, setImportResult] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
@@ -239,7 +237,7 @@ export default function Review() {
       })
       const parsed = parseDetailJson(text)
       if (!parsed?.meaning) {
-        setMeaningError("Couldn't read a meaning from the AI's answer. Try again, or write it yourself.")
+        setMeaningError(t('review.noMeaningInAnswer'))
       } else {
         setCurrentTask({
           ...currentTask,
@@ -253,7 +251,7 @@ export default function Review() {
         })
       }
     } catch (e) {
-      setMeaningError(`Generation failed: ${e}`)
+      setMeaningError(t('review.generationFailed', { error: errorText(e) }))
     }
     setMeaningBusy(null)
   }
@@ -274,10 +272,10 @@ export default function Review() {
       applyProgress(result)
       setMissingMeaning(prev => prev.filter(w => w !== word))
       setNotice(result.next_card?.content === word
-        ? `Saved. ${word} is the last card left, so here it is.`
-        : `Saved, not graded. ${word} moved to the end of today's queue.`)
+        ? t('review.savedLast', { word })
+        : t('review.savedMoved', { word }))
     } catch (e) {
-      setMeaningError(`${e}`)
+      setMeaningError(errorText(e))
     }
     setMeaningBusy(null)
   }
@@ -294,9 +292,9 @@ export default function Review() {
       })
       applyProgress(result)
       setMissingMeaning(prev => prev.filter(w => w !== word))
-      setNotice(`Skipped ${word} for today.`)
+      setNotice(t('review.skipped', { word }))
     } catch (e) {
-      setMeaningError(`${e}`)
+      setMeaningError(errorText(e))
     }
   }
 
@@ -312,11 +310,11 @@ export default function Review() {
         maxNewCards: getMaxNewCards(),
       })
       setNotice(result.failed.length
-        ? `Generated ${result.generated}. Couldn't generate: ${result.failed.join(', ')}.`
-        : `Generated ${result.generated}. Check each one when it comes up.`)
+        ? t('review.generatedSome', { count: result.generated, failed: result.failed.join(', ') })
+        : t('review.generatedAll', { count: result.generated }))
       await startSession(selectedLang)
     } catch (e) {
-      setNotice(`Generation failed: ${e}`)
+      setNotice(t('review.generationFailed', { error: errorText(e) }))
     }
     setGeneratingAll(false)
   }
@@ -341,7 +339,7 @@ export default function Review() {
         setSessionCompleted(prev => prev + 1)
       }
     } catch (e) {
-      alert(`Could not check the answer: ${e}`)
+      alert(t('review.checkFailed', { error: errorText(e) }))
     }
     setAnswering(false)
   }
@@ -361,7 +359,7 @@ export default function Review() {
       setNewCardsToday(result.new_cards_seen)
       setAnswerResult(result)
     } catch (e) {
-      alert(`${e}`)
+      alert(errorText(e))
     }
     setOverriding(false)
   }
@@ -386,7 +384,7 @@ export default function Review() {
     const apiKey = localStorage.getItem('api_key') || ''
     const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
     if (!apiHost || !apiKey) {
-      alert('Please configure your API settings first (Settings page).')
+      alert(t('common.apiMissing'))
       return
     }
     setGeneratingDetail(true)
@@ -399,7 +397,7 @@ export default function Review() {
       })
       setCurrentCard(prev => prev ? { ...prev, detail: result } : prev)
     } catch (e) {
-      alert(`Failed to generate: ${e}`)
+      alert(t('review.generationFailed', { error: errorText(e) }))
     }
     setGeneratingDetail(false)
   }
@@ -410,7 +408,7 @@ export default function Review() {
     const apiKey = localStorage.getItem('api_key') || ''
     const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
     if (!apiHost || !apiKey) {
-      alert('Please configure your API settings first (Settings page).')
+      alert(t('common.apiMissing'))
       return
     }
     setGeneratingMnemonic(true)
@@ -426,7 +424,7 @@ export default function Review() {
       setCurrentCard(prev => prev ? { ...prev, mnemonic: result } : prev)
       setShowMnemonic(true)
     } catch (e) {
-      alert(`Failed to generate mnemonic: ${e}`)
+      alert(t('review.mnemonicFailed', { error: errorText(e) }))
     }
     setGeneratingMnemonic(false)
   }
@@ -443,14 +441,15 @@ export default function Review() {
           content: parts[0],
           detail: parts[1] || undefined,
           language: importLang,
+          meaningLang: importMeaningLang,
         }
       })
       const result = await invoke<string>('db_import_review_items', { items })
-      setImportResult(result)
+      setImportResult(t('review.imported', { count: Number(result) }))
       await loadItems()
       await startSession(selectedLang)
     } catch (e) {
-      setImportResult(`Error: ${e}`)
+      setImportResult(errorText(e))
     }
     setImporting(false)
   }
@@ -471,7 +470,7 @@ export default function Review() {
     if (!detail) {
       return (
         <div className="mt-4 p-3 bg-gray-50 rounded-xl text-center">
-          <p className="text-sm text-gray-400 mb-3">No detail available for this card.</p>
+          <p className="text-sm text-gray-400 mb-3">{t('review.noDetail')}</p>
           <div className="flex gap-2 justify-center">
             <button
               onClick={() => generateDetail()}
@@ -479,14 +478,14 @@ export default function Review() {
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 active:bg-blue-700 transition-colors disabled:opacity-50"
             >
               <RobotOutlined />
-              {generatingDetail ? 'Generating...' : 'Generate with AI'}
+              {generatingDetail ? t('common.generating') : t('review.generateAi')}
             </button>
             <button
               onClick={() => { setEditingId(currentCard?.id || null) }}
               className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-gray-200 text-gray-700 text-sm font-medium hover:bg-gray-300 active:bg-gray-400 transition-colors"
             >
               <EditOutlined />
-              Add manually
+              {t('review.addManually')}
             </button>
           </div>
         </div>
@@ -499,20 +498,20 @@ export default function Review() {
         <div className="mt-4 space-y-2 text-left">
           {parsed.reading && (
             <div className="flex items-baseline gap-2">
-              <span className="text-xs text-gray-400 w-24 shrink-0">Reading</span>
+              <span className="text-xs text-gray-400 w-24 shrink-0">{t('card.reading')}</span>
               <span className="text-sm font-medium">{parsed.reading}</span>
             </div>
           )}
           {parsed.meaning && (
             <div className="flex items-baseline gap-2">
-              <span className="text-xs text-gray-400 w-24 shrink-0">Meaning</span>
+              <span className="text-xs text-gray-400 w-24 shrink-0">{t('card.meaning')}</span>
               <span className="text-sm font-medium">{parsed.meaning}</span>
             </div>
           )}
           {parsed.part_of_speech && (
             <div className="flex items-baseline gap-2">
-              <span className="text-xs text-gray-400 w-24 shrink-0">Part of speech</span>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{parsed.part_of_speech}</span>
+              <span className="text-xs text-gray-400 w-24 shrink-0">{t('card.partOfSpeech')}</span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{posLabel(parsed.part_of_speech)}</span>
             </div>
           )}
           {parsed.example && (
@@ -525,7 +524,7 @@ export default function Review() {
           )}
           <div className="mt-3 pt-2 border-t border-gray-100">
             <div className="flex items-center justify-between mb-1">
-              <span className="text-xs text-gray-400">Mnemonic</span>
+              <span className="text-xs text-gray-400">{t('card.mnemonic')}</span>
               {!currentCard?.mnemonic && (
                 <button
                   onClick={generateMnemonic}
@@ -533,7 +532,7 @@ export default function Review() {
                   className="flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-50 text-amber-600 text-xs font-medium hover:bg-amber-100 transition-colors disabled:opacity-50"
                 >
                   <BulbOutlined />
-                  {generatingMnemonic ? 'Creating...' : 'Create mnemonic'}
+                  {generatingMnemonic ? t('card.creating') : t('card.createMnemonic')}
                 </button>
               )}
             </div>
@@ -543,7 +542,7 @@ export default function Review() {
                   onClick={() => setShowMnemonic(!showMnemonic)}
                   className="text-sm text-left w-full"
                 >
-                  {showMnemonic ? currentCard.mnemonic : 'Tap to reveal mnemonic'}
+                  {showMnemonic ? currentCard.mnemonic : t('card.tapMnemonic')}
                 </button>
                 <button
                   onClick={generateMnemonic}
@@ -551,18 +550,18 @@ export default function Review() {
                   className="text-xs text-gray-400 hover:text-gray-600 mt-1"
                 >
                   <ReloadOutlined className="mr-1" />
-                  {generatingMnemonic ? 'Regenerating...' : 'Regenerate'}
+                  {generatingMnemonic ? t('card.regenerating') : t('card.regenerate')}
                 </button>
               </div>
             ) : (
-              <p className="text-xs text-gray-300">No mnemonic yet</p>
+              <p className="text-xs text-gray-300">{t('card.noMnemonic')}</p>
             )}
           </div>
           <button
             onClick={() => { setEditingId(currentCard?.id || null) }}
             className="text-xs text-gray-400 hover:text-gray-600 mt-1"
           >
-            <EditOutlined className="mr-1" />Edit detail
+            <EditOutlined className="mr-1" />{t('card.editDetail')}
           </button>
         </div>
       )
@@ -575,7 +574,7 @@ export default function Review() {
           onClick={() => { setEditingId(currentCard?.id || null) }}
           className="text-xs text-gray-400 hover:text-gray-600 mt-2"
         >
-          <EditOutlined className="mr-1" />Edit detail
+          <EditOutlined className="mr-1" />{t('card.editDetail')}
         </button>
       </div>
     )
@@ -591,7 +590,7 @@ export default function Review() {
     return (
       <EditWordForm
         item={card}
-        title="Edit Detail"
+        title={t('card.editDetailTitle')}
         onCancel={() => setEditingId(null)}
         onSave={async (data) => {
           if (data.content) {
@@ -618,9 +617,10 @@ export default function Review() {
     return (
       <div className="flex flex-col h-full -m-4 p-4">
         <div className="flex items-center justify-between mb-4">
-          <h2 className="text-lg font-semibold">Import Cards</h2>
+          <h2 className="text-lg font-semibold">{t('review.importTitle')}</h2>
           <button
             onClick={() => { setShowImport(false); setImportResult(null) }}
+            aria-label={t('common.close')}
             className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100"
           >
             <CloseOutlined />
@@ -628,27 +628,49 @@ export default function Review() {
         </div>
 
         <div className="mb-3">
-          <label className="text-sm text-gray-500 mb-1 block">Language</label>
+          <label className="text-sm text-gray-500 mb-1 block">{t('review.importWordLanguage')}</label>
           <div className="flex gap-2">
-            {Object.entries(LANGUAGES).map(([code, lang]) => (
+            {TARGET_LANGUAGES.map((l) => (
               <button
-                key={code}
-                onClick={() => setImportLang(code)}
+                key={l.code}
+                onClick={() => setImportLang(l.code)}
                 className={`px-3 py-1.5 rounded-xl text-sm font-medium transition-colors ${
-                  importLang === code
+                  importLang === l.code
                     ? 'bg-blue-500 text-white'
                     : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                 }`}
               >
-                {lang.flag} {lang.label}
+                {l.flag} {l.label}
               </button>
             ))}
           </div>
         </div>
 
+        <div className="mb-3">
+          <label className="text-sm text-gray-500 mb-1 block">{t('review.importMeaningLanguage')}</label>
+          <div className="flex gap-2">
+            {(['id', 'en'] as ExplainLang[]).map((code) => (
+              <button
+                key={code}
+                onClick={() => setImportMeaningLang(code)}
+                className={`px-3 py-1.5 rounded-xl text-sm font-medium transition-colors ${
+                  importMeaningLang === code
+                    ? 'bg-blue-500 text-white'
+                    : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
+                }`}
+              >
+                {languageName(code)}
+              </button>
+            ))}
+          </div>
+          {importMeaningLang !== explainLang && (
+            <p className="text-xs text-amber-600 mt-1">{t('review.importMeaningMismatch')}</p>
+          )}
+        </div>
+
         <div className="mb-2">
           <p className="text-xs text-gray-400 mb-1">
-            One word per line. Format: word,detail (detail is optional). Or load a CSV file.
+            {t('review.importHint')}
           </p>
           <input
             ref={fileInputRef}
@@ -661,14 +683,14 @@ export default function Review() {
             onClick={() => fileInputRef.current?.click()}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gray-100 text-gray-600 text-sm font-medium hover:bg-gray-200 mb-2"
           >
-            <ImportOutlined /> Load file
+            <ImportOutlined /> {t('review.loadFile')}
           </button>
         </div>
 
         <textarea
           value={importText}
           onChange={(e) => setImportText(e.target.value)}
-          placeholder={"食べる,to eat\n飲む,to drink\n散歩,walk/stroll"}
+          placeholder={t('review.importPlaceholder')}
           className="flex-1 w-full p-3 bg-gray-50 rounded-xl border-none outline-none text-sm resize-none font-mono"
         />
 
@@ -681,7 +703,7 @@ export default function Review() {
             onClick={() => { setShowImport(false); setImportResult(null) }}
             className="flex-1 py-3 rounded-xl bg-gray-100 text-gray-600 font-medium hover:bg-gray-200 active:bg-gray-300 transition-colors"
           >
-            Cancel
+            {t('common.cancel')}
           </button>
           <button
             onClick={handleImport}
@@ -689,7 +711,7 @@ export default function Review() {
             className="flex-1 py-3 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600 active:bg-blue-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
           >
             <ImportOutlined />
-            {importing ? 'Importing...' : 'Import'}
+            {importing ? t('review.importing') : t('common.import')}
           </button>
         </div>
       </div>
@@ -701,7 +723,7 @@ export default function Review() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-gray-400 gap-3">
         <ReloadOutlined className="text-3xl animate-spin" />
-        <p className="text-sm">Loading cards...</p>
+        <p className="text-sm">{t('review.loading')}</p>
       </div>
     )
   }
@@ -711,15 +733,15 @@ export default function Review() {
     return (
       <div className="flex flex-col items-center justify-center py-16 text-gray-400 gap-4">
         <div className="text-5xl">📚</div>
-        <h3 className="text-lg font-medium text-gray-600">No cards yet</h3>
+        <h3 className="text-lg font-medium text-gray-600">{t('review.noCards')}</h3>
         <p className="text-sm text-center max-w-xs">
-          Flag unknown words in chat, or import cards to get started.
+          {t('review.noCardsHint')}
         </p>
         <button
           onClick={() => setShowImport(true)}
           className="flex items-center gap-1.5 px-4 py-2 rounded-full bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 active:bg-blue-700 transition-colors"
         >
-          <ImportOutlined /> Import Cards
+          <ImportOutlined /> {t('review.importTitle')}
         </button>
       </div>
     )
@@ -740,14 +762,14 @@ export default function Review() {
       {/* Header */}
       <div className="mb-3 shrink-0 sticky top-0 z-10 bg-gray-50 pt-4 pb-2">
         <div className="flex items-center justify-between mb-2">
-          <h2 className="text-lg font-semibold">Review</h2>
+          <h2 className="text-lg font-semibold">{t('review.title')}</h2>
           <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-400">{reviewedToday}/{maxReviews} today · {newCardsToday}/{maxNewCards} new</span>
+            <span className="text-xs text-gray-400">{t('review.todayCounts', { reviewed: reviewedToday, maxReviews, newSeen: newCardsToday, maxNew: maxNewCards })}</span>
             <button
               onClick={() => setShowImport(true)}
               className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-gray-100 text-gray-600 text-xs font-medium hover:bg-gray-200 transition-colors"
             >
-              <ImportOutlined /> Import
+              <ImportOutlined /> {t('common.import')}
             </button>
           </div>
         </div>
@@ -756,7 +778,6 @@ export default function Review() {
         {langKeys.length > 1 && (
           <div className="flex gap-1.5 mb-3">
             {langKeys.map(lang => {
-              const info = LANGUAGES[lang]
               const count = (languageGroups[lang] || []).length
               const dueCount = (languageGroups[lang] || []).filter(
                 (item: ReviewItem) => !item.next_review || item.next_review <= endOfDaySeconds
@@ -771,7 +792,7 @@ export default function Review() {
                       : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   }`}
                 >
-                  {info ? `${info.flag} ` : ''}{info?.label || lang}
+                  {languageLabel(lang)}
                   <span className="ml-1 text-xs opacity-70">({dueCount}/{count})</span>
                 </button>
               )
@@ -806,17 +827,17 @@ export default function Review() {
           {summary && summary.total > 0 && <SessionSummaryView summary={summary} />}
           <>
             <div className="text-4xl">🎉</div>
-            <p className="text-sm text-center">All done for {LANGUAGES[selectedLang || '']?.label || selectedLang}!</p>
-            <p className="text-xs text-gray-300">{deckItems.length} cards in deck, {dueInDeck} due now</p>
+            <p className="text-sm text-center">{t('review.allDone', { language: languageName(selectedLang) })}</p>
+            <p className="text-xs text-gray-300">{t('review.deckCounts', { count: deckItems.length, due: dueInDeck })}</p>
             {newCardsToday >= maxNewCards && (
-              <p className="text-xs text-amber-500">New card limit reached ({maxNewCards}/day) — remaining new cards will appear tomorrow</p>
+              <p className="text-xs text-amber-500">{t('review.newLimit', { n: maxNewCards })}</p>
             )}
           </>
           <button
             onClick={refreshFromDB}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl bg-gray-100 text-gray-600 text-sm font-medium hover:bg-gray-200 transition-colors"
           >
-            <ReloadOutlined /> Refresh
+            <ReloadOutlined /> {t('review.refresh')}
           </button>
         </div>
       ) : (
@@ -825,15 +846,15 @@ export default function Review() {
             {missingMeaning.length > 0 && !bannerDismissed && getApiConfig().ready && (
               <div className="w-full max-w-sm mx-auto rounded-2xl bg-orange-50 p-3 flex flex-col gap-2">
                 <div className="text-sm font-semibold text-gray-700">
-                  {missingMeaning.length} {missingMeaning.length === 1 ? 'card has' : 'cards have'} no meaning yet
+                  {t('review.missingTitle', { count: missingMeaning.length, language: languageName(explainLang) })}
                 </div>
                 <div className="text-xs text-gray-500">
-                  {missingMeaning.slice(0, 5).join(', ')}{missingMeaning.length > 5 ? '…' : ''}. Generate them now so they can be quizzed.
+                  {t('review.missingBody', { words: missingMeaning.slice(0, 5).join(', ') + (missingMeaning.length > 5 ? '…' : '') })}
                 </div>
                 <div className="grid grid-cols-2 gap-2">
-                  <button type="button" onClick={() => setBannerDismissed(true)} className="py-2 rounded-xl bg-white text-gray-600 text-sm font-medium">Later</button>
+                  <button type="button" onClick={() => setBannerDismissed(true)} className="py-2 rounded-xl bg-white text-gray-600 text-sm font-medium">{t('review.later')}</button>
                   <button type="button" disabled={generatingAll} onClick={generateAllMeanings} className="py-2 rounded-xl bg-blue-500 text-white text-sm font-medium disabled:opacity-50">
-                    {generatingAll ? 'Generating…' : 'Generate all'}
+                    {generatingAll ? t('common.generating') : t('review.generateAll')}
                   </button>
                 </div>
               </div>
@@ -891,7 +912,7 @@ export default function Review() {
                   currentCard.state === 'relearning' ? 'bg-orange-500' :
                   'bg-green-500'
                 }`}>
-                  {currentCard.state_label}
+                  {t(`cardState.${currentCard.state || 'new'}`)}
                 </span>
                 <div className={`w-16 h-2 rounded-full ${currentCard.difficulty_bg_class}`} />
               </div>
@@ -899,14 +920,14 @@ export default function Review() {
               <div className="text-2xl font-semibold mb-1">{currentCard.content}</div>
               {currentCard.difficulty_label && (
                 <span className={`inline-block text-xs px-2 py-0.5 rounded-full text-white mt-1 ${currentCard.difficulty_bg_class}`}>
-                  {currentCard.difficulty_label}
+                  {t(`difficulty.${currentCard.difficulty_label}`)}
                 </span>
               )}
 
               {!revealed ? (
                 <>
-                  <div className="text-sm text-gray-400 mt-4">Tap to reveal</div>
-                  <div className="text-xs text-gray-300 mt-2">Quiz questions need at least 2 words with meanings in this deck, so grade this one yourself.</div>
+                  <div className="text-sm text-gray-400 mt-4">{t('review.tapReveal')}</div>
+                  <div className="text-xs text-gray-300 mt-2">{t('review.classicHint')}</div>
                 </>
               ) : (
                 <>
@@ -914,16 +935,16 @@ export default function Review() {
 
                   <div className="mt-4 pt-3 border-t border-gray-100">
                     <div className="flex items-center justify-center gap-4 text-xs text-gray-400">
-                      <span>Reps: {currentCard.R}</span>
-                      <span>Stability: {currentCard.fsrs_stability != null ? `${Math.round(currentCard.fsrs_stability)}d` : `${currentCard.I}d`}</span>
-                      <span>Difficulty: {currentCard.fsrs_difficulty != null ? currentCard.fsrs_difficulty.toFixed(1) : '—'}</span>
+                      <span>{t('card.reps', { n: currentCard.R })}</span>
+                      <span>{t('card.stability', { days: Math.round(currentCard.fsrs_stability ?? currentCard.I) })}</span>
+                      <span>{t('card.difficulty', { n: currentCard.fsrs_difficulty != null ? formatNumber(currentCard.fsrs_difficulty, { maximumFractionDigits: 1 }) : '—' })}</span>
                       {currentCard.lapse_count > 0 && (
-                        <span>Lapses: {currentCard.lapse_count}</span>
+                        <span>{t('card.lapses', { n: currentCard.lapse_count })}</span>
                       )}
                     </div>
                     {currentCard.next_review && (
                       <div className="text-xs text-gray-300 mt-1">
-                        Next review: {new Date(currentCard.next_review * 1000).toLocaleString()}
+                        {t('card.nextReview', { when: formatDate(currentCard.next_review * 1000, { dateStyle: 'medium', timeStyle: 'short' }) })}
                       </div>
                     )}
                   </div>
@@ -954,7 +975,7 @@ export default function Review() {
                   onClick={() => setRevealed(true)}
                   className="w-full py-3.5 rounded-full bg-blue-500 text-white font-medium text-sm hover:bg-blue-600 active:bg-blue-700 transition-colors shadow-sm"
                 >
-                  Show Answer
+                  {t('review.showAnswer')}
                 </button>
               </div>
             )}

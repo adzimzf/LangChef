@@ -1,4 +1,5 @@
 use crate::db::open_db;
+use crate::locale::effective_detail_sql;
 use crate::quiz::{cards_missing_meaning, clear_task, issue_task, QuizTask};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
@@ -25,6 +26,16 @@ pub struct ReviewItem {
     pub difficulty_label: String,
     pub state_label: String,
     pub next_review_formatted: String,
+}
+
+/// Columns read by `row_to_review_item`. `detail` is only returned while it is in the learner's
+/// explanation language; a meaning in another language reads as no meaning.
+pub fn review_cols(prefix: &str) -> String {
+    format!(
+        "{p}id, {p}content, {p}EF, {p}I, {p}R, {p}state, {p}step, {p}lapse_count, {p}next_review, {p}language, {d}, {p}mnemonic, {p}fsrs_stability, {p}fsrs_difficulty",
+        p = prefix,
+        d = effective_detail_sql(prefix)
+    )
 }
 
 pub fn row_to_review_item(row: &rusqlite::Row) -> rusqlite::Result<ReviewItem> {
@@ -660,10 +671,7 @@ pub fn db_upsert_review_item(app: tauri::AppHandle, content: String, language: O
 #[tauri::command]
 pub fn db_get_review_items(app: tauri::AppHandle) -> Result<Vec<ReviewItem>, String> {
     let conn = open_db(&app)?;
-    let mut stmt = conn.prepare(
-        "SELECT
-            id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
-        FROM review_items").map_err(|e| e.to_string())?;
+    let mut stmt = conn.prepare(&format!("SELECT {} FROM review_items", review_cols(""))).map_err(|e| e.to_string())?;
     let rows = stmt.query_map([], row_to_review_item).map_err(|e| e.to_string())?;
     let mut items = Vec::new();
     for r in rows {
@@ -681,7 +689,8 @@ pub fn db_get_review_items_by_words(app: tauri::AppHandle, words: Vec<String>) -
     let conn = open_db(&app)?;
     let placeholders: Vec<String> = words.iter().map(|_| "?".to_string()).collect();
     let sql = format!(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty FROM review_items WHERE content IN ({})",
+        "SELECT {} FROM review_items WHERE content IN ({})",
+        review_cols(""),
         placeholders.join(", ")
     );
 
@@ -962,8 +971,7 @@ fn fetch_next_pending(
     now: i64,
 ) -> Result<Option<ReviewItem>, String> {
     let result = conn.query_row(
-        "SELECT r.id, r.content, r.EF, r.I, r.R, r.state, r.step, r.lapse_count, r.next_review,
-                r.language, r.detail, r.mnemonic, r.fsrs_stability, r.fsrs_difficulty
+        &format!("SELECT {}
          FROM study_card sc
          JOIN review_items r ON r.id = sc.review_item_id
          WHERE sc.study_id = ?1 AND sc.status = 'pending'
@@ -975,7 +983,7 @@ fn fetch_next_pending(
                 WHEN r.state IN ('learning','relearning') THEN 2
                 ELSE 3
             END
-         LIMIT 1",
+         LIMIT 1", review_cols("r.")),
         params![study_id, now],
         row_to_review_item,
     );
@@ -1034,8 +1042,7 @@ pub(crate) fn set_card_status(
 
 pub(crate) fn fetch_review_item(conn: &rusqlite::Connection, id: &str) -> Result<Option<ReviewItem>, String> {
     let result = conn.query_row(
-        "SELECT id, content, EF, I, R, state, step, lapse_count, next_review, language, detail, mnemonic, fsrs_stability, fsrs_difficulty
-         FROM review_items WHERE id = ?1",
+        &format!("SELECT {} FROM review_items WHERE id = ?1", review_cols("")),
         params![id],
         row_to_review_item,
     );

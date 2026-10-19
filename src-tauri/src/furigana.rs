@@ -58,6 +58,26 @@ impl FuriganaAnnotator {
         result
     }
 
+    /// (surface, kana reading if known, is a particle) for each token, for romaji.
+    pub fn readings(&mut self, text: &str) -> Vec<(String, Option<String>, bool)> {
+        let plain = strip_existing_furigana(text);
+        match self.tokenizer.tokenize(&plain) {
+            Ok(tokens) => tokens
+                .into_iter()
+                .map(|mut token| {
+                    let surface = token.surface.to_string();
+                    let reading = token
+                        .get("reading")
+                        .filter(|r| *r != "*" && !r.is_empty())
+                        .map(katakana_to_hiragana);
+                    let particle = token.get("part_of_speech").is_some_and(|p| p == "助詞");
+                    (surface, reading, particle)
+                })
+                .collect(),
+            Err(_) => vec![],
+        }
+    }
+
     pub fn tokenize(&mut self, text: &str) -> Vec<(String, String)> {
         let plain = strip_existing_furigana(text);
         match self.tokenizer.tokenize(&plain) {

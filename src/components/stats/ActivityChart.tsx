@@ -9,6 +9,7 @@ import {
   Line,
   ComposedChart,
 } from 'recharts'
+import { t } from '../../lib/i18n'
 
 interface Props {
   data: { date: string; label: string; chat: number; review: number; movingAvg: number }[]
@@ -18,8 +19,8 @@ export default function ActivityChart({ data }: Props) {
   if (data.length === 0) {
     return (
       <div className="bg-white rounded-xl p-4 shadow-sm">
-        <h3 className="text-sm font-medium text-gray-600 mb-3">Activity</h3>
-        <p className="text-sm text-gray-400">No activity data for this period</p>
+        <h3 className="text-sm font-medium text-gray-600 mb-3">{t('stats.activity')}</h3>
+        <p className="text-sm text-gray-400">{t('stats.noActivity')}</p>
       </div>
     )
   }
@@ -27,16 +28,16 @@ export default function ActivityChart({ data }: Props) {
   return (
     <div className="bg-white rounded-xl p-4 shadow-sm">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-gray-600">Activity</h3>
+        <h3 className="text-sm font-medium text-gray-600">{t('stats.activity')}</h3>
         <div className="flex items-center gap-3 text-[10px]">
           <span className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-blue-400 inline-block" /> Chat
+            <span className="w-2 h-2 rounded-full bg-blue-400 inline-block" /> {t('stats.chat')}
           </span>
           <span className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-green-400 inline-block" /> Review
+            <span className="w-2 h-2 rounded-full bg-green-400 inline-block" /> {t('stats.review')}
           </span>
           <span className="flex items-center gap-1">
-            <span className="w-[10px] h-[2px] bg-orange-400 inline-block" /> Avg
+            <span className="w-[10px] h-[2px] bg-orange-400 inline-block" /> {t('stats.avg')}
           </span>
         </div>
       </div>
@@ -47,7 +48,7 @@ export default function ActivityChart({ data }: Props) {
           <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" allowDecimals={false} />
           <Tooltip
             contentStyle={{ fontSize: 12, borderRadius: 8 }}
-            formatter={(value, name) => [value, name === 'movingAvg' ? 'Avg' : name]}
+            formatter={(value, name) => [value, name === 'movingAvg' ? t('stats.avg') : name === 'chat' ? t('stats.chat') : name === 'review' ? t('stats.review') : name]}
           />
           <Bar dataKey="chat" stackId="a" fill="#60a5fa" radius={[0, 0, 0, 0]} />
           <Bar dataKey="review" stackId="a" fill="#4ade80" radius={[4, 4, 0, 0]} />

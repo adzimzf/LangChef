@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { CloseOutlined } from '@ant-design/icons'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import { t } from '../lib/i18n'
 
 export type UserFeedback = { messageId: number; score: number; feedback: string; loading: boolean }
 
@@ -45,7 +46,7 @@ function tryParseJSON(raw: string): FeedbackJSON | null {
 function feedbackToMarkdown(fb: FeedbackJSON): string {
   const lines: string[] = []
 
-  lines.push(`**Overall Score**`)
+  lines.push(`**${t('feedback.overall')}**`)
   lines.push(`[ \`${stars(fb.score)}\` ] **${fb.score} / 5**`)
   lines.push('')
   lines.push(`> ${fb.summary}`)
@@ -54,9 +55,9 @@ function feedbackToMarkdown(fb: FeedbackJSON): string {
   lines.push('')
 
   if (fb.vocab && fb.vocab.length > 0) {
-    lines.push('### 🔤 Vocabulary Analysis')
+    lines.push(`### 🔤 ${t('feedback.vocab')}`)
     lines.push('')
-    lines.push('| Status | Word | Reading / Meaning | Diagnosis & Suggestion |')
+    lines.push(`| ${t('feedback.status')} | ${t('feedback.word')} | ${t('feedback.readingMeaning')} | ${t('feedback.diagnosis')} |`)
     lines.push('|:---:|:---|:---|:---|')
     for (const v of fb.vocab) {
       const status = v.ok ? '✅' : '❌'
@@ -68,9 +69,9 @@ function feedbackToMarkdown(fb: FeedbackJSON): string {
   }
 
   if (fb.grammar && fb.grammar.length > 0) {
-    lines.push('### 📝 Grammar')
+    lines.push(`### 📝 ${t('home.grammar')}`)
     lines.push('')
-    lines.push('| Status | Grammar | Diagnosis |')
+    lines.push(`| ${t('feedback.status')} | ${t('home.grammar')} | ${t('feedback.diagnosisShort')} |`)
     lines.push('|:---:|:---|:---|')
     for (const g of fb.grammar) {
       const status = g.ok ? '✅' : '❌'
@@ -82,13 +83,13 @@ function feedbackToMarkdown(fb: FeedbackJSON): string {
   }
 
   if (fb.target_words && fb.target_words.length > 0) {
-    lines.push('### 🎯 Target Word Usage')
+    lines.push(`### 🎯 ${t('feedback.targetWords')}`)
     lines.push('')
-    lines.push('| Status | Target Word | Used? | Notes |')
+    lines.push(`| ${t('feedback.status')} | ${t('feedback.targetWord')} | ${t('feedback.used')} | ${t('feedback.notes')} |`)
     lines.push('|:---:|:---|:---:|:---|')
     for (const tw of fb.target_words) {
       const status = tw.used ? '✅' : '❌'
-      lines.push(`| ${status} | **${tw.word}** | ${tw.used ? 'Yes' : 'No'} | ${tw.note} |`)
+      lines.push(`| ${status} | **${tw.word}** | ${tw.used ? t('common.yes') : t('common.no')} | ${tw.note} |`)
     }
     lines.push('')
     lines.push('---')
@@ -96,7 +97,7 @@ function feedbackToMarkdown(fb: FeedbackJSON): string {
   }
 
   if (fb.suggestion) {
-    lines.push('### 📝 Suggestion')
+    lines.push(`### 📝 ${t('feedback.suggestion')}`)
     lines.push('')
     lines.push(`> ✅ **${fb.suggestion}**`)
     lines.push('')
@@ -114,7 +115,7 @@ export default function UserMessageFeedback({ feedback }: Props) {
     return (
       <div className="mt-1 px-2 py-0.5 rounded-full bg-gray-100 text-[11px] text-gray-400 animate-pulse inline-flex items-center gap-1">
         <span className="w-1.5 h-1.5 rounded-full bg-gray-300" />
-        Evaluating...
+        {t('feedback.evaluating')}
       </div>
     )
   }
@@ -146,10 +147,11 @@ export default function UserMessageFeedback({ feedback }: Props) {
                 <span className={`text-sm font-bold ${feedback.score >= 4 ? 'text-green-600' : feedback.score >= 3 ? 'text-yellow-600' : 'text-orange-500'}`}>
                   {feedback.score}/5
                 </span>
-                <span className="text-sm font-medium text-gray-700">Message Feedback</span>
+                <span className="text-sm font-medium text-gray-700">{t('feedback.title')}</span>
               </div>
               <button
                 onClick={() => setShowDetail(false)}
+                aria-label={t('common.close')}
                 className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 active:bg-gray-200"
               >
                 <CloseOutlined />

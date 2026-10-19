@@ -19,6 +19,7 @@ import {
   CloseOutlined,
   ThunderboltOutlined,
 } from '@ant-design/icons'
+import { t, errorWithDetail, formatAgo, formatDate, formatNumber } from '../lib/i18n'
 
 type AuthStatus = {
   signed_in: boolean
@@ -49,12 +50,12 @@ interface Toast {
 }
 
 const SYNC_INTERVAL_OPTIONS = [
-  { label: 'Every 15 minutes', value: 15 },
-  { label: 'Every 30 minutes', value: 30 },
-  { label: 'Every hour', value: 60 },
-  { label: 'Every 6 hours', value: 360 },
-  { label: 'Every 12 hours', value: 720 },
-  { label: 'Daily', value: 1440 },
+  { label: t('backup.every15m'), value: 15 },
+  { label: t('backup.every30m'), value: 30 },
+  { label: t('backup.everyHour'), value: 60 },
+  { label: t('backup.every6h'), value: 360 },
+  { label: t('backup.every12h'), value: 720 },
+  { label: t('backup.daily'), value: 1440 },
 ]
 
 export default function GoogleDriveBackup() {
@@ -102,7 +103,7 @@ export default function GoogleDriveBackup() {
       const status = await invoke<AuthStatus>('google_get_auth_status')
       setAuthStatus(status)
     } catch (e) {
-      showToast(`Failed to check auth status: ${e}`, 'error')
+      showToast(t('backup.authCheckFailed', { error: errorWithDetail(e) }), 'error')
     }
   }, [])
 
@@ -111,7 +112,7 @@ export default function GoogleDriveBackup() {
       const status = await invoke<BackupStatus>('google_get_backup_status')
       setBackupStatus(status)
     } catch (e) {
-      showToast(`Failed to check backup status: ${e}`, 'error')
+      showToast(t('backup.statusFailed', { error: errorWithDetail(e) }), 'error')
     }
   }, [])
 
@@ -130,11 +131,11 @@ export default function GoogleDriveBackup() {
             config: { serviceLabel: 'LangChef auto-backup' },
           })
         } catch (svcErr) {
-          showToast(`Background service unavailable: ${svcErr}`, 'error')
+          showToast(t('backup.serviceUnavailable', { error: errorWithDetail(svcErr) }), 'error')
         }
       }
     } catch (e) {
-      showToast(`Failed to load sync settings: ${e}`, 'error')
+      showToast(t('backup.loadSyncFailed', { error: errorWithDetail(e) }), 'error')
     }
   }, [])
 
@@ -152,10 +153,10 @@ export default function GoogleDriveBackup() {
       const result = await invoke<{ email: string }>('google_sign_in')
       setAuthStatus({ signed_in: true, email: result.email })
       setSignInStep('idle')
-      showToast(`Signed in as ${result.email}`, 'success')
+      showToast(t('backup.signedInAs', { email: result.email ?? '' }), 'success')
       loadBackupStatus()
     } catch (e) {
-      showToast(`Sign-in failed: ${e}`, 'error')
+      showToast(t('backup.signInFailed', { error: errorWithDetail(e) }), 'error')
       setSignInStep('idle')
     }
   }
@@ -170,9 +171,9 @@ export default function GoogleDriveBackup() {
         if (await isServiceRunning()) await stopService()
         await configureRecovery({ enabled: false })
       } catch {}
-      showToast('Signed out successfully', 'success')
+      showToast(t('backup.signedOut'), 'success')
     } catch (e) {
-      showToast(`Sign-out failed: ${e}`, 'error')
+      showToast(t('backup.signOutFailed', { error: errorWithDetail(e) }), 'error')
     }
   }
 
@@ -187,13 +188,13 @@ export default function GoogleDriveBackup() {
         size: number
       }>('google_backup_db')
       showToast(
-        `Backed up successfully (${formatFileSize(result.size)})`,
+        t('backup.backedUp', { size: formatFileSize(result.size) }),
         'success'
       )
       loadBackupStatus()
       loadSyncConfig()
     } catch (e) {
-      showToast(`Backup failed: ${e}`, 'error')
+      showToast(t('backup.backupFailed', { error: errorWithDetail(e) }), 'error')
     } finally {
       setBackupAction('idle')
     }
@@ -209,12 +210,12 @@ export default function GoogleDriveBackup() {
         size: number
       }>('google_restore_db')
       showToast(
-        `Restored successfully (${formatFileSize(result.size)}). Please restart the app.`,
+        t('backup.restored', { size: formatFileSize(result.size) }),
         'success'
       )
       loadBackupStatus()
     } catch (e) {
-      showToast(`Restore failed: ${e}`, 'error')
+      showToast(t('backup.restoreFailed', { error: errorWithDetail(e) }), 'error')
     } finally {
       setBackupAction('idle')
     }
@@ -246,15 +247,15 @@ export default function GoogleDriveBackup() {
           await configureRecovery({ enabled: false })
         }
       } catch (svcErr) {
-        const msg = `Background service error: ${svcErr}`
+        const msg = t('backup.serviceError', { error: errorWithDetail(svcErr) })
         setSyncError(msg)
         showToast(msg, 'error')
         setSyncToggled(false)
         return
       }
-      showToast(enabled ? 'Auto-sync enabled' : 'Auto-sync disabled', 'success')
+      showToast(enabled ? t('backup.autoOn') : t('backup.autoOff'), 'success')
     } catch (e) {
-      const msg = `Failed to save sync settings: ${e}`
+      const msg = t('backup.saveSyncFailed', { error: errorWithDetail(e) })
       setSyncError(msg)
       showToast(msg, 'error')
     }
@@ -271,7 +272,7 @@ export default function GoogleDriveBackup() {
       })
       setSyncConfig(config)
     } catch (e) {
-      const msg = `Failed to update sync interval: ${e}`
+      const msg = t('backup.intervalFailed', { error: errorWithDetail(e) })
       setSyncError(msg)
       showToast(msg, 'error')
     }
@@ -287,24 +288,24 @@ export default function GoogleDriveBackup() {
         error?: string
       }>('google_trigger_sync')
       if (result.synced) {
-        showToast('Auto-sync completed successfully', 'success')
+        showToast(t('backup.syncDone'), 'success')
       } else {
         if (result.reason === 'not_due_yet') {
-          showToast('Sync not due yet', 'info')
+          showToast(t('backup.notDue'), 'info')
         } else if (result.reason === 'auto_sync_disabled') {
-          showToast('Auto-sync is disabled', 'info')
+          showToast(t('backup.autoIsOff'), 'info')
         } else if (result.error) {
-          const msg = `Sync error: ${result.error}`
+          const msg = t('backup.syncError', { error: errorWithDetail(result.error) })
           setSyncError(msg)
           showToast(msg, 'error')
         } else {
-          showToast(`Sync skipped: ${result.reason}`, 'info')
+          showToast(t('backup.syncSkipped', { reason: String(result.reason) }), 'info')
         }
       }
       loadBackupStatus()
       loadSyncConfig()
     } catch (e) {
-      const msg = `Sync failed: ${e}`
+      const msg = t('backup.syncFailed', { error: errorWithDetail(e) })
       setSyncError(msg)
       showToast(msg, 'error')
     } finally {
@@ -315,26 +316,16 @@ export default function GoogleDriveBackup() {
   // ─── Helpers ────────────────────────────────────────────────────────
 
   function formatTimestamp(ts: number | null): string {
-    if (!ts) return 'Never'
-    const date = new Date(ts * 1000)
-    const now = new Date()
-    const diffMs = now.getTime() - date.getTime()
-    const diffMin = Math.floor(diffMs / 60000)
-
-    if (diffMin < 1) return 'Just now'
-    if (diffMin < 60) return `${diffMin}m ago`
-    const diffHr = Math.floor(diffMin / 60)
-    if (diffHr < 24) return `${diffHr}h ago`
-    const diffDay = Math.floor(diffHr / 24)
-    if (diffDay < 7) return `${diffDay}d ago`
-    return date.toLocaleDateString()
+    if (!ts) return t('backup.never')
+    const diffDay = (Date.now() - ts * 1000) / 86400000
+    return diffDay < 7 ? formatAgo(ts) : formatDate(ts * 1000)
   }
 
   function formatFileSize(bytes: number | null): string {
     if (!bytes) return '0 B'
     if (bytes < 1024) return `${bytes} B`
-    if (bytes < 1048576) return `${(bytes / 1024).toFixed(1)} KB`
-    return `${(bytes / 1048576).toFixed(1)} MB`
+    if (bytes < 1048576) return `${formatNumber(bytes / 1024, { maximumFractionDigits: 1 })} KB`
+    return `${formatNumber(bytes / 1048576, { maximumFractionDigits: 1 })} MB`
   }
 
   // ─── Render ────────────────────────────────────────────────────────
@@ -342,7 +333,7 @@ export default function GoogleDriveBackup() {
   return (
     <div className="space-y-3">
       <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wide px-1">
-        Backup &amp; Sync
+        {t('backup.title')}
       </h3>
 
       {/* Toast notifications */}
@@ -369,6 +360,7 @@ export default function GoogleDriveBackup() {
               <span className="flex-1 leading-relaxed">{toast.message}</span>
               <button
                 onClick={() => dismissToast(toast.key)}
+                aria-label={t('common.close')}
                 className="shrink-0 opacity-50 hover:opacity-100 transition-opacity"
               >
                 <CloseOutlined style={{ fontSize: 11 }} />
@@ -383,7 +375,7 @@ export default function GoogleDriveBackup() {
         <div className="px-4 py-3 border-b border-gray-50">
           <label className="flex items-center gap-2 text-sm text-gray-500">
             <GoogleOutlined />
-            Google Account
+            {t('backup.googleAccount')}
           </label>
 
           {/* Not signed in: show sign in button */}
@@ -394,10 +386,10 @@ export default function GoogleDriveBackup() {
                 className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-blue-50 text-blue-600 font-medium text-sm hover:bg-blue-100 active:bg-blue-200 transition-colors"
               >
                 <GoogleOutlined />
-                Sign in with Google
+                {t('backup.signIn')}
               </button>
               <p className="text-xs text-gray-400 mt-2">
-                Required to back up your data to Google Drive
+                {t('backup.signInHint')}
               </p>
             </div>
           )}
@@ -407,7 +399,7 @@ export default function GoogleDriveBackup() {
             <div className="flex items-center gap-2 py-2 mt-2">
               <LoadingOutlined spin className="text-blue-500" />
               <span className="text-sm text-gray-500">
-                Opening browser for sign-in...
+                {t('backup.openingBrowser')}
               </span>
             </div>
           )}
@@ -423,7 +415,7 @@ export default function GoogleDriveBackup() {
                 onClick={handleSignOut}
                 className="text-xs text-red-500 hover:text-red-700 font-medium"
               >
-                Sign out
+                {t('backup.signOut')}
               </button>
             </div>
           )}
@@ -434,7 +426,7 @@ export default function GoogleDriveBackup() {
           <div className="px-4 py-3">
             <label className="flex items-center gap-2 text-sm text-gray-500 mb-2">
               <CloudUploadOutlined />
-              Backup &amp; Restore
+              {t('backup.backupRestore')}
             </label>
 
             {/* Last backup info */}
@@ -442,7 +434,7 @@ export default function GoogleDriveBackup() {
               <div className="flex items-center justify-between text-xs text-gray-400 mb-3 px-1">
                 <span className="flex items-center gap-1">
                   <ClockCircleOutlined />
-                  Last backup: {formatTimestamp(backupStatus.last_backup)}
+                  {t('backup.lastBackup', { when: formatTimestamp(backupStatus.last_backup) })}
                 </span>
                 <span>{formatFileSize(backupStatus.backup_size)}</span>
               </div>
@@ -457,11 +449,11 @@ export default function GoogleDriveBackup() {
               >
                 {backupAction === 'backing_up' ? (
                   <>
-                    <LoadingOutlined spin /> Backing up...
+                    <LoadingOutlined spin /> {t('backup.backingUp')}
                   </>
                 ) : (
                   <>
-                    <CloudUploadOutlined /> Back Up Now
+                    <CloudUploadOutlined /> {t('backup.backupNow')}
                   </>
                 )}
               </button>
@@ -476,11 +468,11 @@ export default function GoogleDriveBackup() {
               >
                 {backupAction === 'restoring' ? (
                   <>
-                    <LoadingOutlined spin /> Restoring...
+                    <LoadingOutlined spin /> {t('backup.restoring')}
                   </>
                 ) : (
                   <>
-                    <CloudDownloadOutlined /> Restore
+                    <CloudDownloadOutlined /> {t('backup.restore')}
                   </>
                 )}
               </button>
@@ -490,26 +482,25 @@ export default function GoogleDriveBackup() {
             {showRestoreConfirm && (
               <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center bg-black/40 p-4">
                 <div className="bg-white rounded-2xl p-5 w-full max-w-sm shadow-xl animate-in fade-in slide-in-from-bottom-4">
-                  <h4 className="text-base font-semibold mb-2">Restore from Backup?</h4>
+                  <h4 className="text-base font-semibold mb-2">{t('backup.restoreTitle')}</h4>
                   <p className="text-sm text-gray-500 leading-relaxed mb-1">
-                    This will replace all local data with your Google Drive backup.
-                    Current data will be saved as a safety copy.
+                    {t('backup.restoreBody')}
                   </p>
                   <p className="text-sm text-orange-600 font-medium mb-4">
-                    The app needs to restart after restore.
+                    {t('backup.restoreRestart')}
                   </p>
                   <div className="flex gap-2">
                     <button
                       onClick={() => setShowRestoreConfirm(false)}
                       className="flex-1 py-2.5 rounded-xl bg-gray-100 text-gray-700 font-medium text-sm hover:bg-gray-200 transition-colors"
                     >
-                      Cancel
+                      {t('common.cancel')}
                     </button>
                     <button
                       onClick={handleRestore}
                       className="flex-1 py-2.5 rounded-xl bg-orange-500 text-white font-medium text-sm hover:bg-orange-600 transition-colors"
                     >
-                      Yes, Restore
+                      {t('backup.restoreConfirm')}
                     </button>
                   </div>
                 </div>
@@ -525,19 +516,22 @@ export default function GoogleDriveBackup() {
           <div className="px-4 py-3">
             <label className="flex items-center gap-2 text-sm text-gray-500 mb-2">
               <SyncOutlined />
-              Auto-Sync Schedule
+              {t('backup.autoSchedule')}
             </label>
 
             {/* Toggle row */}
             <div className="flex items-center justify-between py-2">
               <div>
-                <p className="text-sm font-medium">Automatic backup</p>
+                <p className="text-sm font-medium">{t('backup.automatic')}</p>
                 <p className="text-xs text-gray-400 mt-0.5">
-                  Automatically back up your data
+                  {t('backup.automaticHint')}
                 </p>
               </div>
               <button
                 onClick={() => toggleAutoSync(!syncConfig.enabled)}
+                role="switch"
+                aria-checked={syncConfig.enabled}
+                aria-label={t('backup.automatic')}
                 disabled={syncToggled}
                 className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${
                   syncConfig.enabled ? 'bg-blue-500' : 'bg-gray-300'
@@ -558,6 +552,7 @@ export default function GoogleDriveBackup() {
                 <span>{syncError}</span>
                 <button
                   onClick={() => setSyncError('')}
+                  aria-label={t('common.close')}
                   className="shrink-0 ml-auto opacity-50 hover:opacity-100"
                 >
                   <CloseOutlined style={{ fontSize: 11 }} />
@@ -569,7 +564,7 @@ export default function GoogleDriveBackup() {
             {syncConfig.enabled && (
               <div className="mt-3 pt-3 border-t border-gray-50 space-y-3">
                 <div>
-                  <p className="text-xs text-gray-400 mb-1.5">Sync interval</p>
+                  <p className="text-xs text-gray-400 mb-1.5">{t('backup.interval')}</p>
                   <select
                     value={syncConfig.interval_minutes}
                     onChange={(e) =>
@@ -589,7 +584,7 @@ export default function GoogleDriveBackup() {
                 {syncConfig.last_sync_at && (
                   <div className="flex items-center justify-between">
                     <span className="text-xs text-gray-400">
-                      Last sync: {formatTimestamp(syncConfig.last_sync_at)}
+                      {t('backup.lastSync', { when: formatTimestamp(syncConfig.last_sync_at) })}
                     </span>
                     <button
                       onClick={triggerSyncNow}
@@ -598,11 +593,11 @@ export default function GoogleDriveBackup() {
                     >
                       {backupAction === 'backing_up' ? (
                         <>
-                          <LoadingOutlined spin /> Syncing...
+                          <LoadingOutlined spin /> {t('backup.syncing')}
                         </>
                       ) : (
                         <>
-                          <ThunderboltOutlined /> Sync Now
+                          <ThunderboltOutlined /> {t('backup.syncNow')}
                         </>
                       )}
                     </button>
@@ -619,11 +614,7 @@ export default function GoogleDriveBackup() {
         <div className="flex items-start gap-2.5">
           <InfoCircleOutlined className="text-gray-400 mt-0.5 shrink-0" />
           <p className="text-sm text-gray-500 leading-relaxed">
-            Your data is encrypted and stored securely in your personal Google
-            Drive using the{' '}
-            <span className="font-medium">drive.file</span> scope. Only this app
-            can access these backups. Like WhatsApp, backups run automatically so
-            you never lose your progress when switching devices.
+            {t('backup.info')}
           </p>
         </div>
       </div>

@@ -1,5 +1,6 @@
 import { ClockCircleOutlined, CaretUpOutlined, CaretDownOutlined, MinusOutlined } from '@ant-design/icons'
 import { formatActiveTime } from '../../lib/stats'
+import { t } from '../../lib/i18n'
 
 interface Props {
   todaySeconds: number
@@ -18,11 +19,11 @@ export default function ActiveTimeCard({ todaySeconds, avgSeconds, trend }: Prop
       </div>
       <div className="flex items-baseline gap-1">
         <span className="text-3xl font-bold">{formatActiveTime(todaySeconds)}</span>
-        <span className="text-xs text-gray-400">today</span>
+        <span className="text-xs text-gray-400">{t('stats.today')}</span>
       </div>
       <div className="flex items-center gap-1 mt-1">
         <span className="text-xs text-gray-400">
-          Avg: {formatActiveTime(avgSeconds)}/day
+          {t('stats.avgPerDay', { time: formatActiveTime(avgSeconds) })}
         </span>
         <span className={`text-xs ${trendColor}`}>
           <TrendIcon />

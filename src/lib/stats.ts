@@ -1,3 +1,5 @@
+import { t } from './i18n'
+
 export type Day = { date: string; sessions: number }
 export type ActivityRow = { date: string; activity_type: string; count: number }
 export type ActiveTimeRow = { date: string; total_seconds: number }
@@ -122,8 +124,8 @@ export function getDateRange(range: TimeRange): { dateFrom: string; dateTo: stri
 export function formatActiveTime(totalSeconds: number): string {
   const hours = Math.floor(totalSeconds / 3600)
   const minutes = Math.floor((totalSeconds % 3600) / 60)
-  if (hours > 0) return `${hours}h ${minutes}m`
-  return `${minutes}m`
+  if (hours > 0) return t('stats.hoursMinutes', { h: hours, m: minutes })
+  return t('stats.minutes', { m: minutes })
 }
 
 /**

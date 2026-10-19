@@ -8,6 +8,7 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from 'recharts'
+import { t } from '../../lib/i18n'
 
 interface Props {
   data: { date: string; label: string; avgScore: number; count: number }[]
@@ -18,8 +19,8 @@ export default function ProficiencyChart({ data, overallAvg }: Props) {
   if (data.length === 0) {
     return (
       <div className="bg-white rounded-xl p-4 shadow-sm">
-        <h3 className="text-sm font-medium text-gray-600 mb-3">Chat Proficiency</h3>
-        <p className="text-sm text-gray-400">No evaluations yet</p>
+        <h3 className="text-sm font-medium text-gray-600 mb-3">{t('stats.proficiency')}</h3>
+        <p className="text-sm text-gray-400">{t('stats.noEvaluations')}</p>
       </div>
     )
   }
@@ -27,7 +28,7 @@ export default function ProficiencyChart({ data, overallAvg }: Props) {
   return (
     <div className="bg-white rounded-xl p-4 shadow-sm">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-gray-600">Chat Proficiency</h3>
+        <h3 className="text-sm font-medium text-gray-600">{t('stats.proficiency')}</h3>
         {overallAvg !== null && (
           <span className="text-lg font-bold text-yellow-600">{overallAvg}</span>
         )}
@@ -39,7 +40,7 @@ export default function ProficiencyChart({ data, overallAvg }: Props) {
           <YAxis tick={{ fontSize: 10 }} stroke="#9ca3af" domain={[0, 5]} />
           <Tooltip
             contentStyle={{ fontSize: 12, borderRadius: 8 }}
-            formatter={(value, name) => [value, name === 'avgScore' ? 'Score' : name]}
+            formatter={(value, name) => [value, name === 'avgScore' ? t('stats.score') : name]}
           />
           {overallAvg !== null && (
             <ReferenceLine y={overallAvg} stroke="#fbbf24" strokeDasharray="5 5" strokeWidth={1} />

@@ -70,7 +70,7 @@ Then add the learning aids a no-English beginner needs: translate any chat messa
 
 8. **All LLM prompts go through one helper.** Add `fn explain_instruction(explain_lang: &str) -> &'static str` next to the existing `lang_name` matches (reused rather than adding another match). Every prompt that writes something meant for the learner appends it. Prompts whose output must stay in the target language (the chat reply itself, reading passages, reading questions) don't get it. The Japanese chat partner still speaks Japanese, and only the help text is Indonesian.
 
-9. **Translations are cached.** Translating a chat message or reading passage calls the LLM once. The result is saved (`message_translations`, `reading_sessions.translation`) so tapping again is instant and free.
+9. **Translations are cached.** Translating a chat message or reading passage calls the LLM once. The result is saved (one `translations(kind, ref_id, lang, text)` table for messages and reading passages) so tapping again is instant and free.
 
 ---
 
@@ -126,7 +126,7 @@ Card meaning in English while explanation language is Indonesian → shown as em
 ### Functional requirements
 
 #### FR1: Explanation language setting
-- **FR1.1** The app SHALL store an explanation language `explain_lang` ∈ {`en`, `id`} in `localStorage` and pass it to every Tauri command that produces learner-facing text or content.
+- **FR1.1** The app SHALL store an explanation language `explain_lang` ∈ {`en`, `id`} in `localStorage` and mirror it into the database (`app_settings`), where every Rust command that produces learner-facing text or content reads it.
 - **FR1.2** On first launch, `explain_lang` SHALL default to `id` when `navigator.language` starts with `id`, otherwise `en`. Existing installs (any of `api_host`, `api_key` present) SHALL default to `en`.
 - **FR1.3** Settings SHALL let the user change it ("Bahasa Anda / Your language"). Changing it SHALL show a confirm dialog (UI, AI explanations, chat hints and grammar all switch; card meanings in the old language become empty and are regenerated as cards show), then save and reload the app. The setting is app-wide, with no per-chat or per-screen override.
 - **FR1.4** The target-language picker SHALL hide the target that equals the explanation language (no Indonesian → Indonesian).
@@ -162,9 +162,9 @@ Card meaning in English while explanation language is Indonesian → shown as em
 - **FR5.4** If a response comes back in the wrong language (cheap check: for `id`, a feedback `summary` with no common Indonesian function words and mostly English stopwords), the command SHALL retry once with a stronger instruction before returning.
 
 #### FR6: Chat aids
-- **FR6.1** Each assistant message SHALL have a "Terjemahkan" action that calls new command `llm_translate(text, from_lang, to_lang)` and caches the result in new table `message_translations(message_id, lang, text)`.
+- **FR6.1** Each assistant message SHALL have a "Terjemahkan" action that calls new command `llm_translate(text, from_lang, kind, ref_id)` (target = the explanation language) and caches the result in the `translations` table.
 - **FR6.2** The word-tap popup SHALL show the meaning in `explain_lang` (from the card if it exists in that language, otherwise generated on demand).
-- **FR6.3** "Bantu saya menjawab": the learner types in Indonesian. New command `llm_help_reply(intent, context_messages, level, target_lang, explain_lang)` returns `{ reply, reply_furigana, gloss }`. The reply respects the session's JLPT `promptRule` and selected grammar. The learner must press "Pakai" and may edit before sending. Usage is recorded as activity `help_reply`.
+- **FR6.3** "Bantu saya menjawab": the learner types in Indonesian. New command `llm_help_reply(intent, context_messages, target_lang, level_rule)` returns `{ reply, gloss }` (gloss in the explanation language; furigana added with the existing `add_furigana`). The reply respects the session's JLPT `promptRule`. The learner must press "Pakai" and may edit before sending.
 - **FR6.4** Chat topic presets SHALL include contexts relevant to Indonesian learners: *Perkenalan diri*, *Wawancara kerja*, *Di tempat kerja (pabrik, perawatan lansia / kaigo, restoran)*, *Belanja & konbini*, *Di stasiun*, *Ke dokter*, *Menelepon*. Shown in Indonesian, sent to the LLM in English.
 
 #### FR7: Grammar in Indonesian
@@ -178,7 +178,7 @@ Card meaning in English while explanation language is Indonesian → shown as em
 
 #### FR8: Reading in Indonesian
 - **FR8.1** Reading answer feedback (`evaluate_reading_answer`) SHALL be in `explain_lang`. Questions and expected answers stay in Japanese.
-- **FR8.2** The reading view SHALL offer "Lihat terjemahan" (whole passage, cached in `reading_sessions.translation`), shown only after the learner presses it.
+- **FR8.2** The reading view SHALL offer "Lihat terjemahan" (whole passage, cached in `translations`), shown only after the learner presses it.
 - **FR8.3** At N5/N4 the learner MAY answer comprehension questions in Indonesian (toggle). The evaluator then checks understanding, not Japanese production, and the result is marked so it doesn't count as a production answer in stats.
 
 #### FR9: AI provider setup in Indonesian
@@ -209,11 +209,11 @@ Card meaning in English while explanation language is Indonesian → shown as em
 |---|---|
 | `review_items` | `+ meaning_lang TEXT NOT NULL DEFAULT 'en'` |
 | `grammar_items` | `+ explain_lang TEXT NOT NULL DEFAULT 'en'`, `+ ai_translated INTEGER NOT NULL DEFAULT 0` |
-| `message_translations` | new: `message_id TEXT, lang TEXT, text TEXT, created_at`, PK `(message_id, lang)` |
-| `reading_sessions` | `+ translation TEXT` |
-| `user_activity` | new activity types: `translate`, `help_reply` (no schema change) |
+| `app_settings` | new: `key TEXT PK, value TEXT` (holds `explain_lang`) |
+| `translations` | new: `kind TEXT, ref_id INTEGER, lang TEXT, text TEXT`, PK `(kind, ref_id, lang)`; kind = `message` or `reading` |
+| `message_grammar_analysis`, `user_message_feedback` | `+ lang TEXT` (cached AI output only reused in the same language) |
 
-`localStorage`: new `explain_lang`, `romaji_enabled`, `chat_id_hints`, `romaji_input`, `onboarding_done`.
+`localStorage`: new `explain_lang`, `romaji_enabled`, `chat_hints`, `romaji_input`, `reading_answer_native`, `onboarding_done`.
 
 ## Commands
 
@@ -225,7 +225,7 @@ Card meaning in English while explanation language is Indonesian → shown as em
 | `analyze_grammar`, feedback, `evaluate_reading_answer` | `+ explain_lang` |
 | `db_get_grammar_*` | `+ explain_lang`, return `fallback` flag |
 | `llm_translate` | **new**: `(text, from_lang, to_lang, message_id?)` → `String`, cached |
-| `llm_help_reply` | **new**: `(intent, context_messages, level, target_lang, explain_lang)` → `{ reply, reply_furigana, gloss }` |
+| `llm_help_reply` | **new**: `(intent, context_messages, target_lang, level_rule)` → `{ reply, gloss }` |
 | `db_translate_grammar_item` | **new**: copy a grammar row into `explain_lang` via LLM |
 
 New TS types in `src/lib/types.ts`: `GradeReason`, `AppError`, `HelpReply`, `ExplainLang`.

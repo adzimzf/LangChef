@@ -8,6 +8,7 @@ import {
 } from '@ant-design/icons'
 import type { ReviewItem } from '../lib/types'
 import { parseDetailJson } from '../lib/types'
+import { t, lang as explainLang, errorText, languageName } from '../lib/i18n'
 
 interface EditWordFormProps {
   item: ReviewItem
@@ -16,7 +17,7 @@ interface EditWordFormProps {
   title?: string
 }
 
-export default function EditWordForm({ item, onSave, onCancel, title = 'Edit Word' }: EditWordFormProps) {
+export default function EditWordForm({ item, onSave, onCancel, title = t('word.editTitle') }: EditWordFormProps) {
   const [editContent, setEditContent] = useState('')
   const [editDetail, setEditDetail] = useState('')
   const [generatingDetail, setGeneratingDetail] = useState(false)
@@ -57,7 +58,7 @@ export default function EditWordForm({ item, onSave, onCancel, title = 'Edit Wor
     const apiKey = localStorage.getItem('api_key') || ''
     const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
     if (!apiHost || !apiKey) {
-      alert('Please configure your API settings first (Settings page).')
+      alert(t('common.apiMissing'))
       return
     }
     setGeneratingDetail(true)
@@ -76,7 +77,7 @@ export default function EditWordForm({ item, onSave, onCancel, title = 'Edit Wor
       setEditExample(parsed?.example || '')
       setEditExampleMeaning(parsed?.example_meaning || '')
     } catch (e) {
-      alert(`Failed to generate: ${e}`)
+      alert(t('review.generationFailed', { error: errorText(e) }))
     }
     setGeneratingDetail(false)
   }
@@ -86,7 +87,7 @@ export default function EditWordForm({ item, onSave, onCancel, title = 'Edit Wor
     const apiKey = localStorage.getItem('api_key') || ''
     const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
     if (!apiHost || !apiKey) {
-      alert('Please configure your API settings first (Settings page).')
+      alert(t('common.apiMissing'))
       return
     }
     setGeneratingMnemonic(true)
@@ -101,7 +102,7 @@ export default function EditWordForm({ item, onSave, onCancel, title = 'Edit Wor
       })
       setEditMnemonic(result)
     } catch (e) {
-      alert(`Failed to generate mnemonic: ${e}`)
+      alert(t('review.mnemonicFailed', { error: errorText(e) }))
     }
     setGeneratingMnemonic(false)
   }
@@ -115,9 +116,8 @@ export default function EditWordForm({ item, onSave, onCancel, title = 'Edit Wor
         detail: detailValue,
         mnemonic: editMnemonic,
       })
-    } catch (e: any) {
-      const msg = typeof e === 'string' ? e : e?.message || String(e)
-      setSaveError(msg)
+    } catch (e) {
+      setSaveError(errorText(e))
     }
   }
 
@@ -128,6 +128,7 @@ export default function EditWordForm({ item, onSave, onCancel, title = 'Edit Wor
       <div className="shrink-0 sticky top-0 z-10 bg-gray-50 flex items-center gap-3 px-4 pt-4 pb-2">
         <button
           onClick={onCancel}
+          aria-label={t('common.back')}
           className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
         >
           <ArrowLeftOutlined />
@@ -137,19 +138,19 @@ export default function EditWordForm({ item, onSave, onCancel, title = 'Edit Wor
 
       <div className="space-y-4 flex-1 overflow-y-auto px-4">
         <div>
-          <label className="text-sm text-gray-500 mb-1 block">Content</label>
+          <label className="text-sm text-gray-500 mb-1 block">{t('word.content')}</label>
           <input
             type="text"
             value={editContent}
             onChange={(e) => setEditContent(e.target.value)}
             className="w-full px-3 py-2 text-sm border border-gray-200 rounded-xl outline-none focus:border-blue-400"
-            placeholder="Word or phrase"
+            placeholder={t('word.contentPlaceholder')}
           />
         </div>
 
         <div>
           <div className="flex items-center justify-between mb-1">
-            <label className="text-sm text-gray-500">Detail</label>
+            <label className="text-sm text-gray-500">{t('word.detail')}</label>
             {!hasDetail && (
               <button
                 onClick={generateDetail}
@@ -157,7 +158,7 @@ export default function EditWordForm({ item, onSave, onCancel, title = 'Edit Wor
                 className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-blue-500 text-white text-xs font-medium hover:bg-blue-600 transition-colors disabled:opacity-50"
               >
                 <RobotOutlined />
-                {generatingDetail ? 'Generating...' : 'Generate with AI'}
+                {generatingDetail ? t('common.generating') : t('review.generateAi')}
               </button>
             )}
           </div>
@@ -165,72 +166,72 @@ export default function EditWordForm({ item, onSave, onCancel, title = 'Edit Wor
           {hasDetail ? (
             <div className="space-y-3 bg-gray-50 rounded-xl p-3">
               <div>
-                <label className="text-xs text-gray-400 block mb-0.5">Reading</label>
+                <label className="text-xs text-gray-400 block mb-0.5">{t('card.reading')}</label>
                 <input
                   type="text"
                   value={editReading}
                   onChange={(e) => setEditReading(e.target.value)}
                   className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white"
-                  placeholder="Pronunciation in IPA or romaji"
+                  placeholder={t('word.readingPlaceholder')}
                 />
               </div>
               <div>
-                <label className="text-xs text-gray-400 block mb-0.5">Meaning</label>
+                <label className="text-xs text-gray-400 block mb-0.5">{t('word.meaningIn', { language: languageName(explainLang) })}</label>
                 <input
                   type="text"
                   value={editMeaning}
                   onChange={(e) => setEditMeaning(e.target.value)}
                   className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white"
-                  placeholder="English translation"
+                  placeholder={t('word.meaningPlaceholder', { language: languageName(explainLang) })}
                 />
               </div>
               <div>
-                <label className="text-xs text-gray-400 block mb-0.5">Part of speech</label>
+                <label className="text-xs text-gray-400 block mb-0.5">{t('card.partOfSpeech')}</label>
                 <input
                   type="text"
                   value={editPartOfSpeech}
                   onChange={(e) => setEditPartOfSpeech(e.target.value)}
                   className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white"
-                  placeholder="noun / verb / adjective / etc."
+                  placeholder={t('word.posPlaceholder')}
                 />
               </div>
               <div>
-                <label className="text-xs text-gray-400 block mb-0.5">Example sentence</label>
+                <label className="text-xs text-gray-400 block mb-0.5">{t('card.example')}</label>
                 <textarea
                   value={editExample}
                   onChange={(e) => setEditExample(e.target.value)}
                   className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white resize-none"
-                  placeholder="A natural example sentence"
+                  placeholder={t('word.examplePlaceholder')}
                   rows={2}
                 />
               </div>
               <div>
-                <label className="text-xs text-gray-400 block mb-0.5">Example meaning</label>
+                <label className="text-xs text-gray-400 block mb-0.5">{t('card.exampleMeaning')}</label>
                 <textarea
                   value={editExampleMeaning}
                   onChange={(e) => setEditExampleMeaning(e.target.value)}
                   className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white resize-none"
-                  placeholder="English translation of the example"
+                  placeholder={t('word.exampleMeaningPlaceholder', { language: languageName(explainLang) })}
                   rows={2}
                 />
               </div>
               <div>
                 <div className="flex items-center justify-between mb-0.5">
-                  <label className="text-xs text-gray-400">Mnemonic</label>
+                  <label className="text-xs text-gray-400">{t('card.mnemonic')}</label>
                   <button
                     onClick={generateMnemonic}
                     disabled={generatingMnemonic}
                     className="flex items-center gap-1 px-2 py-0.5 rounded-lg bg-amber-50 text-amber-600 text-xs font-medium hover:bg-amber-100 transition-colors disabled:opacity-50"
                   >
                     <BulbOutlined />
-                    {generatingMnemonic ? 'Creating...' : 'Generate'}
+                    {generatingMnemonic ? t('card.creating') : t('common.generate')}
                   </button>
                 </div>
                 <textarea
                   value={editMnemonic}
                   onChange={(e) => setEditMnemonic(e.target.value)}
                   className="w-full px-2.5 py-1.5 text-sm border border-gray-200 rounded-lg outline-none focus:border-blue-400 bg-white resize-none"
-                  placeholder="A memory aid connecting to words you already know"
+                  placeholder={t('word.mnemonicPlaceholder')}
                   rows={2}
                 />
               </div>
@@ -240,13 +241,13 @@ export default function EditWordForm({ item, onSave, onCancel, title = 'Edit Wor
                 className="flex items-center gap-1 px-2.5 py-1.5 rounded-lg bg-gray-200 text-gray-600 text-xs font-medium hover:bg-gray-300 transition-colors disabled:opacity-50"
               >
                 <RobotOutlined />
-                {generatingDetail ? 'Regenerating...' : 'Regenerate with AI'}
+                {generatingDetail ? t('card.regenerating') : t('word.regenerateAi')}
               </button>
             </div>
           ) : (
             <div className="bg-gray-50 rounded-xl p-6 text-center">
-              <p className="text-sm text-gray-400 mb-1">No detail yet</p>
-              <p className="text-xs text-gray-300">Click "Generate with AI" above or fill in the content and save first.</p>
+              <p className="text-sm text-gray-400 mb-1">{t('word.noDetail')}</p>
+              <p className="text-xs text-gray-300">{t('word.noDetailHint')}</p>
             </div>
           )}
         </div>
@@ -262,7 +263,7 @@ export default function EditWordForm({ item, onSave, onCancel, title = 'Edit Wor
           onClick={handleSave}
           className="w-full py-3 rounded-xl bg-blue-500 text-white font-medium hover:bg-blue-600 active:bg-blue-700 transition-colors flex items-center justify-center gap-2"
         >
-          <CheckOutlined /> Save
+          <CheckOutlined /> {t('common.save')}
         </button>
       </div>
     </div>

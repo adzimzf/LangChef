@@ -1,7 +1,7 @@
-use crate::chat::{build_url, ChatMessage, ChatRequest, ChatResponse};
+use crate::chat::{complete_explained, complete_prompt, json_part};
+use crate::locale::{app_error, explain_lang, lang_name};
 use crate::db::open_db;
 use crate::furigana;
-use reqwest::Client;
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -161,7 +161,7 @@ async fn llm_generate_reading_text(
     language: &str, level: &str,
     target_words: &[String],
 ) -> Result<(String, String), String> {
-    let lang_name = match language { "ja" => "Japanese", "id" => "Indonesian", l => l };
+    let lang_name = lang_name(language);
     let (min, max) = level_text_char_range(level);
     let furigana_note = if language == "ja" {
         format!("Add furigana for kanji above {level} using {{kanji|reading}} format (e.g. {{食べる|たべる}}).\n")
@@ -178,31 +178,13 @@ async fn llm_generate_reading_text(
         {vocab_note}\
         Return ONLY valid JSON (no markdown fences): {{\"title\": \"...\", \"body\": \"...\"}}",
     );
-    let url = build_url(api_host, "chat/completions");
-    let client = Client::new();
-    let req = ChatRequest {
-        model,
-        messages: &[ChatMessage { role: "user".to_string(), content: prompt }],
-    };
-    let resp = client.post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&req).send().await
-        .map_err(|e| format!("Request failed: {}", e))?;
-    if !resp.status().is_success() {
-        let s = resp.status();
-        let b = resp.text().await.unwrap_or_default();
-        return Err(format!("API error: {} — {}", s, b.trim()));
-    }
-    let parsed: ChatResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
-    let raw = parsed.choices.first().map(|c| c.message.content.clone()).unwrap_or_default();
-    let cleaned = raw.trim()
-        .trim_start_matches("```json").trim_start_matches("```")
-        .trim_end_matches("```").trim();
+    let raw = complete_prompt(api_host, api_key, model, prompt).await?;
+    let cleaned = json_part(&raw);
     let val: serde_json::Value = serde_json::from_str(cleaned)
-        .map_err(|_| format!("Cannot parse LLM JSON: {}", cleaned))?;
-    let title = val["title"].as_str().unwrap_or("Reading Passage").to_string();
+        .map_err(|_| app_error("api_bad_response", cleaned))?;
+    let title = val["title"].as_str().unwrap_or("").to_string();
     let body = val["body"].as_str().unwrap_or("").to_string();
-    if body.is_empty() { return Err("Empty body from LLM".to_string()); }
+    if body.is_empty() { return Err(app_error("api_bad_response", "empty passage")); }
     Ok((title, body))
 }
 
@@ -225,7 +207,7 @@ pub async fn fetch_reading_text(
         }
         _ => {
             let (t, b) = llm_generate_reading_text(&api_host, &api_key, &model, &language, &level, &target_words).await?;
-            (t, b, "AI Generated".to_string())
+            (t, b, "ai".to_string())
         }
     };
     let plain_body = truncate_at_sentence_boundary(&raw_body, max);
@@ -245,7 +227,7 @@ pub async fn generate_reading_questions(
     api_host: String, api_key: String, model: String,
     plain_body: String, language: String, level: String,
 ) -> Result<Vec<ReadingQuestion>, String> {
-    let lang_name = match language.as_str() { "ja" => "Japanese", "id" => "Indonesian", l => l };
+    let lang_name = lang_name(&language);
     let n = reading_question_count(&level);
     let prompt = format!(
         "You are a {lang_name} teacher. Generate {n} comprehension questions for this {level}-level passage.\n\
@@ -253,70 +235,49 @@ pub async fn generate_reading_questions(
         Return ONLY a JSON array (no markdown): [{{\"question\": \"...\", \"answer_hint\": \"...\"}}]\n\n\
         Passage:\n{plain_body}",
     );
-    let url = build_url(&api_host, "chat/completions");
-    let client = Client::new();
-    let req = ChatRequest {
-        model: &model,
-        messages: &[ChatMessage { role: "user".to_string(), content: prompt }],
-    };
-    let resp = client.post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&req).send().await
-        .map_err(|e| format!("Request failed: {}", e))?;
-    if !resp.status().is_success() {
-        let s = resp.status();
-        let b = resp.text().await.unwrap_or_default();
-        return Err(format!("API error: {} — {}", s, b.trim()));
-    }
-    let parsed: ChatResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
-    let raw = parsed.choices.first().map(|c| c.message.content.clone()).unwrap_or_default();
-    let cleaned = raw.trim()
-        .trim_start_matches("```json").trim_start_matches("```")
-        .trim_end_matches("```").trim();
+    let raw = complete_prompt(&api_host, &api_key, &model, prompt).await?;
+    let cleaned = json_part(&raw);
     serde_json::from_str::<Vec<ReadingQuestion>>(cleaned)
-        .map_err(|_| format!("Cannot parse questions JSON: {}", cleaned))
+        .map_err(|_| app_error("api_bad_response", cleaned))
 }
 
+/// Checks a comprehension answer. Feedback is in the learner's explanation language. With
+/// `answer_in_explain` (beginners), the answer itself may be in that language: only understanding is checked.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn evaluate_reading_answer(
+    app: tauri::AppHandle,
     api_host: String, api_key: String, model: String,
     question: String, answer_hint: String,
     user_answer: String, plain_body: String, language: String,
+    answer_in_explain: Option<bool>,
 ) -> Result<AnswerEvaluation, String> {
-    let lang_name = match language.as_str() { "ja" => "Japanese", "id" => "Indonesian", l => l };
+    let explain = explain_lang(&crate::db::open_db(&app)?);
+    let explain_name = lang_name(&explain);
+    let lang_name = lang_name(&language);
+    let answer_rule = if answer_in_explain.unwrap_or(false) {
+        format!("The student may answer in {explain_name} or {lang_name}. Judge only whether they understood the text, not their {lang_name}.\n")
+    } else {
+        format!("The student should answer in {lang_name}.\n")
+    };
     let prompt = format!(
         "You are a {lang_name} teacher evaluating a reading comprehension answer.\n\n\
         Passage:\n{plain_body}\n\n\
         Question: {question}\n\
         Expected (hint only, not exact match required): {answer_hint}\n\
-        Student answer: {user_answer}\n\n\
+        Student answer: {user_answer}\n\
+        {answer_rule}\n\
         Classify as:\n\
         - \"correct\": factually right and complete enough\n\
         - \"partial\": right idea but incomplete or slightly off\n\
         - \"incorrect\": wrong or misunderstands the text\n\n\
-        Return ONLY JSON (no markdown): {{\"result\": \"correct\"|\"partial\"|\"incorrect\", \"feedback\": \"1-2 sentences in {lang_name}\"}}",
+        Return ONLY JSON (no markdown): {{\"result\": \"correct\"|\"partial\"|\"incorrect\", \"feedback\": \"1-2 sentences in {explain_name}\"}}",
     );
-    let url = build_url(&api_host, "chat/completions");
-    let client = Client::new();
-    let req = ChatRequest {
-        model: &model,
-        messages: &[ChatMessage { role: "user".to_string(), content: prompt }],
+    let feedback_of = |raw: &str| {
+        serde_json::from_str::<AnswerEvaluation>(json_part(raw)).map(|e| e.feedback).unwrap_or_default()
     };
-    let resp = client.post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&req).send().await
-        .map_err(|e| format!("Request failed: {}", e))?;
-    if !resp.status().is_success() {
-        let s = resp.status();
-        let b = resp.text().await.unwrap_or_default();
-        return Err(format!("API error: {} — {}", s, b.trim()));
-    }
-    let parsed: ChatResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
-    let raw = parsed.choices.first().map(|c| c.message.content.clone()).unwrap_or_default();
-    let cleaned = raw.trim()
-        .trim_start_matches("```json").trim_start_matches("```")
-        .trim_end_matches("```").trim();
-    Ok(serde_json::from_str::<AnswerEvaluation>(cleaned).unwrap_or(AnswerEvaluation {
+    let raw = complete_explained(&api_host, &api_key, &model, &prompt, &explain, feedback_of).await?;
+    Ok(serde_json::from_str::<AnswerEvaluation>(json_part(&raw)).unwrap_or(AnswerEvaluation {
         result: "incorrect".to_string(),
         feedback: raw.trim().to_string(),
     }))

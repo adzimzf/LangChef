@@ -1,5 +1,6 @@
 import { Segmented } from 'antd'
 import type { TimeRange } from '../../lib/stats'
+import { t } from '../../lib/i18n'
 
 interface Props {
   value: TimeRange
@@ -12,9 +13,9 @@ export default function TimeRangeFilter({ value, onChange }: Props) {
       value={value}
       onChange={(val) => onChange(val as TimeRange)}
       options={[
-        { label: 'Weekly', value: 'weekly' },
-        { label: 'Monthly', value: 'monthly' },
-        { label: 'Yearly', value: 'yearly' },
+        { label: t('stats.weekly'), value: 'weekly' },
+        { label: t('stats.monthly'), value: 'monthly' },
+        { label: t('stats.yearly'), value: 'yearly' },
       ]}
       block
     />
