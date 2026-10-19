@@ -154,6 +154,16 @@ pub fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
             current_q INTEGER NOT NULL DEFAULT 0,
             created_at TEXT NOT NULL DEFAULT (date('now'))
         );
+        CREATE TABLE IF NOT EXISTS sentence_breakdowns(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            language TEXT NOT NULL,
+            explain_lang TEXT NOT NULL,
+            sentence TEXT NOT NULL,
+            data TEXT NOT NULL,
+            checked INTEGER,
+            created_at TEXT NOT NULL DEFAULT (datetime('now')),
+            UNIQUE (language, explain_lang, sentence)
+        );
         "
     ).map_err(|e| e.to_string())?;
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN session_id TEXT", []);

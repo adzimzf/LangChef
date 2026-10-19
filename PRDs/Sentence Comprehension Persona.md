@@ -59,8 +59,10 @@ Raka knows 友達, 昨日, 教える, くれる, 駅前, ラーメン屋, 行く
 
 ## How it will be — Raka's journey with the feature
 
-1. **Stuck in chat.** The tutor's reply contains the ramen sentence. Raka long-presses it and taps **Uraikan kalimat** ("Break down the sentence"), next to Translate and Analyze grammar.
-2. **Guess first (optional).** A quick question before revealing the answer: *"Siapa yang pergi ke kedai ramen?"* — Teman / Saya / Kedai. Raka picks *Teman*; wrong. That miss is exactly the misread the breakdown targets.
+Steps 1–4 are built (`PRDs/Sentence Breakdown.md`); 5–7 are the next steps.
+
+1. **Stuck on a sentence.** Raka copies the ramen sentence from a chat or an article, opens the **Urai** tab and pastes it.
+2. **Pick the sentence.** A pasted paragraph is split into sentences; Raka taps the confusing one.
 3. **The breakdown.** The sentence is split into chunks with their roles:
 
    ```

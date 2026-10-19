@@ -15,6 +15,7 @@ mod stats;
 mod grammar;
 mod feedback;
 mod reading;
+mod breakdown;
 mod locale;
 mod romaji;
 
@@ -245,6 +246,13 @@ pub fn run() {
             reading::db_get_reading_session,
             reading::db_get_active_reading_session,
             reading::db_update_reading_session,
+            // Sentence breakdown
+            breakdown::llm_sentence_breakdown,
+            breakdown::breakdown_split_sentences,
+            breakdown::db_list_sentence_breakdowns,
+            breakdown::db_get_sentence_breakdown,
+            breakdown::db_check_breakdown_answer,
+            breakdown::db_delete_sentence_breakdown,
             // Google Auth
             google_auth::google_sign_in,
             google_auth::google_sign_out,

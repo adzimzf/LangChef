@@ -208,3 +208,44 @@ export function parseDetailJson(detail: string): {
     return null
   }
 }
+/** Chunk roles of a sentence breakdown (see src-tauri/src/breakdown.rs) */
+export type BreakdownRole =
+  | 'topic' | 'subject' | 'object' | 'modifier' | 'purpose' | 'reason' | 'condition'
+  | 'time' | 'place' | 'connector' | 'predicate' | 'other'
+
+export type BreakdownChunk = { text: string; role: BreakdownRole; label: string; meaning: string; implied: boolean }
+
+export type SentenceBreakdown = {
+  id: number
+  sentence: string
+  language: string
+  translation: string
+  core: string
+  core_note: string
+  tip: string
+  chunks: BreakdownChunk[]
+  /** The chunks spell out the sentence, so it can be shown colored by chunk */
+  chunks_match: boolean
+  /** Nesting from the main clause inwards */
+  layers: { text: string; meaning: string }[]
+  order: {
+    target: { text: string; role: BreakdownRole }[]
+    native: { text: string; role: BreakdownRole }[]
+    note: string
+  }
+  notes: { text: string; note: string }[]
+  gloss: { text: string; reading: string; meaning: string }[]
+  structures: string[]
+  check: { question: string; options: string[] } | null
+  checked: boolean | null
+}
+
+export type BreakdownSummary = {
+  id: number
+  sentence: string
+  structures: string[]
+  checked: boolean | null
+  created_at: string
+}
+
+export type BreakdownCheckResult = { correct: boolean; answer: number; explanation: string }
