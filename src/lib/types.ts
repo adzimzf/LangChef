@@ -154,6 +154,23 @@ export type SavedAnswer = {
   user_answer: string
   result: string
   retries: number
+  feedback?: string
+}
+
+export type AnswerStats = {
+  answered: number
+  correct: number
+  first_try: number
+  partial: number
+  retries: number
+}
+
+export type ReadingOverview = {
+  finished: number
+  in_progress: number
+  questions_answered: number
+  first_try_pct: number | null
+  resume: ReadingSessionSummary | null
 }
 
 export type ReadingSessionSummary = {
@@ -166,6 +183,7 @@ export type ReadingSessionSummary = {
   current_q: number
   total_questions: number
   created_at: string
+  stats: AnswerStats
 }
 
 export type ReadingSession = {
@@ -181,6 +199,8 @@ export type ReadingSession = {
   phase: string
   current_q: number
   created_at: string
+  elapsed_seconds: number
+  stats: AnswerStats
 }
 
 export type GrammarItem = {

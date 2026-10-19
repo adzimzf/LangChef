@@ -1,5 +1,6 @@
-import { useMemo } from 'react'
-import { parseFurigana } from '../../lib/furigana'
+import { useEffect, useMemo, useState } from 'react'
+import { invoke } from '@tauri-apps/api/core'
+import { parseFurigana, renderFurigana, sliceAnnotated, stripFurigana } from '../../lib/furigana'
 import { splitTappable, isWordSegment } from '../../lib/unknown'
 import type { ReadingText as ReadingTextType, ReviewItem } from '../../lib/types'
 
@@ -14,62 +15,110 @@ const BG_TO_HEX: Record<string, string> = {
   'bg-emerald-500': '#10b981',
 }
 
+export type TextSize = 'sm' | 'md' | 'lg'
+
+const SIZE_CLASS: Record<TextSize, string> = {
+  sm: 'text-[15px] leading-[1.9]',
+  md: 'text-[18px] leading-[2.05]',
+  lg: 'text-[21px] leading-[2.15]',
+}
+
+type Token = { surface: string; base_form: string }
+
 interface Props {
   text: ReadingTextType
   reviewItems: ReviewItem[]
   showFurigana: boolean
+  size?: TextSize
+  /** Tapping a word: the word as written and its dictionary form. */
+  onWordTap?: (word: string, base: string) => void
 }
 
-export default function ReadingText({ text, reviewItems, showFurigana }: Props) {
+/** The passage, one paragraph per line, every word tappable; words in the deck are colored by difficulty. */
+export default function ReadingText({ text, reviewItems, showFurigana, size = 'md', onWordTap }: Props) {
+  const paragraphs = useMemo(() => text.body.split(/\n+/).map((p) => p.trim()).filter(Boolean), [text.body])
+  // Lindera tokens per paragraph (Japanese); null until loaded or when the tokenizer is not ready.
+  const [tokens, setTokens] = useState<Token[][] | null>(null)
+
+  useEffect(() => {
+    setTokens(null)
+    if (text.language !== 'ja') return
+    let cancelled = false
+    Promise.all(paragraphs.map((p) => invoke<Token[]>('tokenize_japanese', { text: stripFurigana(p) })))
+      .then((all) => {
+        // Only usable when the tokens add up to the paragraph exactly.
+        const ok = all.every((toks, i) => toks.map((t) => t.surface).join('') === stripFurigana(paragraphs[i]))
+        if (!cancelled && ok) setTokens(all)
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [paragraphs, text.language])
+
   const reviewMap = useMemo(() => {
     const map = new Map<string, ReviewItem>()
     for (const item of reviewItems) {
-      if (!item.language || item.language === text.language) {
-        map.set(item.content, item)
-        map.set(item.content.toLowerCase(), item)
-      }
+      if (!item.language || item.language === text.language) map.set(item.content.toLowerCase(), item)
     }
     return map
   }, [reviewItems, text.language])
 
-  function colorForWord(word: string): string | undefined {
-    const item = reviewMap.get(word) ?? reviewMap.get(word.toLowerCase())
-    if (!item) return undefined
-    return BG_TO_HEX[item.difficulty_bg_class]
+  function colorFor(...words: string[]): string | undefined {
+    for (const w of words) {
+      const item = reviewMap.get(w.toLowerCase())
+      if (item) return BG_TO_HEX[item.difficulty_bg_class]
+    }
+    return undefined
   }
 
-  const segments = parseFurigana(text.body)
-  const locale = text.language === 'ja' ? 'ja' : 'id'
+  function word(key: string | number, content: React.ReactNode, surface: string, base: string) {
+    const color = colorFor(base, surface)
+    return (
+      <span
+        key={key}
+        role={onWordTap ? 'button' : undefined}
+        onClick={onWordTap ? () => onWordTap(surface, base) : undefined}
+        className={`rounded-md transition-colors ${onWordTap ? 'cursor-pointer hover:bg-blue-50 active:bg-amber-100' : ''}`}
+        style={color ? { color, fontWeight: 600, textDecoration: 'underline', textDecorationColor: `${color}55`, textUnderlineOffset: 4 } : undefined}
+      >
+        {content}
+      </span>
+    )
+  }
+
+  function renderParagraph(p: string, pi: number) {
+    const toks = tokens?.[pi]
+    if (toks) {
+      let offset = 0
+      return toks.map((tok, i) => {
+        const slice = sliceAnnotated(p, offset, tok.surface.length)
+        offset += tok.surface.length
+        const content = renderFurigana(slice, showFurigana)
+        return isWordSegment(tok.surface)
+          ? word(i, content, tok.surface, tok.base_form || tok.surface)
+          : <span key={i}>{content}</span>
+      })
+    }
+    const locale = text.language === 'ja' ? 'ja' : 'id'
+    return parseFurigana(p).map((seg, si) => {
+      if (seg.reading !== null) {
+        const ruby = (
+          <ruby className={showFurigana ? 'furigana-show' : 'furigana-hide'}>
+            {seg.text}<rp>(</rp><rt>{seg.reading}</rt><rp>)</rp>
+          </ruby>
+        )
+        return word(si, ruby, seg.text, seg.text)
+      }
+      return (
+        <span key={si}>
+          {splitTappable(seg.text, locale).map((w, wi) => (isWordSegment(w) ? word(wi, w, w, w) : <span key={wi}>{w}</span>))}
+        </span>
+      )
+    })
+  }
 
   return (
-    <div className="text-[17px] leading-[2] tracking-wide">
-      {segments.map((seg, si) => {
-        if (seg.reading !== null) {
-          const color = colorForWord(seg.text)
-          return (
-            <ruby
-              key={si}
-              className={showFurigana ? 'furigana-show' : 'furigana-hide'}
-              style={color ? { color, fontWeight: 600 } : undefined}
-            >
-              {seg.text}
-              <rp>(</rp><rt>{seg.reading}</rt><rp>)</rp>
-            </ruby>
-          )
-        }
-        const words = splitTappable(seg.text, locale)
-        return (
-          <span key={si}>
-            {words.map((word, wi) => {
-              if (!isWordSegment(word)) return <span key={wi}>{word}</span>
-              const color = colorForWord(word)
-              return color
-                ? <span key={wi} style={{ color, fontWeight: 600 }}>{word}</span>
-                : <span key={wi}>{word}</span>
-            })}
-          </span>
-        )
-      })}
+    <div className={`${SIZE_CLASS[size]} tracking-wide text-gray-800 space-y-4`}>
+      {paragraphs.map((p, pi) => <p key={pi} className="m-0">{renderParagraph(p, pi)}</p>)}
     </div>
   )
 }

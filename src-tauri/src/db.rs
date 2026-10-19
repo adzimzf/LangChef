@@ -185,6 +185,8 @@ pub fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN lapse_count INTEGER DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN mnemonic TEXT", []);
     let _ = conn.execute("ALTER TABLE study_card ADD COLUMN task TEXT", []);
+    // Seconds spent on a reading article, from opening it to the last question.
+    let _ = conn.execute("ALTER TABLE reading_sessions ADD COLUMN elapsed_seconds INTEGER NOT NULL DEFAULT 0", []);
     // AI-generated back of a card waiting for the user to approve it in review.
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN draft_detail TEXT", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN fsrs_stability REAL", []);
