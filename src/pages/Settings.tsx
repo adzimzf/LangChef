@@ -12,6 +12,8 @@ import {
   BookOutlined,
   MessageOutlined,
   CloseOutlined,
+  DownOutlined,
+  UpOutlined,
 } from '@ant-design/icons'
 import GoogleDriveBackup from '../components/GoogleDriveBackup'
 import ProviderGuide from '../components/ProviderGuide'
@@ -49,6 +51,7 @@ export default function Settings() {
   const [romaji, setRomaji] = useState(() => readFlag(ROMAJI_KEY))
   const [romajiInput, setRomajiInput] = useState(() => readFlag(ROMAJI_INPUT_KEY))
   const [kanaMessage, setKanaMessage] = useState('')
+  const [aidsOpen, setAidsOpen] = useState(false)
 
   // Track the last-saved values to detect changes and enable cancel
   const savedValues = useRef({ apiHost: '', apiKey: '', model: '', vocabModel: '', maxReviews: String(MAX_REVIEWS_DEFAULT), maxNewCards: String(MAX_NEW_CARDS_DEFAULT), maxDifficultWords: String(MAX_DIFFICULT_WORDS_DEFAULT), maxKnownWords: String(MAX_KNOWN_WORDS_DEFAULT), chatCustomPrompt: '' })
@@ -211,72 +214,6 @@ export default function Settings() {
     <div className={`space-y-5 h-full overflow-y-auto ${dirty ? 'pb-28' : ''}`}>
       <div className="sticky top-0 z-10 pt-4 pb-2 bg-gray-50">
         <h2 className="text-lg font-semibold">{t('settings.title')}</h2>
-      </div>
-
-      {/* Explanation language: one switch for the whole app */}
-      <div className="space-y-3">
-        <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wide px-1">{t('settings.yourLanguage')}</h3>
-        <div className="bg-white rounded-xl shadow-sm overflow-hidden">
-          {(['id', 'en'] as ExplainLang[]).map((code) => (
-            <button
-              key={code}
-              type="button"
-              aria-pressed={lang === code}
-              onClick={() => code !== lang && setConfirmLang(code)}
-              className="w-full flex items-center justify-between px-4 py-3 border-b border-gray-50 last:border-b-0 text-left hover:bg-gray-50"
-            >
-              <span className={`text-[15px] ${lang === code ? 'font-semibold' : ''}`}>{code === 'id' ? 'Bahasa Indonesia' : 'English'}</span>
-              {lang === code && <CheckCircleOutlined className="text-blue-500" />}
-            </button>
-          ))}
-        </div>
-        <p className="text-xs text-gray-500 px-1 leading-relaxed">
-          {t('settings.languageHint')}{' '}
-          {lang !== 'en' && (
-            <>
-              {t('settings.aiTranslationNote')}{' '}
-              <a href={TRANSLATION_REPORT_URL} target="_blank" rel="noreferrer" className="text-blue-600">{t('common.reportTranslation')}</a>
-            </>
-          )}
-        </p>
-      </div>
-
-      {/* Learning aids */}
-      <div className="space-y-3">
-        <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wide px-1">{t('settings.learningAids')}</h3>
-        <div className="bg-white rounded-xl shadow-sm overflow-hidden">
-          {[
-            { key: CHAT_HINTS_KEY, value: chatHints, set: setChatHints, label: t('settings.chatHints'), desc: t('settings.chatHintsDesc') },
-            { key: ROMAJI_KEY, value: romaji, set: setRomaji, label: t('settings.romaji'), desc: t('settings.romajiDesc') },
-            { key: ROMAJI_INPUT_KEY, value: romajiInput, set: setRomajiInput, label: t('settings.romajiInput'), desc: t('settings.romajiInputDesc') },
-          ].map((row) => (
-            <button
-              key={row.key}
-              type="button"
-              role="switch"
-              aria-checked={row.value}
-              onClick={() => toggle(row.key, !row.value, row.set)}
-              className="w-full flex items-center justify-between gap-3 px-4 py-3 border-b border-gray-50 last:border-b-0 text-left"
-            >
-              <span>
-                <span className="block text-[15px] font-medium">{row.label}</span>
-                <span className="block text-xs text-gray-400">{row.desc}</span>
-              </span>
-              <span className={`shrink-0 w-11 h-6 rounded-full p-0.5 flex transition-colors ${row.value ? 'bg-blue-500 justify-end' : 'bg-gray-300 justify-start'}`}>
-                <span className="w-5 h-5 rounded-full bg-white shadow" />
-              </span>
-            </button>
-          ))}
-          <div className="px-4 py-3 space-y-2">
-            <div className="text-[15px] font-medium">{t('settings.kanaStarter')}</div>
-            <div className="text-xs text-gray-400">{t('settings.kanaStarterDesc')}</div>
-            <div className="flex gap-2">
-              <button type="button" onClick={() => seedKana('hiragana')} className="flex-1 py-2 rounded-lg bg-gray-100 text-sm font-medium hover:bg-gray-200">{t('settings.addHiragana')}</button>
-              <button type="button" onClick={() => seedKana('katakana')} className="flex-1 py-2 rounded-lg bg-gray-100 text-sm font-medium hover:bg-gray-200">{t('settings.addKatakana')}</button>
-            </div>
-            {kanaMessage && <div className="text-xs text-green-700">{kanaMessage}</div>}
-          </div>
-        </div>
       </div>
 
       {/* Backup & Sync */}
@@ -512,6 +449,90 @@ export default function Settings() {
               {t('settings.customPromptHint')}
             </p>
           </div>
+        </div>
+      </div>
+
+      {/* Explanation language: one switch for the whole app */}
+      <div className="space-y-3">
+        <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wide px-1">{t('settings.yourLanguage')}</h3>
+        <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+          {(['id', 'en'] as ExplainLang[]).map((code) => (
+            <button
+              key={code}
+              type="button"
+              aria-pressed={lang === code}
+              onClick={() => code !== lang && setConfirmLang(code)}
+              className="w-full flex items-center justify-between px-4 py-3 border-b border-gray-50 last:border-b-0 text-left hover:bg-gray-50"
+            >
+              <span className={`text-[15px] ${lang === code ? 'font-semibold' : ''}`}>{code === 'id' ? 'Bahasa Indonesia' : 'English'}</span>
+              {lang === code && <CheckCircleOutlined className="text-blue-500" />}
+            </button>
+          ))}
+        </div>
+        <p className="text-xs text-gray-500 px-1 leading-relaxed">
+          {t('settings.languageHint')}{' '}
+          {lang !== 'en' && (
+            <>
+              {t('settings.aiTranslationNote')}{' '}
+              <a href={TRANSLATION_REPORT_URL} target="_blank" rel="noreferrer" className="text-blue-600">{t('common.reportTranslation')}</a>
+            </>
+          )}
+        </p>
+      </div>
+
+      {/* Learning aids: collapsed by default so they don't take much room */}
+      <div className="space-y-3">
+        <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wide px-1">{t('settings.learningAids')}</h3>
+        <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+          <button
+            type="button"
+            aria-expanded={aidsOpen}
+            onClick={() => setAidsOpen(!aidsOpen)}
+            className={`w-full flex items-center justify-between gap-3 px-4 py-3 text-left ${aidsOpen ? 'border-b border-gray-50' : ''}`}
+          >
+            <span>
+              <span className="block text-[15px] font-medium">{t('settings.learningAidsToggle')}</span>
+              <span className="block text-xs text-gray-400">
+                {t('settings.aidsOn', { count: [chatHints, romaji, romajiInput].filter(Boolean).length })}
+              </span>
+            </span>
+            {aidsOpen ? <UpOutlined className="text-gray-400" /> : <DownOutlined className="text-gray-400" />}
+          </button>
+          {aidsOpen && (
+          <>
+          {[
+            { key: CHAT_HINTS_KEY, value: chatHints, set: setChatHints, label: t('settings.chatHints'), desc: t('settings.chatHintsDesc') },
+            { key: ROMAJI_KEY, value: romaji, set: setRomaji, label: t('settings.romaji'), desc: t('settings.romajiDesc') },
+            { key: ROMAJI_INPUT_KEY, value: romajiInput, set: setRomajiInput, label: t('settings.romajiInput'), desc: t('settings.romajiInputDesc') },
+          ].map((row) => (
+            <button
+              key={row.key}
+              type="button"
+              role="switch"
+              aria-checked={row.value}
+              onClick={() => toggle(row.key, !row.value, row.set)}
+              className="w-full flex items-center justify-between gap-3 px-4 py-3 border-b border-gray-50 last:border-b-0 text-left"
+            >
+              <span>
+                <span className="block text-[15px] font-medium">{row.label}</span>
+                <span className="block text-xs text-gray-400">{row.desc}</span>
+              </span>
+              <span className={`shrink-0 w-11 h-6 rounded-full p-0.5 flex transition-colors ${row.value ? 'bg-blue-500 justify-end' : 'bg-gray-300 justify-start'}`}>
+                <span className="w-5 h-5 rounded-full bg-white shadow" />
+              </span>
+            </button>
+          ))}
+          <div className="px-4 py-3 space-y-2">
+            <div className="text-[15px] font-medium">{t('settings.kanaStarter')}</div>
+            <div className="text-xs text-gray-400">{t('settings.kanaStarterDesc')}</div>
+            <div className="flex gap-2">
+              <button type="button" onClick={() => seedKana('hiragana')} className="flex-1 py-2 rounded-lg bg-gray-100 text-sm font-medium hover:bg-gray-200">{t('settings.addHiragana')}</button>
+              <button type="button" onClick={() => seedKana('katakana')} className="flex-1 py-2 rounded-lg bg-gray-100 text-sm font-medium hover:bg-gray-200">{t('settings.addKatakana')}</button>
+            </div>
+            {kanaMessage && <div className="text-xs text-green-700">{kanaMessage}</div>}
+          </div>
+          </>
+          )}
         </div>
       </div>
 
