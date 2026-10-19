@@ -15,6 +15,8 @@ mod stats;
 mod grammar;
 mod feedback;
 mod reading;
+mod locale;
+mod romaji;
 
 #[tauri::command]
 fn greet(name: &str) -> String {
@@ -158,6 +160,14 @@ pub fn run() {
             chat::test_provider,
             chat::list_models,
             chat::llm_chat,
+            chat::llm_translate,
+            chat::llm_help_reply,
+            // Explanation language / romaji
+            locale::db_get_explain_lang,
+            locale::db_set_explain_lang,
+            romaji::to_romaji,
+            romaji::romaji_to_kana_input,
+            romaji::db_seed_kana_deck,
             // Sessions / Messages
             sessions::db_add_message,
             sessions::db_new_session,
@@ -220,6 +230,8 @@ pub fn run() {
             grammar::db_get_selected_grammar,
             grammar::db_get_grammar_analysis,
             grammar::db_analyze_grammar,
+            grammar::db_translate_grammar_item,
+            grammar::db_translate_grammar_level,
             // Feedback
             feedback::db_get_user_feedback,
             feedback::db_list_all_feedback,

@@ -1,5 +1,6 @@
 import { PieChartOutlined, ClockCircleOutlined, WarningOutlined } from '@ant-design/icons'
 import { PieChart, Pie, Cell, ResponsiveContainer, Tooltip } from 'recharts'
+import { t } from '../../lib/i18n'
 
 interface Props {
   distribution: { state: string; count: number; color: string }[]
@@ -8,10 +9,10 @@ interface Props {
 }
 
 const STATE_LABELS: Record<string, string> = {
-  new: 'New',
-  learning: 'Learning',
-  review: 'Review',
-  relearning: 'Relearning',
+  new: t('cardState.new'),
+  learning: t('cardState.learning'),
+  review: t('cardState.review'),
+  relearning: t('cardState.relearning'),
 }
 
 export default function ReviewBreakdown({ distribution, dueCount, lapsedCount }: Props) {
@@ -20,8 +21,8 @@ export default function ReviewBreakdown({ distribution, dueCount, lapsedCount }:
   if (total === 0) {
     return (
       <div className="bg-white rounded-xl p-4 shadow-sm">
-        <h3 className="text-sm font-medium text-gray-600 mb-3">Review Breakdown</h3>
-        <p className="text-sm text-gray-400">No cards yet</p>
+        <h3 className="text-sm font-medium text-gray-600 mb-3">{t('stats.breakdown')}</h3>
+        <p className="text-sm text-gray-400">{t('review.noCards')}</p>
       </div>
     )
   }
@@ -30,7 +31,7 @@ export default function ReviewBreakdown({ distribution, dueCount, lapsedCount }:
     <div className="bg-white rounded-xl p-4 shadow-sm">
       <div className="flex items-center gap-2 mb-3">
         <PieChartOutlined className="text-cyan-500" />
-        <h3 className="text-sm font-medium text-gray-600">Review Breakdown</h3>
+        <h3 className="text-sm font-medium text-gray-600">{t('stats.breakdown')}</h3>
       </div>
       <div className="flex items-center gap-4">
         <div className="w-28 h-28 shrink-0">
@@ -73,11 +74,11 @@ export default function ReviewBreakdown({ distribution, dueCount, lapsedCount }:
       <div className="grid grid-cols-2 gap-3 mt-4">
         <div className="flex items-center gap-2">
           <ClockCircleOutlined className="text-red-500 text-sm" />
-          <span className="text-xs text-gray-500">{dueCount} due</span>
+          <span className="text-xs text-gray-500">{t('stats.due', { n: dueCount })}</span>
         </div>
         <div className="flex items-center gap-2">
           <WarningOutlined className="text-amber-500 text-sm" />
-          <span className="text-xs text-gray-500">{lapsedCount} lapsed</span>
+          <span className="text-xs text-gray-500">{t('stats.lapsed', { n: lapsedCount })}</span>
         </div>
       </div>
     </div>

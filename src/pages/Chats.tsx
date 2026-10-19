@@ -4,6 +4,8 @@ import { PlusOutlined, CloseOutlined, EditOutlined, DeleteOutlined } from '@ant-
 import { useNavigate } from 'react-router-dom'
 import { JLPT_LEVELS, JLPT_LEVEL_ORDER, DEFAULT_JLPT_LEVEL, JLPT_LEVEL_STORAGE_KEY } from '../lib/jlpt'
 import type { JLPTLevel } from '../lib/jlpt'
+import { t, formatAgo } from '../lib/i18n'
+import { TARGET_LANGUAGES, languageLabel } from '../lib/languages'
 
 type GrammarLevelInfo = { level: string; count: number }
 
@@ -15,11 +17,6 @@ type ChatSession = {
   created_at: number
   last_activity: number
 }
-
-const LANGUAGES = [
-  { code: 'ja', label: 'Japanese', flag: '🇯🇵' },
-  { code: 'id', label: 'Indonesian', flag: '🇮🇩' },
-]
 
 const AVATAR_COLORS = [
   'bg-blue-500', 'bg-green-500', 'bg-purple-500',
@@ -35,55 +32,6 @@ function getColor(id: string): string {
   let hash = 0
   for (let i = 0; i < id.length; i++) hash = id.charCodeAt(i) + ((hash << 5) - hash)
   return AVATAR_COLORS[Math.abs(hash) % AVATAR_COLORS.length]
-}
-
-function timeAgo(ts: number): string {
-  const now = Date.now()
-  const target = ts * 1000
-  const diffMs = now - target
-  if (diffMs < 0) return 'Just now'
-  const absDiff = diffMs
-
-  const MINUTE = 60 * 1000
-  const HOUR = 60 * MINUTE
-  const DAY = 24 * HOUR
-  const WEEK = 7 * DAY
-  const MONTH = 30 * DAY
-  const YEAR = 365 * DAY
-
-  let value: number
-  let unit: string
-
-  if (absDiff < MINUTE) {
-    value = Math.floor(absDiff / 1000)
-    unit = 's'
-  } else if (absDiff < HOUR) {
-    value = Math.floor(absDiff / MINUTE)
-    unit = 'm'
-  } else if (absDiff < DAY) {
-    value = Math.floor(absDiff / HOUR)
-    unit = 'h'
-  } else if (absDiff < WEEK) {
-    value = Math.floor(absDiff / DAY)
-    unit = 'd'
-  } else if (absDiff < MONTH) {
-    value = Math.floor(absDiff / WEEK)
-    unit = 'w'
-  } else if (absDiff < YEAR) {
-    value = Math.floor(absDiff / MONTH)
-    unit = 'mo'
-  } else {
-    value = Math.floor(absDiff / YEAR)
-    unit = 'y+'
-  }
-
-  return `${value}${unit} ago`
-}
-
-function getLangLabel(code: string | null | undefined): string {
-  if (!code) return ''
-  const lang = LANGUAGES.find(l => l.code === code)
-  return lang ? `${lang.flag} ${lang.label}` : code
 }
 
 export default function Chats() {
@@ -166,6 +114,12 @@ export default function Chats() {
     setDeletingId(null)
   }
 
+  // With only one language to learn, skip straight to its level picker.
+  function openNewChat() {
+    if (TARGET_LANGUAGES.length === 1) newChat(TARGET_LANGUAGES[0].code)
+    else setShowLangPicker(true)
+  }
+
   function startEdit(s: ChatSession) {
     setEditingId(s.id)
     setEditTitle(s.title || '')
@@ -174,13 +128,13 @@ export default function Chats() {
   return (
     <div className="flex flex-col h-full overflow-y-auto overflow-x-hidden">
       <div className="sticky top-0 z-10 py-3 bg-gray-50 flex items-center justify-between shrink-0">
-        <h2 className="text-lg font-semibold">Chats</h2>
+        <h2 className="text-lg font-semibold">{t('chats.title')}</h2>
         <button
-          onClick={() => setShowLangPicker(true)}
+          onClick={openNewChat}
           className="flex items-center gap-1.5 px-3 py-1.5 rounded-full bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 active:bg-blue-700 transition-colors"
         >
           <PlusOutlined />
-          <span>New</span>
+          <span>{t('chats.new')}</span>
         </button>
       </div>
 
@@ -192,7 +146,7 @@ export default function Chats() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-base font-semibold">Choose Language</h3>
+              <h3 className="text-base font-semibold">{t('chats.chooseLanguage')}</h3>
               <button
                 onClick={() => setShowLangPicker(false)}
                 className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 active:bg-gray-200"
@@ -201,7 +155,7 @@ export default function Chats() {
               </button>
             </div>
             <div className="space-y-2">
-              {LANGUAGES.map(lang => (
+              {TARGET_LANGUAGES.map(lang => (
                 <button
                   key={lang.code}
                   onClick={() => newChat(lang.code)}
@@ -224,7 +178,7 @@ export default function Chats() {
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
-              <h3 className="text-base font-semibold">Choose Level</h3>
+              <h3 className="text-base font-semibold">{t('chats.chooseLevel')}</h3>
               <button
                 onClick={() => setShowJlptPicker(false)}
                 className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 active:bg-gray-200"
@@ -232,7 +186,7 @@ export default function Chats() {
                 <CloseOutlined />
               </button>
             </div>
-            <p className="text-xs text-gray-500 mb-3">This sets the grammar difficulty and sentence length for the conversation.</p>
+            <p className="text-xs text-gray-500 mb-3">{t('chats.levelHint')}</p>
             <div className="space-y-2">
               {dbLevels.map(level => {
                 const jlptInfo = JLPT_LEVELS[level as JLPTLevel]
@@ -247,7 +201,7 @@ export default function Chats() {
                     }`}
                   >
                     <span className="text-[15px] font-semibold w-10 text-center">{level}</span>
-                    <span className="text-sm text-gray-600">{jlptInfo?.description || `Grammar level ${level}`}</span>
+                    <span className="text-sm text-gray-600">{jlptInfo?.description || t('chats.grammarLevel', { level })}</span>
                   </button>
                 )
               })}
@@ -263,20 +217,20 @@ export default function Chats() {
             className="bg-white rounded-2xl p-5 mx-6 max-w-sm w-full"
             onClick={(e) => e.stopPropagation()}
           >
-            <h3 className="text-base font-semibold mb-2">Delete Chat</h3>
-            <p className="text-sm text-gray-500 mb-4">This will permanently delete this conversation and all its messages. This cannot be undone.</p>
+            <h3 className="text-base font-semibold mb-2">{t('chats.deleteTitle')}</h3>
+            <p className="text-sm text-gray-500 mb-4">{t('chats.deleteBody')}</p>
             <div className="flex gap-2 justify-end">
               <button
                 onClick={() => setDeletingId(null)}
                 className="px-4 py-2 rounded-xl text-sm font-medium hover:bg-gray-100 active:bg-gray-200 transition-colors"
               >
-                Cancel
+                {t('common.cancel')}
               </button>
               <button
                 onClick={() => deleteSession(deletingId)}
                 className="px-4 py-2 rounded-xl text-sm font-medium bg-red-500 text-white hover:bg-red-600 active:bg-red-700 transition-colors"
               >
-                Delete
+                {t('common.delete')}
               </button>
             </div>
           </div>
@@ -286,12 +240,12 @@ export default function Chats() {
       {sessions.length === 0 ? (
         <div className="flex flex-col items-center justify-center flex-1 text-gray-400 gap-3 py-12">
           <div className="text-4xl">📝</div>
-          <p className="text-sm">No conversations yet</p>
+          <p className="text-sm">{t('chats.empty')}</p>
           <button
-            onClick={() => setShowLangPicker(true)}
+            onClick={openNewChat}
             className="px-4 py-2 rounded-full bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 active:bg-blue-700 transition-colors"
           >
-            Start a chat
+            {t('chats.start')}
           </button>
         </div>
       ) : (
@@ -331,7 +285,7 @@ export default function Chats() {
                   onClick={() => navigate(`/chat?sid=${s.id}&lang=${s.language || ''}${s.level ? `&jlpt=${s.level}` : ''}`)}
                 >
                   <div className="font-medium text-[15px] truncate flex items-center gap-1.5">
-                    {s.title || getLangLabel(s.language) || 'Untitled'}
+                    {s.title || languageLabel(s.language) || t('common.untitled')}
                     {s.level && s.language === 'ja' && (
                       <span className="text-[11px] font-medium px-1 py-0.5 rounded bg-indigo-50 text-indigo-600 shrink-0">
                         {s.level}
@@ -339,8 +293,8 @@ export default function Chats() {
                     )}
                   </div>
                   <div className="text-xs text-gray-400 truncate">
-                    {s.language && <span className="mr-1">{getLangLabel(s.language)}</span>}
-                    Last: {timeAgo(s.last_activity)}
+                    {s.language && <span className="mr-1">{languageLabel(s.language)}</span>}
+                    {t('chats.last', { ago: formatAgo(s.last_activity) })}
                   </div>
                 </div>
               )}
@@ -350,14 +304,16 @@ export default function Chats() {
                   <button
                     onClick={() => startEdit(s)}
                     className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-200 active:bg-gray-300 transition-colors text-gray-400 hover:text-gray-600"
-                    title="Rename"
+                    title={t('chats.rename')}
+                    aria-label={t('chats.rename')}
                   >
                     <EditOutlined className="text-xs" />
                   </button>
                   <button
                     onClick={() => setDeletingId(s.id)}
                     className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-red-50 active:bg-red-100 transition-colors text-gray-400 hover:text-red-500"
-                    title="Delete"
+                    title={t('common.delete')}
+                    aria-label={t('common.delete')}
                   >
                     <DeleteOutlined className="text-xs" />
                   </button>

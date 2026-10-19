@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import { BrowserRouter, Route, Routes, Navigate } from 'react-router-dom'
 import Home from './pages/Home'
 import Chat from './pages/Chat'
@@ -10,8 +11,11 @@ import WordsList from './pages/WordsList'
 import Grammar from './pages/Grammar'
 import Reading from './pages/Reading'
 import Layout from './components/Layout'
+import Onboarding, { needsOnboarding } from './pages/Onboarding'
 
 export default function App() {
+  const [onboarding, setOnboarding] = useState(needsOnboarding)
+  if (onboarding) return <Onboarding onDone={() => setOnboarding(false)} />
   return (
     <BrowserRouter>
       <Layout>

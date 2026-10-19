@@ -11,7 +11,8 @@
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
     "tauri:android:dev": "tauri android dev",
-    "tauri:android:build": "tauri android build"
+    "tauri:android:build": "tauri android build",
+    "i18n:check": "node scripts/i18n-check.mjs"
   },
   "dependencies": {
     "@ant-design/icons": "^6.1.1",

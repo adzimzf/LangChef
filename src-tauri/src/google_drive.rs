@@ -310,9 +310,7 @@ pub async fn restore_database(app: &AppHandle) -> Result<BackupMetadata, String>
     // Find the backup file
     let existing = find_backup_file(&access_token).await?;
 
-    let file = existing.ok_or_else(|| {
-        "No backup found on Google Drive. Please back up first.".to_string()
-    })?;
+    let file = existing.ok_or_else(|| crate::locale::app_error("no_backup", ""))?;
 
     // Download the backup
     let data = download_from_drive(app, &access_token, &file.file_id).await?;

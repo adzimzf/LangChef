@@ -15,6 +15,7 @@ import TimeRangeFilter from '../components/stats/TimeRangeFilter'
 import StreakCard from '../components/stats/StreakCard'
 import ActiveTimeCard from '../components/stats/ActiveTimeCard'
 import StatsSkeleton from '../components/stats/StatsSkeleton'
+import { t, locale } from '../lib/i18n'
 
 const ActivityChart = lazy(() => import('../components/stats/ActivityChart'))
 const MasteryChart = lazy(() => import('../components/stats/MasteryChart'))
@@ -171,7 +172,7 @@ export default function UserStats() {
       const v = byDate[date] || { chat: 0, review: 0 }
       return {
         date,
-        label: new Date(date + 'T00:00:00').toLocaleDateString('en', { month: 'short', day: 'numeric' }),
+        label: new Date(date + 'T00:00:00').toLocaleDateString(locale, { month: 'short', day: 'numeric' }),
         chat: v.chat,
         review: v.review,
         movingAvg: movingAvgs[i],
@@ -223,7 +224,7 @@ export default function UserStats() {
       .sort(([a], [b]) => a.localeCompare(b))
       .map(([date, scores]) => ({
         date,
-        label: new Date(date + 'T00:00:00').toLocaleDateString('en', { month: 'short', day: 'numeric' }),
+        label: new Date(date + 'T00:00:00').toLocaleDateString(locale, { month: 'short', day: 'numeric' }),
         avgScore: Math.round((scores.reduce((s, v) => s + v, 0) / scores.length) * 10) / 10,
         count: scores.length,
       }))
@@ -261,7 +262,7 @@ export default function UserStats() {
   return (
     <div className="space-y-5 h-full overflow-y-auto">
       <div className="sticky top-0 z-10 pt-4 pb-2 bg-gray-50 space-y-3">
-        <h2 className="text-lg font-semibold">Your Stats</h2>
+        <h2 className="text-lg font-semibold">{t('home.stats')}</h2>
         <TimeRangeFilter value={timeRange} onChange={setTimeRange} />
       </div>
 
@@ -270,8 +271,8 @@ export default function UserStats() {
       ) : isEmpty ? (
         <div className="flex flex-col items-center justify-center py-20 text-gray-400">
           <div className="text-4xl mb-3">&#x1F4CA;</div>
-          <p className="text-sm">No data yet for this period</p>
-          <p className="text-xs mt-1">Start chatting or reviewing to see your stats!</p>
+          <p className="text-sm">{t('stats.empty')}</p>
+          <p className="text-xs mt-1">{t('stats.emptyHint')}</p>
         </div>
       ) : (
         <>
@@ -288,11 +289,11 @@ export default function UserStats() {
 
           <div className="bg-white rounded-xl p-4 shadow-sm">
             <div className="flex items-center justify-between">
-              <span className="text-sm text-gray-500">Total sessions</span>
+              <span className="text-sm text-gray-500">{t('stats.totalSessions')}</span>
               <span className="text-lg font-bold">{totalSessions}</span>
             </div>
             <div className="flex items-center justify-between mt-1">
-              <span className="text-xs text-gray-400">Chat: {chatSessions} · Review: {reviewSessions}</span>
+              <span className="text-xs text-gray-400">{t('stats.sessionSplit', { chat: chatSessions, review: reviewSessions })}</span>
             </div>
           </div>
 

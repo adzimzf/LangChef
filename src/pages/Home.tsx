@@ -12,6 +12,7 @@ import {
   FileTextOutlined,
 } from '@ant-design/icons'
 import { type ActivityRow, todayKey, computeStreakFromActivity } from '../lib/stats'
+import { t } from '../lib/i18n'
 
 export default function Home() {
   const navigate = useNavigate()
@@ -56,48 +57,48 @@ export default function Home() {
     {
       key: 'chat',
       icon: <MessageOutlined className="text-xl" />,
-      label: 'Start Chatting',
-      desc: 'Practice your target language',
+      label: t('home.chat'),
+      desc: t('home.chatDesc'),
       color: 'bg-blue-500',
       onClick: () => navigate('/chats'),
     },
     {
       key: 'review',
       icon: <BookOutlined className="text-xl" />,
-      label: 'Review Words',
-      desc: `${stats.mastered}/${stats.total} mastered`,
+      label: t('home.review'),
+      desc: t('home.reviewDesc', { mastered: stats.mastered, total: stats.total }),
       color: 'bg-green-500',
       onClick: () => navigate('/review'),
     },
     {
       key: 'words',
       icon: <UnorderedListOutlined className="text-xl" />,
-      label: 'Words List',
-      desc: `${stats.total} words in your deck`,
+      label: t('home.words'),
+      desc: t('home.wordsDesc', { count: stats.total }),
       color: 'bg-amber-500',
       onClick: () => navigate('/words'),
     },
     {
       key: 'reading',
       icon: <FileTextOutlined className="text-xl" />,
-      label: 'Reading',
-      desc: 'Read articles and practice comprehension',
+      label: t('home.reading'),
+      desc: t('home.readingDesc'),
       color: 'bg-teal-500',
       onClick: () => navigate('/reading'),
     },
     {
       key: 'grammar',
       icon: <ReadOutlined className="text-xl" />,
-      label: 'Grammar',
-      desc: 'Manage grammar patterns per level',
+      label: t('home.grammar'),
+      desc: t('home.grammarDesc'),
       color: 'bg-indigo-500',
       onClick: () => navigate('/grammar'),
     },
     {
       key: 'telemetry',
       icon: <ThunderboltOutlined className="text-xl" />,
-      label: 'Your Stats',
-      desc: `${stats.sessionsToday} sessions today`,
+      label: t('home.stats'),
+      desc: t('home.statsDesc', { count: stats.sessionsToday }),
       color: 'bg-purple-500',
       onClick: () => navigate('/stats'),
     },
@@ -113,24 +114,24 @@ export default function Home() {
       {/* Hero section */}
       <div className="bg-gradient-to-br from-blue-500 to-blue-600 rounded-2xl p-5 text-white">
         <h2 className="text-xl font-bold mb-1">LangChef</h2>
-        <p className="text-blue-100 text-sm mb-4">Your daily language practice</p>
+        <p className="text-blue-100 text-sm mb-4">{t('home.tagline')}</p>
         <div className="flex gap-4">
           <div className="flex items-center gap-2">
             <FireOutlined className="text-orange-300 text-lg" />
             <span className="font-semibold text-lg">{stats.streak}</span>
-            <span className="text-blue-200 text-sm">day streak</span>
+            <span className="text-blue-200 text-sm">{t('home.streak', { count: stats.streak })}</span>
           </div>
           <div className="flex items-center gap-2">
             <BookOutlined className="text-green-300 text-lg" />
             <span className="font-semibold text-lg">{stats.knownWords}</span>
-            <span className="text-blue-200 text-sm">words</span>
+            <span className="text-blue-200 text-sm">{t('home.knownWords', { count: stats.knownWords })}</span>
           </div>
         </div>
       </div>
 
       {/* Quick actions */}
       <div className="space-y-2">
-        <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wide px-1">Quick Actions</h3>
+        <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wide px-1">{t('home.quickActions')}</h3>
         {actions.map((a) => (
           <button
             key={a.key}
@@ -152,7 +153,7 @@ export default function Home() {
       {/* Tip card */}
       <div className="bg-amber-50 border border-amber-100 rounded-xl p-4">
         <p className="text-sm text-amber-800">
-          <strong>Tip:</strong> Tap any word in chat replies to mark it as difficult. It'll appear in your review deck!
+          <strong>{t('home.tipLabel')}</strong> {t('home.tip')}
         </p>
       </div>
     </div>

@@ -3,6 +3,7 @@
 //! The answer is checked here and correctness, answer time and hints are turned into the FSRS grade.
 
 use crate::db::open_db;
+use crate::locale::{app_error, effective_detail_sql, explain_lang};
 use crate::srs::{
     apply_session_grade, ensure_study, fetch_review_item, format_next_review_minutes,
     session_progress, set_card_status, ReviewItem, SessionProgress,
@@ -157,11 +158,13 @@ struct Candidate {
 }
 
 fn load_candidates(conn: &Connection, card: &ReviewItem) -> Result<Vec<Candidate>, String> {
+    // Only meanings in the learner's language: options in one question never mix languages.
     let mut stmt = conn
-        .prepare(
-            "SELECT id, content, detail FROM review_items
+        .prepare(&format!(
+            "SELECT id, content, {} FROM review_items
              WHERE COALESCE(language, '') = COALESCE(?1, '') AND id != ?2",
-        )
+            effective_detail_sql("")
+        ))
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![card.language, card.id], |row| {
@@ -502,8 +505,20 @@ fn usual_ms(conn: &Connection, language: &str, kind: &str) -> i64 {
     times[times.len() / 2]
 }
 
-fn seconds(ms: i64) -> String {
-    format!("{:.1}s", ms as f64 / 1000.0)
+/// Why a card got its grade. `code` is translated by the frontend; `ms` fills in times.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct GradeReason {
+    pub code: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ms: Option<i64>,
+}
+
+fn reason(code: &'static str) -> GradeReason {
+    GradeReason { code, ms: None }
+}
+
+fn timed(code: &'static str, ms: i64) -> GradeReason {
+    GradeReason { code, ms: Some(ms) }
 }
 
 struct GradeInput<'a> {
@@ -517,37 +532,37 @@ struct GradeInput<'a> {
     usual_ms: i64,
 }
 
-fn compute_grade(g: &GradeInput) -> (&'static str, Vec<String>) {
+fn compute_grade(g: &GradeInput) -> (&'static str, Vec<GradeReason>) {
     if g.dont_know {
-        return ("again", vec!["didn't know".into()]);
+        return ("again", vec![reason("didnt_know")]);
     }
     if !g.correct {
         // A mature card tests the meaning; a misread shouldn't reset months of memory.
         if g.kind == KIND_READING && g.mature {
-            return ("hard", vec!["reading slip".into(), "meaning still known".into(), "no lapse on a mature card".into()]);
+            return ("hard", vec![reason("reading_slip"), reason("meaning_still_known"), reason("no_lapse_mature")]);
         }
-        let reason = if g.kind == KIND_CONTEXT { "wrong meaning in this sentence" } else { "wrong answer" };
-        return ("again", vec![reason.into()]);
+        let code = if g.kind == KIND_CONTEXT { "wrong_in_sentence" } else { "wrong_answer" };
+        return ("again", vec![reason(code)]);
     }
-    let verb = if g.kind == KIND_RECALL { "recalled" } else { "answered" };
-    let mut reasons = vec![format!("{} in {}", verb, seconds(g.elapsed_ms))];
+    let verb = if g.kind == KIND_RECALL { "recalled_in" } else { "answered_in" };
+    let mut reasons = vec![timed(verb, g.elapsed_ms)];
     if g.hint_used {
-        reasons.push("used furigana hint".into());
+        reasons.push(reason("used_hint"));
         return ("hard", reasons);
     }
     if g.elapsed_ms >= g.usual_ms * 2 {
-        reasons.push(format!("slower than your usual {}", seconds(g.usual_ms)));
+        reasons.push(timed("slower_than_usual", g.usual_ms));
         return ("hard", reasons);
     }
-    reasons.push("no hints".into());
+    reasons.push(reason("no_hints"));
     let fast = g.elapsed_ms <= g.usual_ms * 6 / 10;
     if fast && g.easy_allowed {
-        reasons.push(format!("faster than your usual {}", seconds(g.usual_ms)));
-        reasons.push("mature card".into());
+        reasons.push(timed("faster_than_usual", g.usual_ms));
+        reasons.push(reason("mature_card"));
         return ("easy", reasons);
     }
     if fast {
-        reasons.push(if g.mature { "capped at Good for this question" } else { "Easy needs a mature card" }.into());
+        reasons.push(reason(if g.mature { "capped_good" } else { "easy_needs_mature" }));
     }
     ("good", reasons)
 }
@@ -593,9 +608,13 @@ pub struct AnswerVerdict {
     pub correct: bool,
     pub dont_know: bool,
     pub correct_answer: String,
+    /// Recall → confirm where the right meaning was not among the options ("None of these").
+    pub none_correct: bool,
     pub chosen: Option<String>,
-    pub reasons: Vec<String>,
+    pub reasons: Vec<GradeReason>,
     pub next_review_formatted: String,
+    /// Minutes until the card is due again, for the frontend to format.
+    pub next_minutes: i64,
     pub can_override: bool,
     pub overridden: bool,
     pub confused_with: Option<ConfusedWord>,
@@ -641,7 +660,6 @@ fn check_answer(task: &QuizTask, a: &QuizAnswer) -> (bool, Option<String>, Optio
 fn correct_answer_text(task: &QuizTask) -> String {
     match task.kind.as_str() {
         KIND_READING => task.reading.clone(),
-        KIND_RECALL if task.answer == NONE_ANSWER => format!("None of these: {}", task.meaning),
         _ => task.meaning.clone(),
     }
 }
@@ -754,9 +772,9 @@ pub fn db_session_answer(
     let conn = open_db(&app)?;
     let study_id = ensure_study(&conn, &today(), &language, max_reviews, max_new_cards)?;
     let task = load_task(&conn, study_id, &card_id)?
-        .ok_or("This card has no open question. Pull to refresh the review.")?;
+        .ok_or_else(|| app_error("no_open_question", ""))?;
     if task.kind == KIND_CLASSIC || task.kind == KIND_NEEDS_MEANING {
-        return Err("This card has no question to answer yet.".into());
+        return Err(app_error("no_question_yet", ""));
     }
 
     let (correct, chosen, other_id) = check_answer(&task, &answer);
@@ -802,9 +820,11 @@ pub fn db_session_answer(
         correct,
         dont_know: answer.dont_know,
         correct_answer: correct_answer_text(&task),
+        none_correct: task.kind == KIND_RECALL && task.answer == NONE_ANSWER,
         chosen,
         reasons,
         next_review_formatted: format_next_review_minutes(srs.next_minutes),
+        next_minutes: srs.next_minutes,
         can_override: !correct && !answer.dont_know && overrides_left(&conn, &language)?,
         overridden: false,
         confused_with: if record_confusion { confused_word(&conn, other_id.as_deref())? } else { None },
@@ -845,16 +865,16 @@ pub fn db_session_override(
         )
         .optional()
         .map_err(|e| e.to_string())?
-        .ok_or("That answer no longer exists.")?;
+        .ok_or_else(|| app_error("answer_gone", ""))?;
     let (card_id, kind, correct, dont_know, elapsed_ms, hint_used, other_id, easy_allowed, mature, prev_state, overridden) = row;
 
     if correct || dont_know || overridden {
-        return Err("Only a wrong pick can be marked as a mis-tap.".into());
+        return Err(app_error("mistap_only_wrong", ""));
     }
     if !overrides_left(&conn, &language)? {
-        return Err("Today's mis-tap fix is already used. It resets tomorrow.".into());
+        return Err(app_error("mistap_used", ""));
     }
-    let prev_state = prev_state.ok_or("This answer can't be undone.")?;
+    let prev_state = prev_state.ok_or_else(|| app_error("cannot_undo", ""))?;
 
     let study_id = ensure_study(&conn, &today(), &language, max_reviews, max_new_cards)?;
     let usual = usual_ms(&conn, &language, &kind);
@@ -868,7 +888,7 @@ pub fn db_session_override(
         easy_allowed,
         usual_ms: usual,
     });
-    reasons.insert(0, "marked as mis-tap".into());
+    reasons.insert(0, reason("marked_mistap"));
 
     restore_state(&conn, &card_id, &prev_state)?;
     let srs = apply_session_grade(&conn, study_id, &card_id, grade)?;
@@ -899,9 +919,11 @@ pub fn db_session_override(
             correct: true,
             dont_know: false,
             correct_answer,
+            none_correct: false,
             chosen: None,
             reasons,
             next_review_formatted: format_next_review_minutes(srs.next_minutes),
+            next_minutes: srs.next_minutes,
             can_override: false,
             overridden: true,
             confused_with: None,
@@ -933,19 +955,19 @@ pub fn db_session_save_meaning(
         example_meaning: clean(&meaning.example_meaning),
     };
     if detail.meaning.is_empty() {
-        return Err("Add a meaning before saving.".into());
+        return Err(app_error("meaning_required", ""));
     }
     let json = serde_json::to_string(&detail).map_err(|e| e.to_string())?;
 
     let conn = open_db(&app)?;
     conn.execute(
-        "UPDATE review_items SET detail = ?1, draft_detail = NULL WHERE id = ?2",
-        params![json, card_id],
+        "UPDATE review_items SET detail = ?1, meaning_lang = ?2, draft_detail = NULL WHERE id = ?3",
+        params![json, explain_lang(&conn), card_id],
     )
     .map_err(|e| e.to_string())?;
 
     let study_id = ensure_study(&conn, &today(), &language, max_reviews, max_new_cards)?;
-    let card = fetch_review_item(&conn, &card_id)?.ok_or("That card no longer exists.")?;
+    let card = fetch_review_item(&conn, &card_id)?.ok_or_else(|| app_error("card_gone", ""))?;
     store_new_task(&conn, study_id, &card, true)?;
     // Re-marking it pending bumps update_time, which puts it behind every other pending card.
     set_card_status(&conn, study_id, &card_id, "pending")?;
@@ -968,15 +990,16 @@ pub fn db_session_skip_card(
     session_progress(&conn, study_id)
 }
 
-/// Cards still waiting in today's queue that have neither a meaning nor a draft.
+/// Cards still waiting in today's queue that have neither a meaning (in the learner's language) nor a draft.
 pub(crate) fn cards_missing_meaning(conn: &Connection, study_id: i64) -> Result<Vec<(String, String)>, String> {
     let mut stmt = conn
-        .prepare(
-            "SELECT r.id, r.content, r.detail, r.draft_detail FROM study_card sc
+        .prepare(&format!(
+            "SELECT r.id, r.content, {}, r.draft_detail FROM study_card sc
              JOIN review_items r ON r.id = sc.review_item_id
              WHERE sc.study_id = ?1 AND sc.status = 'pending'
              ORDER BY sc.update_time",
-        )
+            effective_detail_sql("r.")
+        ))
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map(params![study_id], |row| {
@@ -1015,15 +1038,15 @@ pub async fn db_generate_missing_meanings(
     max_reviews: i64,
     max_new_cards: i64,
 ) -> Result<GenerateAllResult, String> {
-    let missing = {
+    let (missing, explain) = {
         let conn = open_db(&app)?;
         let study_id = ensure_study(&conn, &today(), &language, max_reviews, max_new_cards)?;
-        cards_missing_meaning(&conn, study_id)?
+        (cards_missing_meaning(&conn, study_id)?, explain_lang(&conn))
     };
     let mut generated = 0;
     let mut failed = Vec::new();
     for (id, content) in missing {
-        match generate_detail_text(&api_host, &api_key, &model, &content, &language).await {
+        match generate_detail_text(&api_host, &api_key, &model, &content, &language, &explain).await {
             Ok(text) if !parse_detail(Some(&text)).meaning.is_empty() => {
                 let conn = open_db(&app)?;
                 conn.execute("UPDATE review_items SET draft_detail = ?1 WHERE id = ?2", params![text, id])
@@ -1190,6 +1213,14 @@ mod tests {
     }
 
     #[test]
+    fn reasons_are_codes_with_times() {
+        let (_, reasons) = compute_grade(&input(KIND_RECALL, true, 8000, true));
+        assert_eq!(reasons, vec![timed("recalled_in", 8000), timed("slower_than_usual", 3500)]);
+        let (_, reasons) = compute_grade(&input(KIND_READING, false, 1000, true));
+        assert_eq!(reasons[0], reason("reading_slip"));
+    }
+
+    #[test]
     fn parses_json_and_plain_detail() {
         let d = parse_detail(Some("```json\n{\"reading\":\"やくそく\",\"meaning\":\"promise\"}\n```"));
         assert_eq!(d.reading, "やくそく");
@@ -1233,9 +1264,10 @@ mod tests {
     fn deck() -> Connection {
         let conn = Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE review_items(id TEXT PRIMARY KEY, content TEXT, language TEXT, detail TEXT, draft_detail TEXT);
+            "CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT);
+             CREATE TABLE review_items(id TEXT PRIMARY KEY, content TEXT, language TEXT, detail TEXT, draft_detail TEXT, meaning_lang TEXT DEFAULT 'en');
              CREATE TABLE review_confusions(review_item_id TEXT, confused_with_id TEXT, count INTEGER, last_at INTEGER);
-             INSERT INTO review_items VALUES
+             INSERT INTO review_items(id, content, language, detail, draft_detail) VALUES
                ('a', '散歩', 'ja', NULL, '{\"reading\":\"さんぽ\",\"meaning\":\"walk\"}'),
                ('b', '先生', 'ja', 'teacher', NULL),
                ('c', '学生', 'ja', 'student', NULL);",
@@ -1258,6 +1290,26 @@ mod tests {
         let c = card("b", "先生", "new", Some("teacher"));
         assert_eq!(build_task(&conn, &c, false, &mut rand::thread_rng()).unwrap().kind, KIND_INTRO_TF);
         assert_eq!(build_task(&conn, &c, true, &mut rand::thread_rng()).unwrap().kind, KIND_TRUE_FALSE);
+    }
+
+    #[test]
+    fn options_never_mix_meaning_languages() {
+        let conn = deck();
+        conn.execute_batch(
+            "INSERT INTO review_items(id, content, language, detail, meaning_lang) VALUES
+               ('d', '本', 'ja', 'buku', 'id'),
+               ('e', '水', 'ja', 'air', 'id');",
+        )
+        .unwrap();
+        let c = card("b", "先生", "review", Some("teacher"));
+        let cands = load_candidates(&conn, &c).unwrap();
+        let meanings: Vec<String> = cands.iter().map(|x| x.detail.meaning.clone()).filter(|m| !m.is_empty()).collect();
+        assert_eq!(meanings, vec!["student".to_string()]);
+        conn.execute("INSERT INTO app_settings VALUES ('explain_lang', 'id')", []).unwrap();
+        let cands = load_candidates(&conn, &c).unwrap();
+        let mut meanings: Vec<String> = cands.iter().map(|x| x.detail.meaning.clone()).filter(|m| !m.is_empty()).collect();
+        meanings.sort();
+        assert_eq!(meanings, vec!["air".to_string(), "buku".to_string()]);
     }
 
     #[test]

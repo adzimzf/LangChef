@@ -14,19 +14,18 @@ import {
 import type { ReviewItem } from '../lib/types'
 import { parseDetailJson } from '../lib/types'
 import EditWordForm from '../components/EditWordForm'
+import { t, lang as explainLang, errorText, formatNextReview, formatNumber, languageName, partOfSpeechLabel } from '../lib/i18n'
+import { languageLabel } from '../lib/languages'
 
 const PAGE_SIZE = 20
 
-const LANGUAGES: Record<string, { label: string; flag: string }> = {
-  ja: { label: 'Japanese', flag: '\u{1F1EF}\u{1F1F5}' },
-  id: { label: 'Indonesian', flag: '\u{1F1EE}\u{1F1E9}' },
-}
+const LANGUAGE_CODES = ['ja', 'id']
 
 const STATES: { value: string; label: string; color: string }[] = [
-  { value: 'new', label: 'New', color: 'bg-purple-500' },
-  { value: 'learning', label: 'Learning', color: 'bg-blue-500' },
-  { value: 'review', label: 'Review', color: 'bg-green-500' },
-  { value: 'relearning', label: 'Relearning', color: 'bg-orange-500' },
+  { value: 'new', label: t('cardState.new'), color: 'bg-purple-500' },
+  { value: 'learning', label: t('cardState.learning'), color: 'bg-blue-500' },
+  { value: 'review', label: t('cardState.review'), color: 'bg-green-500' },
+  { value: 'relearning', label: t('cardState.relearning'), color: 'bg-orange-500' },
 ]
 
 type SortOrder = 'hardest' | 'easiest' | 'next_review'
@@ -60,6 +59,8 @@ export default function WordsList() {
 
   // Delete confirmation
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  const [generating, setGenerating] = useState(false)
+  const [generateError, setGenerateError] = useState<string | null>(null)
 
   // Scroll ref
   const scrollRef = useRef<HTMLDivElement>(null)
@@ -121,17 +122,48 @@ export default function WordsList() {
     }
   }
 
+  // A card whose meaning was in another language reads as empty; make a new one in the learner's language.
+  async function generateMeaning(item: ReviewItem) {
+    const apiHost = localStorage.getItem('api_host') || ''
+    const apiKey = localStorage.getItem('api_key') || ''
+    const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
+    if (!apiHost || !apiKey) {
+      setGenerateError(t('common.apiMissing'))
+      return
+    }
+    setGenerating(true)
+    setGenerateError(null)
+    try {
+      const detail = await invoke<string>('db_generate_detail', {
+        apiHost, apiKey, model, content: item.content, language: item.language || 'ja',
+      })
+      setItems((prev) => prev.map((i) => (i.id === item.id ? { ...i, detail } : i)))
+    } catch (e) {
+      setGenerateError(t('review.generationFailed', { error: errorText(e) }))
+    }
+    setGenerating(false)
+  }
+
   // Available languages for filter
-  const availableLangs = Object.keys(LANGUAGES)
+  const availableLangs = LANGUAGE_CODES
 
   // Selected item for detail view
   const selectedItem = selectedId ? items.find((i) => i.id === selectedId) : null
 
-  function renderDetailContent(detail: string | null) {
+  function renderDetailContent(item: ReviewItem) {
+    const detail = item.detail
     if (!detail) {
       return (
-        <div className="mt-3 p-3 bg-gray-50 rounded-xl text-center">
-          <p className="text-sm text-gray-400">No detail available.</p>
+        <div className="mt-3 p-3 bg-gray-50 rounded-xl text-center space-y-2">
+          <p className="text-sm text-gray-400">{t('quiz.noMeaningYet', { language: languageName(explainLang) })}</p>
+          <button
+            onClick={() => generateMeaning(item)}
+            disabled={generating}
+            className="px-3 py-1.5 rounded-lg bg-blue-500 text-white text-xs font-medium hover:bg-blue-600 disabled:opacity-50"
+          >
+            {generating ? t('common.generating') : t('quiz.generateMeaning')}
+          </button>
+          {generateError && <p className="text-xs text-red-500">{generateError}</p>}
         </div>
       )
     }
@@ -142,20 +174,20 @@ export default function WordsList() {
         <div className="mt-3 space-y-2 text-left">
           {parsed.reading && (
             <div className="flex items-baseline gap-2">
-              <span className="text-xs text-gray-400 w-24 shrink-0">Reading</span>
+              <span className="text-xs text-gray-400 w-24 shrink-0">{t('card.reading')}</span>
               <span className="text-sm font-medium">{parsed.reading}</span>
             </div>
           )}
           {parsed.meaning && (
             <div className="flex items-baseline gap-2">
-              <span className="text-xs text-gray-400 w-24 shrink-0">Meaning</span>
+              <span className="text-xs text-gray-400 w-24 shrink-0">{t('card.meaning')}</span>
               <span className="text-sm font-medium">{parsed.meaning}</span>
             </div>
           )}
           {parsed.part_of_speech && (
             <div className="flex items-baseline gap-2">
-              <span className="text-xs text-gray-400 w-24 shrink-0">Part of speech</span>
-              <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{parsed.part_of_speech}</span>
+              <span className="text-xs text-gray-400 w-24 shrink-0">{t('card.partOfSpeech')}</span>
+              <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{partOfSpeechLabel(parsed.part_of_speech)}</span>
             </div>
           )}
           {parsed.example && (
@@ -184,16 +216,17 @@ export default function WordsList() {
         <div className="shrink-0 sticky top-0 z-10 bg-gray-50 flex items-center gap-3 px-4 pt-4 pb-2">
           <button
             onClick={() => navigate(-1)}
+            aria-label={t('common.back')}
             className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
           >
             <ArrowLeftOutlined />
           </button>
-          <h2 className="text-lg font-semibold flex-1">Word Detail</h2>
+          <h2 className="text-lg font-semibold flex-1">{t('word.detailTitle')}</h2>
           <button
             onClick={() => setSearchParams({ wid: selectedItem.id, edit: '1' })}
             className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-blue-50 text-blue-600 text-sm font-medium hover:bg-blue-100 transition-colors"
           >
-            <EditOutlined /> Edit
+            <EditOutlined /> {t('common.edit')}
           </button>
           {deletingId === selectedItem.id ? (
             <div className="flex items-center gap-1">
@@ -201,13 +234,13 @@ export default function WordsList() {
                 onClick={() => handleDelete(selectedItem.id)}
                 className="px-3 py-1.5 rounded-lg bg-red-500 text-white text-sm font-medium hover:bg-red-600 transition-colors"
               >
-                Confirm
+                {t('word.confirm')}
               </button>
               <button
                 onClick={() => setDeletingId(null)}
                 className="px-3 py-1.5 rounded-lg bg-gray-100 text-gray-600 text-sm font-medium hover:bg-gray-200 transition-colors"
               >
-                Cancel
+                {t('common.cancel')}
               </button>
             </div>
           ) : (
@@ -215,7 +248,7 @@ export default function WordsList() {
               onClick={() => setDeletingId(selectedItem.id)}
               className="flex items-center gap-1 px-3 py-1.5 rounded-lg bg-red-50 text-red-600 text-sm font-medium hover:bg-red-100 transition-colors"
             >
-              <DeleteOutlined /> Delete
+              <DeleteOutlined /> {t('common.delete')}
             </button>
           )}
         </div>
@@ -236,7 +269,7 @@ export default function WordsList() {
                     : 'bg-green-500'
                 }`}
               >
-                {selectedItem.state_label}
+                {t(`cardState.${selectedItem.state || 'new'}`)}
               </span>
               <div
                 className={`w-16 h-2 rounded-full ${selectedItem.difficulty_bg_class}`}
@@ -248,39 +281,39 @@ export default function WordsList() {
               <span
                 className={`inline-block text-xs px-2 py-0.5 rounded-full text-white mt-1 ${selectedItem.difficulty_bg_class}`}
               >
-                {selectedItem.difficulty_label}
+                {t(`difficulty.${selectedItem.difficulty_label}`)}
               </span>
             )}
-            {selectedItem.language && LANGUAGES[selectedItem.language] && (
+            {selectedItem.language && (
               <div className="mt-2 text-sm text-gray-500">
-                {LANGUAGES[selectedItem.language].flag} {LANGUAGES[selectedItem.language].label}
+                {languageLabel(selectedItem.language)}
               </div>
             )}
 
             {/* Detail section */}
-            {renderDetailContent(selectedItem.detail)}
+            {renderDetailContent(selectedItem)}
 
             {/* Mnemonic section */}
             <div className="mt-3 pt-2 border-t border-gray-100 text-left">
-              <span className="text-xs text-gray-400">Mnemonic</span>
+              <span className="text-xs text-gray-400">{t('card.mnemonic')}</span>
               {selectedItem.mnemonic ? (
                 <p className="text-sm text-amber-700 bg-amber-50 p-2 rounded-lg mt-1">{selectedItem.mnemonic}</p>
               ) : (
-                <p className="text-xs text-gray-300 mt-1">No mnemonic. Edit this word to generate one.</p>
+                <p className="text-xs text-gray-300 mt-1">{t('word.noMnemonicHint')}</p>
               )}
             </div>
 
             {/* SRS stats */}
             <div className="mt-4 pt-3 border-t border-gray-100">
               <div className="flex items-center justify-center gap-4 text-xs text-gray-400">
-                <span>Reps: {selectedItem.R}</span>
-                <span>Stability: {selectedItem.fsrs_stability != null ? `${selectedItem.fsrs_stability.toFixed(1)}d` : `${selectedItem.I}d`}</span>
-                <span>Difficulty: {selectedItem.fsrs_difficulty != null ? selectedItem.fsrs_difficulty.toFixed(1) : '—'}</span>
-                {selectedItem.lapse_count > 0 && <span>Lapses: {selectedItem.lapse_count}</span>}
+                <span>{t('card.reps', { n: selectedItem.R })}</span>
+                <span>{t('card.stability', { days: formatNumber(selectedItem.fsrs_stability ?? selectedItem.I, { maximumFractionDigits: 1 }) })}</span>
+                <span>{t('card.difficulty', { n: selectedItem.fsrs_difficulty != null ? formatNumber(selectedItem.fsrs_difficulty, { maximumFractionDigits: 1 }) : '—' })}</span>
+                {selectedItem.lapse_count > 0 && <span>{t('card.lapses', { n: selectedItem.lapse_count })}</span>}
               </div>
               {selectedItem.next_review && (
                 <div className="text-xs text-gray-300 mt-1">
-                  Next review: {selectedItem.next_review_formatted}
+                  {t('card.nextReview', { when: formatNextReview(selectedItem.next_review) })}
                 </div>
               )}
             </div>
@@ -302,7 +335,7 @@ export default function WordsList() {
     return (
       <EditWordForm
         item={item}
-        title="Edit Word"
+        title={t('word.editTitle')}
         onCancel={() => navigate(-1)}
         onSave={async (data) => {
           if (data.content) {
@@ -327,12 +360,13 @@ export default function WordsList() {
         <div className="flex items-center gap-3 mb-3">
           <button
             onClick={() => navigate('/')}
+            aria-label={t('common.back')}
             className="w-9 h-9 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
           >
             <ArrowLeftOutlined />
           </button>
-          <h2 className="text-lg font-semibold flex-1">Words List</h2>
-          <span className="text-xs text-gray-400">{total} words</span>
+          <h2 className="text-lg font-semibold flex-1">{t('home.words')}</h2>
+          <span className="text-xs text-gray-400">{t('word.count', { count: total })}</span>
         </div>
 
         {/* Search */}
@@ -342,12 +376,13 @@ export default function WordsList() {
             type="text"
             value={searchQuery}
             onChange={(e) => setSearchQuery(e.target.value)}
-            placeholder="Search by word..."
+            placeholder={t('word.searchPlaceholder')}
             className="w-full pl-9 pr-3 py-1.5 rounded-xl text-sm bg-gray-100 border-none outline-none focus:ring-2 focus:ring-blue-300 placeholder-gray-400"
           />
           {searchQuery && (
             <button
               onClick={() => setSearchQuery('')}
+              aria-label={t('common.close')}
               className="absolute right-2 top-1/2 -translate-y-1/2 text-gray-400 hover:text-gray-600"
             >
               <CloseOutlined style={{ fontSize: 12 }} />
@@ -366,7 +401,7 @@ export default function WordsList() {
             ) : (
               <SortAscendingOutlined />
             )}
-            {sortOrder === 'hardest' ? 'Hardest first' : 'Easiest first'}
+            {sortOrder === 'hardest' ? t('word.hardestFirst') : t('word.easiestFirst')}
           </button>
           <button
             onClick={() => setSortOrder(sortOrder === 'next_review' ? 'hardest' : 'next_review')}
@@ -377,7 +412,7 @@ export default function WordsList() {
             }`}
           >
             <SortAscendingOutlined />
-            Next review
+            {t('word.nextReviewSort')}
           </button>
           <button
             onClick={() => setShowFilters(!showFilters)}
@@ -387,7 +422,7 @@ export default function WordsList() {
                 : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
             }`}
           >
-            <FilterOutlined /> Filter
+            <FilterOutlined /> {t('word.filter')}
             {(filterLang || filterState || filterDifficulty !== 'all') && (
               <span className="w-4 h-4 rounded-full bg-white text-blue-500 text-[10px] flex items-center justify-center font-bold">
                 {[filterLang, filterState, filterDifficulty !== 'all' ? 'x' : null].filter(Boolean).length}
@@ -401,7 +436,7 @@ export default function WordsList() {
           <div className="bg-white rounded-xl p-3 shadow-sm mb-2 space-y-3">
             {/* Language filter */}
             <div>
-              <label className="text-xs text-gray-400 block mb-1">Language</label>
+              <label className="text-xs text-gray-400 block mb-1">{t('common.language')}</label>
               <div className="flex gap-1.5 flex-wrap">
                 <button
                   onClick={() => setFilterLang(null)}
@@ -409,7 +444,7 @@ export default function WordsList() {
                     !filterLang ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   }`}
                 >
-                  All
+                  {t('common.all')}
                 </button>
                 {availableLangs.map((lang) => (
                   <button
@@ -419,7 +454,7 @@ export default function WordsList() {
                       filterLang === lang ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                     }`}
                   >
-                    {LANGUAGES[lang]?.flag} {LANGUAGES[lang]?.label || lang}
+                    {languageLabel(lang)}
                   </button>
                 ))}
               </div>
@@ -427,7 +462,7 @@ export default function WordsList() {
 
             {/* State filter */}
             <div>
-              <label className="text-xs text-gray-400 block mb-1">State</label>
+              <label className="text-xs text-gray-400 block mb-1">{t('word.state')}</label>
               <div className="flex gap-1.5 flex-wrap">
                 <button
                   onClick={() => setFilterState(null)}
@@ -435,7 +470,7 @@ export default function WordsList() {
                     !filterState ? 'bg-blue-500 text-white' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'
                   }`}
                 >
-                  All
+                  {t('common.all')}
                 </button>
                 {STATES.map((s) => (
                   <button
@@ -453,14 +488,14 @@ export default function WordsList() {
 
             {/* Difficulty filter */}
             <div>
-              <label className="text-xs text-gray-400 block mb-1">Difficulty</label>
+              <label className="text-xs text-gray-400 block mb-1">{t('word.difficulty')}</label>
               <div className="flex gap-1.5">
                 {(
                   [
-                    { value: 'all', label: 'All' },
-                    { value: 'hard', label: 'Hard' },
-                    { value: 'medium', label: 'Medium' },
-                    { value: 'easy', label: 'Easy' },
+                    { value: 'all', label: t('common.all') },
+                    { value: 'hard', label: t('difficulty.Hard') },
+                    { value: 'medium', label: t('difficulty.Medium') },
+                    { value: 'easy', label: t('difficulty.Easy') },
                   ] as const
                 ).map((d) => (
                   <button
@@ -482,14 +517,14 @@ export default function WordsList() {
       {/* Word list */}
       {loading ? (
         <div className="flex items-center justify-center py-16 text-gray-400">
-          <p className="text-sm">Loading words...</p>
+          <p className="text-sm">{t('word.loading')}</p>
         </div>
       ) : items.length === 0 ? (
         <div className="flex-1 flex flex-col items-center justify-center text-gray-400 gap-3">
           <div className="text-4xl">📚</div>
-          <p className="text-sm">No words found</p>
+          <p className="text-sm">{t('word.noneFound')}</p>
           {total === 0 ? (
-            <p className="text-xs text-gray-300">Start chatting and flag difficult words to build your deck.</p>
+            <p className="text-xs text-gray-300">{t('word.emptyHint')}</p>
           ) : (
             <button
               onClick={() => {
@@ -499,7 +534,7 @@ export default function WordsList() {
               }}
               className="text-xs text-blue-500 hover:underline"
             >
-              Clear filters
+              {t('word.clearFilters')}
             </button>
           )}
         </div>
@@ -512,7 +547,7 @@ export default function WordsList() {
           {/* Load more indicator (top) */}
           {hasMore && offset > 0 && (
             <div className="flex items-center justify-center py-2 text-gray-400">
-              <span className="text-xs">{total - items.length} more words available</span>
+              <span className="text-xs">{t('word.moreAvailable', { count: total - items.length })}</span>
             </div>
           )}
 
@@ -546,10 +581,13 @@ export default function WordsList() {
                             : 'bg-green-500'
                         }`}
                       >
-                        {item.state_label}
+                        {t(`cardState.${item.state || 'new'}`)}
                       </span>
-                      {item.language && LANGUAGES[item.language] && (
-                        <span className="text-xs shrink-0">{LANGUAGES[item.language].flag}</span>
+                      {item.language && (
+                        <span className="text-xs shrink-0">{languageLabel(item.language).split(' ')[0]}</span>
+                      )}
+                      {!item.detail && (
+                        <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 shrink-0">{t('word.noMeaningBadge')}</span>
                       )}
                     </div>
                     <div className="flex items-center gap-2 mt-0.5">
@@ -557,16 +595,16 @@ export default function WordsList() {
                         <span
                           className={`text-[10px] px-1.5 py-0.5 rounded-full text-white ${item.difficulty_bg_class}`}
                         >
-                          {item.difficulty_label}
+                          {t(`difficulty.${item.difficulty_label}`)}
                         </span>
                       )}
                       <span className="text-[10px] text-gray-300">
-                        S {item.fsrs_stability != null ? `${Math.round(item.fsrs_stability)}d` : `${item.I}d`} &middot; D {item.fsrs_difficulty != null ? item.fsrs_difficulty.toFixed(1) : '—'} &middot; R {item.R}
-                        {item.lapse_count > 0 && ` \u00B7 ${item.lapse_count} lapse${item.lapse_count > 1 ? 's' : ''}`}
+                        {t('word.statsLine', { s: Math.round(item.fsrs_stability ?? item.I), d: item.fsrs_difficulty != null ? formatNumber(item.fsrs_difficulty, { maximumFractionDigits: 1 }) : '—', r: item.R })}
+                        {item.lapse_count > 0 && ` \u00B7 ${t('word.lapses', { count: item.lapse_count })}`}
                       </span>
                       {item.next_review && (
                         <span className="text-[10px] text-gray-400 shrink-0">
-                          Next Review: {item.next_review_formatted}
+                          {t('card.nextReview', { when: formatNextReview(item.next_review) })}
                         </span>
                       )}
                     </div>
@@ -580,13 +618,13 @@ export default function WordsList() {
                           onClick={() => handleDelete(item.id)}
                           className="px-2 py-1 rounded-lg bg-red-500 text-white text-[10px] font-medium hover:bg-red-600 transition-colors"
                         >
-                          Confirm
+                          {t('word.confirm')}
                         </button>
                         <button
                           onClick={() => setDeletingId(null)}
                           className="px-2 py-1 rounded-lg bg-gray-100 text-gray-600 text-[10px] font-medium hover:bg-gray-200 transition-colors"
                         >
-                          Cancel
+                          {t('common.cancel')}
                         </button>
                       </div>
                     ) : (
@@ -594,14 +632,16 @@ export default function WordsList() {
                         <button
                           onClick={() => setSearchParams({ wid: item.id, edit: '1' })}
                           className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-blue-500 hover:bg-blue-50 transition-colors"
-                          title="Edit"
+                          title={t('common.edit')}
+                          aria-label={t('common.edit')}
                         >
                           <EditOutlined className="text-xs" />
                         </button>
                         <button
                           onClick={() => setDeletingId(item.id)}
                           className="w-7 h-7 flex items-center justify-center rounded-lg text-gray-400 hover:text-red-500 hover:bg-red-50 transition-colors"
-                          title="Delete"
+                          title={t('common.delete')}
+                          aria-label={t('common.delete')}
                         >
                           <DeleteOutlined className="text-xs" />
                         </button>
@@ -617,7 +657,7 @@ export default function WordsList() {
           {hasMore && (
             <div className="flex items-center justify-center py-3 text-gray-400">
               <span className="text-xs">
-                Showing {items.length} of {total} &middot; Scroll down for more
+                {t('word.showing', { shown: items.length, total })}
               </span>
             </div>
           )}

@@ -1,6 +1,6 @@
-use crate::chat::{build_url, ChatMessage, ChatRequest, ChatResponse};
+use crate::chat::{complete_explained, json_part, ChatMessage};
 use crate::db::open_db;
-use reqwest::Client;
+use crate::locale::{explain_lang, lang_name};
 use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
@@ -43,6 +43,14 @@ fn extract_score_from_json(feedback: &str) -> i64 {
     3
 }
 
+/// The in-prompt example, in the learner's language so it doesn't pull the model back to English.
+fn feedback_example(explain: &str) -> &'static str {
+    match explain {
+        "id" => r#"{"score":1,"summary":"Jawaban belum lengkap, hanya satu kata tanya.","vocab":[{"word":"何","reading_meaning":"nani / apa","ok":false,"note":"Hanya potongan kata; satu kata tanya saja bukan jawaban yang lengkap."}],"grammar":[{"pattern":"何","ok":false,"note":"Belum menjadi kalimat yang lengkap."}],"target_words":[{"word":"気をつける","used":false,"note":"Belum dipakai. Coba: はい、気をつけます。"},{"word":"はい","used":false,"note":"Belum dipakai. Coba: はい、気をつけます。"}],"suggestion":"はい、気をつけます。"}"#,
+        _ => r#"{"score":1,"summary":"Incomplete response with a single question word.","vocab":[{"word":"何","reading_meaning":"nani / what","ok":false,"note":"Fragment used incorrectly; a single question word is not a proper response."}],"grammar":[{"pattern":"何","ok":false,"note":"Not a grammatically complete response."}],"target_words":[{"word":"気をつける","used":false,"note":"Expected but not used. Try: はい、気をつけます。"},{"word":"はい","used":false,"note":"Expected but not used. Try: はい、気をつけます。"}],"suggestion":"はい、気をつけます。"}"#,
+    }
+}
+
 #[tauri::command]
 pub fn db_get_user_feedback(app: tauri::AppHandle, message_id: i64) -> Result<Option<UserMessageFeedback>, String> {
     let conn = open_db(&app)?;
@@ -50,8 +58,8 @@ pub fn db_get_user_feedback(app: tauri::AppHandle, message_id: i64) -> Result<Op
         "SELECT f.message_id, f.score, f.feedback, COALESCE(m.created_at, 0)
          FROM user_message_feedback f
          LEFT JOIN messages m ON m.id = f.message_id
-         WHERE f.message_id=?1",
-        params![message_id],
+         WHERE f.message_id=?1 AND f.lang=?2",
+        params![message_id, explain_lang(&conn)],
         |row| Ok(UserMessageFeedback {
             message_id: row.get(0)?,
             score: row.get(1)?,
@@ -104,12 +112,13 @@ pub async fn db_evaluate_user_message(
     target_words: Vec<String>,
 ) -> Result<UserMessageFeedback, String> {
     let conn = open_db(&app)?;
+    let explain = explain_lang(&conn);
     if let Ok(cached) = conn.query_row(
         "SELECT f.message_id, f.score, f.feedback, COALESCE(m.created_at, 0)
          FROM user_message_feedback f
          LEFT JOIN messages m ON m.id = f.message_id
-         WHERE f.message_id=?1",
-        params![message_id],
+         WHERE f.message_id=?1 AND f.lang=?2",
+        params![message_id, explain],
         |row| Ok(UserMessageFeedback {
             message_id: row.get(0)?,
             score: row.get(1)?,
@@ -120,11 +129,7 @@ pub async fn db_evaluate_user_message(
         return Ok(cached);
     }
 
-    let lang_name = match language.as_str() {
-        "ja" => "Japanese",
-        "id" => "Indonesian",
-        _ => &language,
-    };
+    let lang_name = lang_name(&language);
     let level_context = if level.is_empty() {
         String::new()
     } else {
@@ -154,7 +159,8 @@ pub async fn db_evaluate_user_message(
          - \"target_words\": check whether each assigned target word was used in the message.\n\
          - Do NOT put target word usage in \"vocab\". These are separate concerns.\n\n\
          Example — if the learner wrote \"何？\" and target words were [\"気をつける\", \"はい\"]:\n\
-         {{\"score\":1,\"summary\":\"Incomplete response with a single question word.\",\"vocab\":[{{\"word\":\"何\",\"reading_meaning\":\"nani / what\",\"ok\":false,\"note\":\"Fragment used incorrectly; a single question word is not a proper response.\"}}],\"grammar\":[{{\"pattern\":\"何\",\"ok\":false,\"note\":\"Not a grammatically complete response.\"}}],\"target_words\":[{{\"word\":\"気をつける\",\"used\":false,\"note\":\"Expected but not used. Try: はい、気をつけます。\"}},{{\"word\":\"はい\",\"used\":false,\"note\":\"Expected but not used. Try: はい、気をつけます。\"}}],\"suggestion\":\"はい、気をつけます。\"}}\n\n\
+         {example}\n\n\
+         \"summary\" and every \"note\" are read by the learner; \"suggestion\" is a corrected message in {lang_name}.\n\
          Score: 1=many errors, 2=frequent errors, 3=some errors, 4=minor issues, 5=natural.\n\
          Be concise. Omit empty arrays.",
         lang_name = lang_name,
@@ -162,34 +168,22 @@ pub async fn db_evaluate_user_message(
         message_content = message_content,
         target_words_json = target_words_json,
         context_json = context_json,
+        example = feedback_example(&explain),
     );
 
-    let url = build_url(&api_host, "chat/completions");
-    let client = Client::new();
-    let req = ChatRequest {
-        model: &model,
-        messages: &vec![ChatMessage { role: "user".to_string(), content: prompt }],
+    let learner_text = |raw: &str| {
+        serde_json::from_str::<serde_json::Value>(json_part(raw))
+            .ok()
+            .and_then(|v| v.get("summary").and_then(|x| x.as_str()).map(String::from))
+            .unwrap_or_default()
     };
-    let resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&req)
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {}", e))?;
-    if !resp.status().is_success() {
-        let status = resp.status();
-        let body = resp.text().await.unwrap_or_default();
-        return Err(format!("API error: {} — {}", status, body.trim()));
-    }
-    let parsed: ChatResponse = resp.json().await.map_err(|e| format!("Parse error: {}", e))?;
-    let feedback = parsed.choices.get(0).map(|c| c.message.content.clone()).unwrap_or_default();
+    let feedback = complete_explained(&api_host, &api_key, &model, &prompt, &explain, learner_text).await?;
 
     let score = extract_score_from_json(&feedback);
 
     conn.execute(
-        "INSERT OR REPLACE INTO user_message_feedback(message_id, score, feedback) VALUES (?1, ?2, ?3)",
-        params![message_id, score, feedback],
+        "INSERT OR REPLACE INTO user_message_feedback(message_id, score, feedback, lang) VALUES (?1, ?2, ?3, ?4)",
+        params![message_id, score, feedback, explain],
     ).map_err(|e| e.to_string())?;
 
     let msg_created_at: i64 = conn.query_row(

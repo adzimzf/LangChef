@@ -1,4 +1,5 @@
 import { FireOutlined } from '@ant-design/icons'
+import { t } from '../../lib/i18n'
 
 interface Props {
   streak: number
@@ -14,10 +15,10 @@ export default function StreakCard({ streak, longestStreak, recentActivity }: Pr
       </div>
       <div className="flex items-baseline gap-1">
         <span className="text-3xl font-bold">{streak}</span>
-        <span className="text-xs text-gray-400">day streak</span>
+        <span className="text-xs text-gray-400">{t('home.streak', { count: streak })}</span>
       </div>
       <div className="text-xs text-gray-400 mt-1">
-        Longest: {longestStreak} days
+        {t('stats.longest', { count: longestStreak })}
       </div>
       <div className="flex gap-1.5 mt-3">
         {recentActivity.map((d) => (

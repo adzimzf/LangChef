@@ -2,7 +2,8 @@ import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { BulbOutlined } from '@ant-design/icons'
 import { NONE_ANSWER } from '../lib/types'
-import type { AnswerResult, CardDetail, QuizAnswer, QuizTask, SessionSummary } from '../lib/types'
+import type { AnswerResult, CardDetail, GradeReason, QuizAnswer, QuizTask, SessionSummary } from '../lib/types'
+import { t, lang as explainLang, formatInMinutes, formatSeconds, languageName, partOfSpeechLabel } from '../lib/i18n'
 
 export const GRADE_COLORS: Record<string, string> = {
   again: 'bg-red-500',
@@ -19,12 +20,17 @@ const VERDICT_BG: Record<string, string> = {
 }
 
 const KIND_LABEL: Record<string, string> = {
-  intro_tf: 'New word',
-  true_false: 'True or false',
-  choice: 'Pick the meaning',
-  recall_confirm: 'Recall',
-  reading: 'Pick the reading',
-  context: 'In context',
+  intro_tf: t('quiz.kind.intro_tf'),
+  true_false: t('quiz.kind.true_false'),
+  choice: t('quiz.kind.choice'),
+  recall_confirm: t('quiz.kind.recall_confirm'),
+  reading: t('quiz.kind.reading'),
+  context: t('quiz.kind.context'),
+}
+
+/** A grade reason from Rust, in the learner's language. */
+function reasonText(r: GradeReason): string {
+  return t(`reason.${r.code}`, { time: r.ms != null ? formatSeconds(r.ms) : '' })
 }
 
 const optionBase = 'w-full text-left px-4 py-3 rounded-2xl bg-white border-[1.5px] border-gray-200 text-sm font-medium hover:border-blue-300 active:bg-gray-50 transition-colors disabled:opacity-60'
@@ -92,12 +98,12 @@ export function ReviewQuiz({ task, submitting, onAnswer }: {
       onClick={() => setHintUsed(true)}
       className={`flex items-center justify-center gap-1.5 py-2 text-xs text-gray-400 hover:text-gray-600 ${hintUsed ? 'invisible' : ''}`}
     >
-      <BulbOutlined /> Show furigana (counts as a hint)
+      <BulbOutlined /> {t('quiz.showFurigana')}
     </button>
   )
   const dontKnow = (
     <button type="button" disabled={submitting} onClick={() => send({ dont_know: true }, recallMs ?? undefined)} className="py-2 text-sm text-gray-400 hover:text-gray-600">
-      Don't know
+      {t('quiz.dontKnow')}
     </button>
   )
 
@@ -110,7 +116,7 @@ export function ReviewQuiz({ task, submitting, onAnswer }: {
     <div className="flex flex-col gap-3 w-full max-w-sm mx-auto">
       <div className="bg-white rounded-2xl shadow-md px-6 py-8 text-center flex flex-col items-center gap-2">
         <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-blue-50 text-blue-500">
-          {KIND_LABEL[task.kind]}{task.mature ? ' · mature' : ''}
+          {KIND_LABEL[task.kind]}{task.mature ? ` · ${t('quiz.mature')}` : ''}
         </span>
         {task.kind === 'context' && task.sentence ? (
           <div className="text-xl leading-loose">
@@ -126,28 +132,28 @@ export function ReviewQuiz({ task, submitting, onAnswer }: {
         {showMeaningOnCard && <div className="text-sm text-gray-500">{task.meaning}</div>}
         {isTf && phase === 'answer' && task.statement && (
           <>
-            <span className="text-xs text-gray-400">means</span>
+            <span className="text-xs text-gray-400">{t('quiz.means')}</span>
             <span className="px-3 py-1.5 rounded-xl bg-blue-50 text-blue-600 font-semibold">{task.statement.text}</span>
           </>
         )}
-        {phase === 'recall' && <span className="text-xs text-gray-400 mt-1">Think of the meaning, then tap</span>}
-        {task.kind === 'context' && <span className="text-xs text-gray-400 mt-1">What does the highlighted word mean here?</span>}
-        {phase === 'answer' && task.kind === 'recall_confirm' && <span className="text-xs text-gray-400 mt-1">Which meaning did you recall?</span>}
+        {phase === 'recall' && <span className="text-xs text-gray-400 mt-1">{t('quiz.thinkThenTap')}</span>}
+        {task.kind === 'context' && <span className="text-xs text-gray-400 mt-1">{t('quiz.contextQuestion')}</span>}
+        {phase === 'answer' && task.kind === 'recall_confirm' && <span className="text-xs text-gray-400 mt-1">{t('quiz.whichRecalled')}</span>}
       </div>
 
       {showTimer && <TimerBar startedAt={startedAt} />}
 
       {phase === 'intro' && (
         <button type="button" className={primaryBtn} onClick={() => { setPhase('answer'); setStartedAt(performance.now()) }}>
-          Got it
+          {t('quiz.gotIt')}
         </button>
       )}
 
       {phase === 'recall' && (
         <>
           <div className="grid grid-cols-2 gap-2">
-            <button type="button" disabled={submitting} className={secondaryBtn} onClick={() => send({ dont_know: true })}>Don't know</button>
-            <button type="button" className={primaryBtn} onClick={() => { setRecallMs(elapsed()); setPhase('answer') }}>I know it</button>
+            <button type="button" disabled={submitting} className={secondaryBtn} onClick={() => send({ dont_know: true })}>{t('quiz.dontKnow')}</button>
+            <button type="button" className={primaryBtn} onClick={() => { setRecallMs(elapsed()); setPhase('answer') }}>{t('quiz.iKnowIt')}</button>
           </div>
           {hintButton}
         </>
@@ -155,8 +161,8 @@ export function ReviewQuiz({ task, submitting, onAnswer }: {
 
       {phase === 'answer' && isTf && (
         <div className="grid grid-cols-2 gap-2">
-          <button type="button" disabled={submitting} className={secondaryBtn} onClick={() => send({ dont_know: false, tf: false })}>✕ Wrong</button>
-          <button type="button" disabled={submitting} className={secondaryBtn} onClick={() => send({ dont_know: false, tf: true })}>✓ Right</button>
+          <button type="button" disabled={submitting} className={secondaryBtn} onClick={() => send({ dont_know: false, tf: false })}>✕ {t('quiz.wrong')}</button>
+          <button type="button" disabled={submitting} className={secondaryBtn} onClick={() => send({ dont_know: false, tf: true })}>✓ {t('quiz.right')}</button>
           <div className="col-span-2 flex justify-center">{hintButton}</div>
         </div>
       )}
@@ -178,7 +184,7 @@ export function ReviewQuiz({ task, submitting, onAnswer }: {
           </div>
           {task.kind === 'recall_confirm' ? (
             <button type="button" disabled={submitting} className="py-2 text-sm text-gray-500 hover:text-gray-700" onClick={() => send({ dont_know: false, choice: NONE_ANSWER }, recallMs ?? undefined)}>
-              None of these
+              {t('quiz.noneOfThese')}
             </button>
           ) : dontKnow}
           {task.kind !== 'recall_confirm' && hintButton}
@@ -199,7 +205,7 @@ export function QuizVerdictView({ task, result, details, onNext, onOverride, ove
 }) {
   const v = result.verdict
   const [showDetails, setShowDetails] = useState(false)
-  const chosenLabel = v.chosen === NONE_ANSWER ? 'None of these' : v.chosen === 'true' ? '✓ Right' : v.chosen === 'false' ? '✕ Wrong' : v.chosen
+  const chosenLabel = v.chosen === NONE_ANSWER ? t('quiz.noneOfThese') : v.chosen === 'true' ? `✓ ${t('quiz.right')}` : v.chosen === 'false' ? `✕ ${t('quiz.wrong')}` : v.chosen
   const isTf = task.kind === 'intro_tf' || task.kind === 'true_false'
 
   return (
@@ -217,30 +223,30 @@ export function QuizVerdictView({ task, result, details, onNext, onOverride, ove
           <div className="px-4 py-3 rounded-2xl bg-white border-[1.5px] border-gray-200 text-sm flex justify-between gap-2">
             <span>“{task.statement.text}”</span>
             <span className={task.statement.text === task.meaning ? 'text-green-600' : 'text-red-500'}>
-              {task.statement.text === task.meaning ? 'is right' : 'is wrong'}
+              {task.statement.text === task.meaning ? t('quiz.isRight') : t('quiz.isWrong')}
             </span>
           </div>
         )}
         {!v.correct && !v.dont_know && chosenLabel && (
           <div className="px-4 py-3 rounded-2xl border-[1.5px] border-red-400 bg-red-50 text-sm font-medium flex justify-between">
-            <span>{chosenLabel}</span><span className="text-xs text-gray-400">your pick</span>
+            <span>{chosenLabel}</span><span className="text-xs text-gray-400">{t('quiz.yourPick')}</span>
           </div>
         )}
         {!isTf && (
           <div className="px-4 py-3 rounded-2xl border-[1.5px] border-green-500 bg-green-50 text-sm font-medium flex justify-between">
-            <span>{v.correct_answer}</span><span>✓</span>
+            <span>{v.none_correct ? t('quiz.noneCorrect', { meaning: v.correct_answer }) : v.correct_answer}</span><span>✓</span>
           </div>
         )}
       </div>
 
       <div className={`rounded-2xl p-3 flex flex-col gap-2 ${VERDICT_BG[v.grade] || 'bg-gray-50'}`}>
         <div className="flex items-center justify-between">
-          <span className={`px-2.5 py-0.5 rounded-full text-white text-xs font-bold ${GRADE_COLORS[v.grade]}`}>{v.label}</span>
-          <span className="text-xs text-gray-500">next in {v.next_review_formatted}</span>
+          <span className={`px-2.5 py-0.5 rounded-full text-white text-xs font-bold ${GRADE_COLORS[v.grade]}`}>{t(`grade.${v.grade}`)}</span>
+          <span className="text-xs text-gray-500">{t('quiz.nextIn', { when: formatInMinutes(v.next_minutes) })}</span>
         </div>
         <div className="flex flex-wrap gap-1.5">
           {v.reasons.map(r => (
-            <span key={r} className="text-[11px] px-2 py-0.5 rounded-full bg-white text-gray-500">{r}</span>
+            <span key={r.code} className="text-[11px] px-2 py-0.5 rounded-full bg-white text-gray-500">{reasonText(r)}</span>
           ))}
         </div>
         {v.confused_with && (
@@ -259,17 +265,17 @@ export function QuizVerdictView({ task, result, details, onNext, onOverride, ove
 
       {v.can_override && (
         <button type="button" disabled={overriding} onClick={onOverride} className="py-1 text-xs text-gray-400 hover:text-gray-600">
-          {overriding ? 'Fixing…' : 'I mis-tapped (1 per day)'}
+          {overriding ? t('quiz.fixing') : t('quiz.mistap')}
         </button>
       )}
 
       <button type="button" onClick={() => setShowDetails(s => !s)} className="py-1 text-xs text-gray-400 hover:text-gray-600">
-        {showDetails ? 'Hide details' : 'Show details'}
+        {showDetails ? t('quiz.hideDetails') : t('quiz.showDetails')}
       </button>
       {showDetails && <div className="bg-white rounded-2xl shadow-sm px-4 pb-4">{details}</div>}
 
       <button type="button" className={primaryBtn} onClick={onNext}>
-        {result.next_card ? 'Next →' : 'Finish'}
+        {result.next_card ? `${t('common.next')} →` : t('quiz.finish')}
       </button>
     </div>
   )
@@ -291,10 +297,10 @@ export function useAutoAdvance(result: AnswerResult | null, onNext: () => void, 
 
 export function SessionSummaryView({ summary }: { summary: SessionSummary }) {
   const grades: { key: keyof SessionSummary; label: string; color: string }[] = [
-    { key: 'again', label: 'Again', color: GRADE_COLORS.again },
-    { key: 'hard', label: 'Hard', color: GRADE_COLORS.hard },
-    { key: 'good', label: 'Good', color: GRADE_COLORS.good },
-    { key: 'easy', label: 'Easy', color: GRADE_COLORS.easy },
+    { key: 'again', label: t('grade.again'), color: GRADE_COLORS.again },
+    { key: 'hard', label: t('grade.hard'), color: GRADE_COLORS.hard },
+    { key: 'good', label: t('grade.good'), color: GRADE_COLORS.good },
+    { key: 'easy', label: t('grade.easy'), color: GRADE_COLORS.easy },
   ]
   const stat = (value: string, label: string) => (
     <div className="bg-white rounded-xl py-2 text-center">
@@ -316,14 +322,14 @@ export function SessionSummaryView({ summary }: { summary: SessionSummary }) {
   return (
     <div className="w-full max-w-sm flex flex-col gap-2 text-gray-700">
       <div className="grid grid-cols-3 gap-2">
-        {stat(`${summary.correct}/${summary.total}`, 'correct')}
-        {stat(summary.avg_ms != null ? `${(summary.avg_ms / 1000).toFixed(1)}s` : '—', 'avg answer')}
+        {stat(`${summary.correct}/${summary.total}`, t('summary.correct'))}
+        {stat(summary.avg_ms != null ? formatSeconds(summary.avg_ms) : '—', t('summary.avgAnswer'))}
         {summary.mature_retention != null
-          ? stat(`${summary.mature_retention}%`, 'mature kept')
-          : stat(String(summary.hints), summary.hints === 1 ? 'hint used' : 'hints used')}
+          ? stat(`${summary.mature_retention}%`, t('summary.matureKept'))
+          : stat(String(summary.hints), t('summary.hintsUsed', { count: summary.hints }))}
       </div>
       <div className="bg-white rounded-xl px-3 py-2 flex flex-col gap-1.5">
-        <div className="text-[11px] text-gray-400">Grades (set automatically)</div>
+        <div className="text-[11px] text-gray-400">{t('summary.grades')}</div>
         <div className="flex h-2.5 rounded-full overflow-hidden bg-gray-100">
           {grades.map(g => {
             const n = summary[g.key] as number
@@ -336,15 +342,15 @@ export function SessionSummaryView({ summary }: { summary: SessionSummary }) {
       </div>
       {summary.mature_retention != null && (
         <div className="bg-white rounded-xl px-3 py-2 text-sm flex justify-between">
-          <span>Mature retention</span>
+          <span>{t('summary.matureRetention')}</span>
           <span className={summary.mature_retention >= 90 ? 'text-green-600' : 'text-orange-500'}>
-            {summary.mature_retention}% · target 90%
+            {t('summary.retentionTarget', { n: summary.mature_retention })}
           </span>
         </div>
       )}
-      {listCard('Mixed up today', summary.mixed_up.map(m => ({ left: `${m.word} ↔ ${m.other}`, right: `${m.count}×`, tone: 'text-red-500' })))}
-      {listCard('Reading slips', summary.reading_slips.map(s => ({ left: `${s.word} ${s.reading}`, right: `picked ${s.picked}`, tone: 'text-orange-500' })))}
-      {listCard('Missed in context', summary.context_misses.map(m => ({ left: m.word, right: `picked ${m.other}'s meaning`, tone: 'text-red-500' })))}
+      {listCard(t('summary.mixedUp'), summary.mixed_up.map(m => ({ left: `${m.word} ↔ ${m.other}`, right: `${m.count}×`, tone: 'text-red-500' })))}
+      {listCard(t('summary.readingSlips'), summary.reading_slips.map(s => ({ left: `${s.word} ${s.reading}`, right: t('summary.picked', { what: s.picked }), tone: 'text-orange-500' })))}
+      {listCard(t('summary.contextMisses'), summary.context_misses.map(m => ({ left: m.word, right: t('summary.pickedMeaningOf', { word: m.other }), tone: 'text-red-500' })))}
     </div>
   )
 }
@@ -352,11 +358,11 @@ export function SessionSummaryView({ summary }: { summary: SessionSummary }) {
 const EMPTY_DETAIL: CardDetail = { reading: '', meaning: '', part_of_speech: '', example: '', example_meaning: '' }
 
 const DETAIL_FIELDS: { key: keyof CardDetail; label: string; placeholder: string }[] = [
-  { key: 'meaning', label: 'Meaning', placeholder: 'walk; stroll' },
-  { key: 'reading', label: 'Reading', placeholder: 'さんぽ' },
-  { key: 'part_of_speech', label: 'Part of speech', placeholder: 'noun' },
-  { key: 'example', label: 'Example sentence', placeholder: '毎朝、公園を散歩します。' },
-  { key: 'example_meaning', label: 'Example translation', placeholder: 'I take a walk in the park every morning.' },
+  { key: 'meaning', label: t('card.meaning'), placeholder: t('card.meaningPlaceholder') },
+  { key: 'reading', label: t('card.reading'), placeholder: 'さんぽ' },
+  { key: 'part_of_speech', label: t('card.partOfSpeech'), placeholder: t('pos.noun') },
+  { key: 'example', label: t('card.example'), placeholder: '毎朝、公園を散歩します。' },
+  { key: 'example_meaning', label: t('card.exampleMeaning'), placeholder: t('card.exampleMeaningPlaceholder') },
 ]
 
 /** A card with no meaning yet: generate or write the back, check it, then it is quizzed later. */
@@ -376,7 +382,7 @@ export function MeaningSetup({ task, hasApi, generating, saving, error, onGenera
 
   const label = (
     <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-orange-50 text-orange-500">
-      {editing ? 'Edit the back' : draft ? 'Check the back' : 'No meaning yet'}
+      {editing ? t('quiz.editBack') : draft ? t('quiz.checkBack') : t('quiz.noMeaningYet', { language: languageName(explainLang) })}
     </span>
   )
 
@@ -390,7 +396,7 @@ export function MeaningSetup({ task, hasApi, generating, saving, error, onGenera
           </div>
           {DETAIL_FIELDS.map(f => (
             <label key={f.key} className="flex flex-col gap-1">
-              <span className="text-xs text-gray-400">{f.label}{f.key === 'meaning' ? ' (required)' : ''}</span>
+              <span className="text-xs text-gray-400">{f.label}{f.key === 'meaning' ? ` ${t('card.required')}` : ''}</span>
               <input
                 id={`meaning-${f.key}`}
                 value={editing[f.key]}
@@ -403,9 +409,9 @@ export function MeaningSetup({ task, hasApi, generating, saving, error, onGenera
         </div>
         {error && <p className="text-xs text-center text-red-500">{error}</p>}
         <div className="grid grid-cols-2 gap-2">
-          <button type="button" className={secondaryBtn} onClick={() => setEditing(null)}>Cancel</button>
+          <button type="button" className={secondaryBtn} onClick={() => setEditing(null)}>{t('common.cancel')}</button>
           <button type="button" className={primaryBtn} disabled={saving || !editing.meaning.trim()} onClick={() => onSave(editing)}>
-            {saving ? 'Saving…' : 'Save, quiz me later'}
+            {saving ? t('common.saving') : t('quiz.saveLater')}
           </button>
         </div>
       </div>
@@ -422,7 +428,7 @@ export function MeaningSetup({ task, hasApi, generating, saving, error, onGenera
             <div className="h-2.5 w-3/4 rounded bg-gray-100" />
             <div className="h-2.5 w-4/5 rounded bg-gray-100" />
           </div>
-          <span className="text-xs text-gray-400">Generating reading, meaning and an example…</span>
+          <span className="text-xs text-gray-400">{t('quiz.generatingBack')}</span>
         </div>
       </div>
     )
@@ -435,11 +441,12 @@ export function MeaningSetup({ task, hasApi, generating, saving, error, onGenera
           <div className="text-center flex flex-col items-center gap-1">
             {label}
             <Word word={task.word} reading={draft.reading} showReading size="text-3xl" />
+            <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600">{t('common.aiMade')}</span>
           </div>
           <div className="flex flex-col gap-1 text-sm">
-            <div className="flex justify-between gap-3"><span className="text-gray-400">Meaning</span><span className="font-semibold text-right">{draft.meaning}</span></div>
+            <div className="flex justify-between gap-3"><span className="text-gray-400">{t('card.meaning')}</span><span className="font-semibold text-right">{draft.meaning}</span></div>
             {draft.part_of_speech && (
-              <div className="flex justify-between gap-3"><span className="text-gray-400">Type</span><span className="text-right">{draft.part_of_speech}</span></div>
+              <div className="flex justify-between gap-3"><span className="text-gray-400">{t('card.partOfSpeech')}</span><span className="text-right">{partOfSpeechLabel(draft.part_of_speech)}</span></div>
             )}
           </div>
           {draft.example && (
@@ -451,13 +458,13 @@ export function MeaningSetup({ task, hasApi, generating, saving, error, onGenera
         </div>
         {error && <p className="text-xs text-center text-red-500">{error}</p>}
         <button type="button" className={primaryBtn} disabled={saving} onClick={() => onSave(draft)}>
-          {saving ? 'Saving…' : 'Looks right, quiz me later'}
+          {saving ? t('common.saving') : t('quiz.looksRight')}
         </button>
         <div className="grid grid-cols-2 gap-2">
-          <button type="button" className={secondaryBtn} onClick={() => setEditing({ ...draft })}>✎ Edit</button>
-          <button type="button" className={secondaryBtn} disabled={!hasApi} onClick={onGenerate}>↻ Regenerate</button>
+          <button type="button" className={secondaryBtn} onClick={() => setEditing({ ...draft })}>✎ {t('common.edit')}</button>
+          <button type="button" className={secondaryBtn} disabled={!hasApi} onClick={onGenerate}>↻ {t('card.regenerate')}</button>
         </div>
-        <button type="button" className="py-1 text-xs text-gray-400 hover:text-gray-600" onClick={onSkip}>Skip for today</button>
+        <button type="button" className="py-1 text-xs text-gray-400 hover:text-gray-600" onClick={onSkip}>{t('quiz.skipToday')}</button>
       </div>
     )
   }
@@ -468,24 +475,22 @@ export function MeaningSetup({ task, hasApi, generating, saving, error, onGenera
         {label}
         <div className="text-4xl font-semibold">{task.word}</div>
         <span className="text-xs text-gray-400 mt-1">
-          {hasApi
-            ? 'Add the back of this card and it will be quizzed later in this session.'
-            : 'AI generation needs an API key. Add one in Settings, or write the meaning yourself.'}
+          {hasApi ? t('quiz.addBackHint') : t('quiz.needApiHint')}
         </span>
       </div>
       {error && <p className="text-xs text-center text-red-500">{error}</p>}
       {hasApi ? (
-        <button type="button" className={primaryBtn} onClick={onGenerate}>✨ Generate meaning</button>
+        <button type="button" className={primaryBtn} onClick={onGenerate}>✨ {t('quiz.generateMeaning')}</button>
       ) : (
-        <button type="button" className={primaryBtn} onClick={() => setEditing({ ...EMPTY_DETAIL })}>Write it myself</button>
+        <button type="button" className={primaryBtn} onClick={() => setEditing({ ...EMPTY_DETAIL })}>{t('quiz.writeMyself')}</button>
       )}
       <div className="grid grid-cols-2 gap-2">
         {hasApi ? (
-          <button type="button" className={secondaryBtn} onClick={() => setEditing({ ...EMPTY_DETAIL })}>Write it myself</button>
+          <button type="button" className={secondaryBtn} onClick={() => setEditing({ ...EMPTY_DETAIL })}>{t('quiz.writeMyself')}</button>
         ) : (
-          <button type="button" className={secondaryBtn} onClick={onOpenSettings}>Open Settings</button>
+          <button type="button" className={secondaryBtn} onClick={onOpenSettings}>{t('quiz.openSettings')}</button>
         )}
-        <button type="button" className={secondaryBtn} onClick={onSkip}>Skip for today</button>
+        <button type="button" className={secondaryBtn} onClick={onSkip}>{t('quiz.skipToday')}</button>
       </div>
     </div>
   )

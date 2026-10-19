@@ -7,6 +7,7 @@ import {
   Tooltip,
   ResponsiveContainer,
 } from 'recharts'
+import { t } from '../../lib/i18n'
 
 interface Props {
   data: { date: string; label: string; mastered: number | null; total: number | null }[]
@@ -16,8 +17,8 @@ export default function MasteryChart({ data }: Props) {
   if (data.length === 0) {
     return (
       <div className="bg-white rounded-xl p-4 shadow-sm">
-        <h3 className="text-sm font-medium text-gray-600 mb-3">Mastery Growth</h3>
-        <p className="text-sm text-gray-400">No mastery data yet</p>
+        <h3 className="text-sm font-medium text-gray-600 mb-3">{t('stats.mastery')}</h3>
+        <p className="text-sm text-gray-400">{t('stats.noMastery')}</p>
       </div>
     )
   }
@@ -25,13 +26,13 @@ export default function MasteryChart({ data }: Props) {
   return (
     <div className="bg-white rounded-xl p-4 shadow-sm">
       <div className="flex items-center justify-between mb-3">
-        <h3 className="text-sm font-medium text-gray-600">Mastery Growth</h3>
+        <h3 className="text-sm font-medium text-gray-600">{t('stats.mastery')}</h3>
         <div className="flex items-center gap-3 text-[10px]">
           <span className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-green-500 inline-block" /> Mastered
+            <span className="w-2 h-2 rounded-full bg-green-500 inline-block" /> {t('stats.mastered')}
           </span>
           <span className="flex items-center gap-1">
-            <span className="w-2 h-2 rounded-full bg-green-200 inline-block" /> Total cards
+            <span className="w-2 h-2 rounded-full bg-green-200 inline-block" /> {t('stats.totalCards')}
           </span>
         </div>
       </div>

@@ -7,9 +7,14 @@ import type { JLPTLevel } from '../lib/jlpt'
 import type { ReviewItem } from '../lib/types'
 import { parseDetailJson } from '../lib/types'
 import UserMessageFeedback, { type UserFeedback } from '../components/UserMessageFeedback'
+import WordSheet from '../components/WordSheet'
+import HelpReplySheet from '../components/HelpReplySheet'
+import { t, lang as explainLang, errorText, languageName, partOfSpeechLabel } from '../lib/i18n'
+import { languageLabel } from '../lib/languages'
+import { readFlag, CHAT_HINTS_KEY, ROMAJI_KEY, ROMAJI_INPUT_KEY } from '../lib/prefs'
 import { Input } from 'antd'
 const { TextArea } = Input
-import { ArrowLeftOutlined, SendOutlined, InfoCircleOutlined, CloseOutlined, PlusOutlined, EditOutlined, LeftOutlined, RightOutlined, DownOutlined, UpOutlined } from '@ant-design/icons'
+import { ArrowLeftOutlined, SendOutlined, InfoCircleOutlined, CloseOutlined, PlusOutlined, EditOutlined, LeftOutlined, RightOutlined, DownOutlined, UpOutlined, TranslationOutlined, LoadingOutlined, BulbOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 
@@ -20,31 +25,54 @@ type BranchPointInfo = {
   selectedIndex: number  // Index of the currently selected sibling
 }
 
-const LANGUAGES: Record<string, { label: string, flag: string }> = {
-  ja: { label: 'Japanese', flag: '🇯🇵' },
-  id: { label: 'Indonesian', flag: '🇮🇩' },
+/** Hint lines the partner may add (Settings → Hints in chat) start with this and are shown apart. */
+const HINT_MARK = '💡'
+
+/**
+ * Topic presets. `prompt` is the English topic sent to the LLM and stored on the session;
+ * the label shown is translated. The work-in-Japan topics come first for Indonesian learners.
+ */
+const SUGGESTIONS: { key: string; prompt: string }[] = [
+  { key: 'random', prompt: 'Random Topic' },
+  { key: 'selfIntro', prompt: 'Self-introduction' },
+  { key: 'jobInterview', prompt: 'Job interview in Japan' },
+  { key: 'atWork', prompt: 'At work in Japan (factory, elderly care, restaurant)' },
+  { key: 'shopping', prompt: 'Shopping and the convenience store' },
+  { key: 'station', prompt: 'At the train station' },
+  { key: 'doctor', prompt: 'At the doctor' },
+  { key: 'phone', prompt: 'Talking on the phone' },
+  { key: 'travel', prompt: 'Travel' },
+  { key: 'food', prompt: 'Food' },
+  { key: 'work', prompt: 'Work' },
+  { key: 'daily', prompt: 'Daily routine' },
+  { key: 'hobbies', prompt: 'Hobbies' },
+  { key: 'entertainment', prompt: 'Entertainment' },
+  { key: 'technology', prompt: 'Technology' },
+  { key: 'health', prompt: 'Health & Wellness' },
+  { key: 'education', prompt: 'Learning & Education' },
+  { key: 'relationships', prompt: 'Relationships' },
+  { key: 'news', prompt: 'Current Events' },
+  { key: 'nature', prompt: 'Nature & Environment' },
+  { key: 'culture', prompt: 'Art & Culture' },
+  { key: 'finance', prompt: 'Personal Finance' },
+  { key: 'home', prompt: 'Home & Living' },
+  { key: 'sports', prompt: 'Sports & Recreation' },
+  { key: 'future', prompt: 'Future & Aspirations' },
+]
+
+/** Topic as shown to the learner (sessions store the English prompt). */
+function topicLabel(topic: string): string {
+  const s = SUGGESTIONS.find((x) => x.prompt === topic)
+  return s ? t(`topic.${s.key}`) : topic
 }
 
-const SUGGESTIONS = [
-  'Random Topic',
-  'Travel',
-  'Food',
-  'Work',
-  'Daily routine',
-  'Hobbies',
-  'Entertainment',
-  'Technology',
-  'Health & Wellness',
-  'Learning & Education',
-  'Relationships',
-  'Current Events',
-  'Nature & Environment',
-  'Art & Culture',
-  'Personal Finance',
-  'Home & Living',
-  'Sports & Recreation',
-  'Future & Aspirations'
-];
+/** Splits the partner's reply into the target-language text and any hint lines. */
+function splitHints(content: string): { body: string; hints: string[] } {
+  const lines = content.split('\n')
+  const hints = lines.filter((l) => l.trim().startsWith(HINT_MARK)).map((l) => l.trim().slice(HINT_MARK.length).trim())
+  const body = lines.filter((l) => !l.trim().startsWith(HINT_MARK)).join('\n').trim()
+  return { body, hints }
+}
 
 const MAX_REVIEWS_DEFAULT = 100
 const MAX_REVIEWS_KEY = 'max_reviews_per_day'
@@ -130,7 +158,7 @@ function getNewCardsToday(): number {
   return stored ? parseInt(stored, 10) : 0
 }
 
-type GrammarDBItem = { id: string; pattern: string; detail: string; language: string; level: string; is_default: number }
+type GrammarDBItem = { id: string; pattern: string; detail: string; language: string; level: string; is_default: number; ai_translated?: boolean }
 
 function TypingIndicator() {
   return (
@@ -271,6 +299,16 @@ export default function Chat() {
   const [atBottom, setAtBottom] = useState(true)
   const lastScrollTopRef = useRef(0)
   const [previewTargets, setPreviewTargets] = useState<{ difficult: string[]; known: string[]; resetUsed: boolean }>({ difficult: [], known: [], resetUsed: false })
+  // Learning aids: tap-a-word sheet, translations, romaji, help me reply
+  const [wordSheet, setWordSheet] = useState<{ word: string; base: string } | null>(null)
+  const [translations, setTranslations] = useState<Map<number, string>>(new Map())
+  const [shownTranslations, setShownTranslations] = useState<Set<number>>(new Set())
+  const [translatingId, setTranslatingId] = useState<number | null>(null)
+  const [romajiByMessage, setRomajiByMessage] = useState<Map<number, string>>(new Map())
+  const [showHelpReply, setShowHelpReply] = useState(false)
+  const romajiEnabled = lang === 'ja' && readFlag(ROMAJI_KEY)
+  const romajiInput = lang === 'ja' && readFlag(ROMAJI_INPUT_KEY)
+  const romajiInputSeq = useRef(0)
 
   // Detail popup for target chips
   const [detailIndex, setDetailIndex] = useState<number | null>(null)
@@ -350,7 +388,7 @@ export default function Chat() {
     return () => window.removeEventListener('keydown', onKey)
   }, [detailIndex])
 
-  const langInfo = LANGUAGES[lang]
+  const langName = languageName(lang)
 
   // Compute visible path through the message tree
   const { visibleMessages, branchPoints } = useMemo(() =>
@@ -557,8 +595,8 @@ export default function Chat() {
       for (const msg of assistantMessages) {
         if (!msg.id) continue
 
-        // Strip furigana for tokenization
-        const plainText = stripFurigana(msg.content)
+        // Strip furigana for tokenization; hint lines are rendered apart, so leave them out
+        const plainText = stripFurigana(splitHints(msg.content).body)
         const { tokens, colors } = await getWordColors(plainText)
 
         setWordColorsByMessage(prev => {
@@ -571,6 +609,61 @@ export default function Chat() {
 
     fetchColors()
   }, [messages, lang])
+
+  // Romaji under each partner reply, for beginners (Settings → Show romaji)
+  useEffect(() => {
+    if (!romajiEnabled) return
+    const pending = messages.filter(m => m.role === 'assistant' && m.id && !romajiByMessage.has(m.id) && !m.content.startsWith('[Error]'))
+    for (const m of pending) {
+      invoke<string>('to_romaji', { text: stripFurigana(splitHints(m.content).body) })
+        .then(r => setRomajiByMessage(prev => new Map(prev).set(m.id!, r)))
+        .catch(() => {})
+    }
+  }, [messages, romajiEnabled])
+
+  async function toggleTranslation(m: Msg) {
+    if (!m.id) return
+    const id = m.id
+    if (shownTranslations.has(id)) {
+      setShownTranslations(prev => { const next = new Set(prev); next.delete(id); return next })
+      return
+    }
+    setShownTranslations(prev => new Set(prev).add(id))
+    if (translations.has(id) || !apiHost || !apiKey) return
+    setTranslatingId(id)
+    try {
+      const text = await invoke<string>('llm_translate', {
+        apiHost, apiKey, model, text: splitHints(m.content).body, fromLang: lang || 'ja', kind: 'message', refId: id,
+      })
+      setTranslations(prev => new Map(prev).set(id, text))
+    } catch (e) {
+      setTranslations(prev => new Map(prev).set(id, errorText(e)))
+    }
+    setTranslatingId(null)
+  }
+
+  // Typing romaji turns it into kana (for keyboards without Japanese). Only the latest call applies.
+  function handleInputChange(value: string) {
+    setInput(value)
+    if (!romajiInput) return
+    const seq = ++romajiInputSeq.current
+    invoke<string>('romaji_to_kana_input', { text: value, finish: false })
+      .then(kana => { if (seq === romajiInputSeq.current && kana !== value) setInput(kana) })
+      .catch(() => {})
+  }
+
+  async function finishRomaji(text: string): Promise<string> {
+    if (!romajiInput) return text
+    return invoke<string>('romaji_to_kana_input', { text, finish: true }).catch(() => text)
+  }
+
+  // Adds a tapped word to the deck, keeping a meaning the sheet already looked up.
+  async function addWordFromSheet(content: string, detail: string | null) {
+    await markWordDifficult(content)
+    if (!detail) return
+    const [item] = await invoke<ReviewItem[]>('db_get_review_items_by_words', { words: [content.toLowerCase()] })
+    if (item && !item.detail) await invoke('db_update_review_detail', { id: item.id, detail })
+  }
 
   // Auto-scroll
   useEffect(() => {
@@ -736,7 +829,7 @@ export default function Chat() {
       setGrammarAnalysis(stripMarkdownFence(analysis))
     } catch (e) {
       const errMsg = e instanceof Error ? e.message : String(e)
-      setGrammarAnalysis(`**Error analyzing grammar:** ${errMsg}`)
+      setGrammarAnalysis(`**${t('chat.analysisFailed')}** ${errorText(errMsg)}`)
     } finally {
       setGrammarAnalysisLoading(null)
     }
@@ -865,7 +958,8 @@ export default function Chat() {
   }
 
   function buildSSRSystemPrompt(targetWords: string[], topic?: string | null): string {
-    const langName = langInfo?.label || 'the target language'
+    // LLM-facing: always the English language name.
+    const langName = ({ ja: 'Japanese', id: 'Indonesian' } as Record<string, string>)[lang] || 'the target language'
 
     let prompt = `You are a language learning conversation partner. The target language is ${langName}. Reply in ${langName} only. `
     prompt += `Keep the conversation natural and engaging. `
@@ -903,13 +997,14 @@ export default function Chat() {
     }
 
     if (topic) {
-      const topicLabel = topic === 'Random Topic' ? 'a random interesting topic of your choice' : `"${topic}"`
-      prompt += `\n\nCONVERSATION TOPIC: The topic for this session is ${topicLabel}. Keep the conversation centered around this topic.`
+      const topicText = topic === 'Random Topic' ? 'a random interesting topic of your choice' : `"${topic}"`
+      prompt += `\n\nCONVERSATION TOPIC: The topic for this session is ${topicText}. Keep the conversation centered around this topic.`
     }
 
-    if (topic) {
-      const topicLabel = topic === 'Random Topic' ? 'a random interesting topic of your choice' : `"${topic}"`
-      prompt += `\n\nCONVERSATION TOPIC: The topic for this session is ${topicLabel}. Keep the conversation centered around this topic.`
+    // One short hint in the learner's own language (Settings → Hints in chat), shown apart from the reply.
+    if (readFlag(CHAT_HINTS_KEY)) {
+      const explainName = ({ en: 'English', id: 'Indonesian (Bahasa Indonesia)' } as Record<string, string>)[explainLang]
+      prompt += `\n\nHINT RULE: After your reply, add ONE extra line that starts with "${HINT_MARK} " and explains, in ${explainName}, one word or phrase from your reply the learner may not know (e.g. "${HINT_MARK} 飲み物 = ${explainLang === 'id' ? 'minuman' : 'drink'}"). Keep the hint under 12 words. Everything else stays in ${langName}.`
     }
 
     prompt += `\n\nIf the user seems stuck, offer a hint or rephrase. Encourage them to keep trying in ${langName}.`
@@ -937,7 +1032,7 @@ export default function Chat() {
   }
 
   async function send(message?: string) {
-    const msg = message?.trim() || input.trim()
+    const msg = (await finishRomaji(message?.trim() || input.trim())).trim()
     if (!msg) return
     if (!sessionId) {
       try {
@@ -1060,7 +1155,7 @@ export default function Chat() {
         if (mounted.current) setLoading(false)
       }
     } else {
-      const fallback = `Let's talk about it. Which parts feel tricky for you? Try rephrasing in the target language.`
+      const fallback = t('chat.noApiFallback')
       const fallbackParentId = userId >= 0 ? userId : null
       const fallbackMsg: Msg = { id: null, role: 'assistant', content: fallback, parentMessageId: fallbackParentId, isActivePath: true }
       const fallbackIdx = nextMessages.length
@@ -1282,9 +1377,20 @@ export default function Chat() {
 
   function renderAssistantContent(content: string, messageId: number | null) {
     if (content.startsWith('[Error]')) {
-      return <span className="text-red-500 text-sm">{content}</span>
+      return <span className="text-red-500 text-sm">{errorText(content.slice('[Error]'.length).trim())}</span>
     }
-    return renderTextSegment(content, messageId)
+    const { body, hints } = splitHints(content)
+    return (
+      <>
+        {renderTextSegment(body, messageId)}
+        {romajiEnabled && messageId && romajiByMessage.get(messageId) && (
+          <div className="text-xs text-gray-400 mt-1">{romajiByMessage.get(messageId)}</div>
+        )}
+        {hints.map((h, i) => (
+          <div key={i} className="text-xs text-indigo-600 mt-1 flex items-start gap-1"><BulbOutlined className="mt-0.5" />{h}</div>
+        ))}
+      </>
+    )
   }
 
   function renderTextSegment(content: string, messageId: number | null) {
@@ -1326,14 +1432,14 @@ export default function Chat() {
         return (
           <span
             key={idx}
-            onClick={() => markWordDifficult(surface)}
+            onClick={() => setWordSheet({ word: surface, base: token.base_form || surface })}
             className={`cursor-pointer rounded px-0.5 transition-colors ${
               isHard
                 ? diffInfo.difficulty_bg_class + ' text-white'
                 : 'hover:bg-blue-50 active:bg-yellow-50'
             }`}
             style={isHard ? { color: '#fff' } : undefined}
-            title={isHard ? 'Marked difficult' : 'Tap to mark difficult'}
+            title={isHard ? t('chat.markedDifficult') : t('chat.tapForMeaning')}
           >
             {renderFurigana(slice, showFurigana)}
           </span>
@@ -1366,14 +1472,14 @@ export default function Chat() {
         return (
           <span
             key={idx}
-            onClick={() => markWordDifficult(part)}
+            onClick={() => setWordSheet({ word: part, base: part })}
             className={`cursor-pointer rounded px-0.5 transition-colors ${
               isHard
                 ? diffInfo.difficulty_bg_class + ' text-white'
                 : 'hover:bg-blue-50 active:bg-yellow-50'
             }`}
             style={isHard ? { color: '#fff' } : undefined}
-            title={isHard ? 'Marked difficult' : 'Tap to mark difficult'}
+            title={isHard ? t('chat.markedDifficult') : t('chat.tapForMeaning')}
           >
             {renderFurigana(slice, showFurigana)}
           </span>
@@ -1392,14 +1498,14 @@ export default function Chat() {
       return (
         <span
           key={idx}
-          onClick={() => markWordDifficult(part)}
+          onClick={() => setWordSheet({ word: part, base: part })}
           className={`cursor-pointer rounded px-0.5 transition-colors ${
             isHard
               ? diffInfo.difficulty_bg_class + ' text-white'
               : 'hover:bg-blue-50 active:bg-yellow-50'
           }`}
           style={isHard ? { color: '#fff' } : undefined}
-          title={isHard ? 'Marked difficult' : 'Tap to mark difficult'}
+          title={isHard ? t('chat.markedDifficult') : t('chat.tapForMeaning')}
         >
           {part}
         </span>
@@ -1416,17 +1522,18 @@ export default function Chat() {
       <div className="sticky top-0 z-10 flex items-center gap-3 px-3 py-2 bg-white border-b shrink-0 safe-top">
         <button
           onClick={() => navigate('/chats')}
+          aria-label={t('common.back')}
           className="flex items-center justify-center w-9 h-9 rounded-full hover:bg-gray-100 active:bg-gray-200 transition-colors"
         >
           <ArrowLeftOutlined className="text-lg" />
         </button>
         <div className="flex-1 min-w-0">
           <h2 className="text-base font-semibold truncate">
-            {langInfo ? `${langInfo.flag} ${langInfo.label}` : 'Conversation'}
+            {lang ? languageLabel(lang) : t('chat.conversation')}
           </h2>
           <div className="flex items-center gap-1.5">
             {loading && (
-              <span className="text-xs text-gray-400">typing...</span>
+              <span className="text-xs text-gray-400">{t('chat.typing')}</span>
             )}
             {lang === 'ja' && (
               <span className="text-xs font-medium px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600">
@@ -1444,7 +1551,7 @@ export default function Chat() {
                 : 'bg-gray-100 text-gray-700 hover:bg-gray-200'
             }`}
           >
-            {showFurigana ? 'ふりがな ON' : 'ふりがな OFF'}
+            {showFurigana ? t('chat.furiganaOn') : t('chat.furiganaOff')}
           </button>
         )}
       </div>
@@ -1454,7 +1561,7 @@ export default function Chat() {
         <div className="shrink-0 bg-white border-b px-3 py-2 relative">
           <div className="flex items-center gap-2 flex-wrap">
             {selectedGrammarItems.length === 0 && (
-              <span className="text-xs text-gray-400">Select grammar to practice</span>
+              <span className="text-xs text-gray-400">{t('chat.selectGrammar')}</span>
             )}
             {selectedGrammarItems.map(g => (
               <span
@@ -1464,7 +1571,8 @@ export default function Chat() {
                 <button
                   onClick={() => setGrammarInfoItem(g)}
                   className="hover:text-indigo-800 transition-colors"
-                  title="Grammar info"
+                  title={t('chat.grammarInfo')}
+                  aria-label={t('chat.grammarInfo')}
                 >
                   <InfoCircleOutlined style={{ fontSize: 12 }} />
                 </button>
@@ -1476,7 +1584,8 @@ export default function Chat() {
                     setSelectedGrammar(next)
                   }}
                   className="hover:text-indigo-800 transition-colors"
-                  title="Remove"
+                  title={t('chat.remove')}
+                  aria-label={t('chat.remove')}
                 >
                   <CloseOutlined style={{ fontSize: 10 }} />
                 </button>
@@ -1488,7 +1597,7 @@ export default function Chat() {
               className="shrink-0 px-2.5 py-1 rounded-full text-sm bg-indigo-50 text-indigo-600 hover:bg-indigo-100 active:bg-indigo-200 transition-colors flex items-center gap-1"
             >
               <PlusOutlined style={{ fontSize: 11 }} />
-              Grammar
+              {t('home.grammar')}
             </button>
           </div>
 
@@ -1500,7 +1609,7 @@ export default function Chat() {
             >
               <div className="px-2 space-y-0.5">
                 {grammarItems.length === 0 && (
-                  <div className="px-3 py-2 text-sm text-gray-400">No grammar items for this level</div>
+                  <div className="px-3 py-2 text-sm text-gray-400">{t('grammar.empty')}</div>
                 )}
                 {grammarItems.map(g => {
                   const isSelected = selectedGrammar.has(g.id)
@@ -1546,6 +1655,7 @@ export default function Chat() {
               <h3 className="text-base font-semibold">{grammarInfoItem.pattern}</h3>
               <button
                 onClick={() => setGrammarInfoItem(null)}
+                aria-label={t('common.close')}
                 className="text-gray-400 hover:text-gray-600"
               >
                 <CloseOutlined />
@@ -1554,6 +1664,7 @@ export default function Chat() {
             <div className="grammar-detail prose prose-sm max-w-none text-gray-600">
               <ReactMarkdown>{grammarInfoItem.detail}</ReactMarkdown>
             </div>
+            {grammarInfoItem.ai_translated && <div className="text-[11px] text-indigo-600 mt-2">{t('common.aiTranslated')}</div>}
           </div>
         </div>
       )}
@@ -1569,9 +1680,10 @@ export default function Chat() {
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-3">
-              <h3 className="text-base font-semibold">Grammar Analysis</h3>
+              <h3 className="text-base font-semibold">{t('chat.grammarAnalysis')}</h3>
               <button
                 onClick={() => setGrammarAnalysis(null)}
+                aria-label={t('common.close')}
                 className="text-gray-400 hover:text-gray-600"
               >
                 <CloseOutlined />
@@ -1597,26 +1709,26 @@ export default function Chat() {
           >
             <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-amber-50/95 border border-amber-200 text-xs font-medium text-amber-700 shadow-sm backdrop-blur-sm pointer-events-auto">
               <span className="text-[10px]">💬</span>
-              <span className="text-[10px] text-amber-400 uppercase tracking-wider">Topic</span>
-              {selectedTopic}
+              <span className="text-[10px] text-amber-400 uppercase tracking-wider">{t('chat.topic')}</span>
+              {topicLabel(selectedTopic)}
             </span>
           </div>
         )}
         {messages.length === 0 && !loading && (
           <div className="flex flex-col items-center justify-end h-full text-gray-400 gap-3 pb-2">
             <div className="text-4xl">💬</div>
-            <p className="text-sm text-center">Start a conversation in {langInfo?.label || 'your target language'}</p>
-            <p className="text-xs text-center text-blue-400">Tap words in replies to mark them difficult</p>
+            <p className="text-sm text-center">{t('chat.startIn', { language: langName || t('chat.yourTarget') })}</p>
+            <p className="text-xs text-center text-blue-400">{t('chat.tapWordsHint')}</p>
             <div className="w-full mt-1 overflow-x-auto">
               <div className="grid gap-2" style={{ gridTemplateRows: 'repeat(3, auto)', gridAutoFlow: 'column' }}>
               {SUGGESTIONS.map((s, i) => (
                 <button
-                  key={s}
-                  onClick={() => startTopicConversation(s)}
+                  key={s.key}
+                  onClick={() => startTopicConversation(s.prompt)}
                   className="shrink-0 whitespace-nowrap px-4 py-2 rounded-full text-sm bg-white border border-gray-200 text-gray-600 shadow-sm hover:bg-blue-50 hover:border-blue-200 hover:text-blue-600 active:bg-blue-100 transition-all duration-200 animate-fade-in-up"
                   style={{ animationDelay: `${i * 80}ms` }}
                 >
-                  {s}
+                  {t(`topic.${s.key}`)}
                 </button>
               ))}
               </div>
@@ -1652,11 +1764,12 @@ export default function Chat() {
                       className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
                         hasOlder ? 'text-blue-400 hover:text-blue-200' : 'text-gray-500 cursor-not-allowed'
                       }`}
-                      title="Older version"
+                      title={t('chat.olderVersion')}
+                      aria-label={t('chat.olderVersion')}
                     >
                       <RightOutlined style={{ fontSize: 9 }} />
                     </button>
-                    <span className="text-[9px] text-blue-300/70">edited {selectedIndex + 1}/{siblings.length}</span>
+                    <span className="text-[9px] text-blue-300/70">{t('chat.edited', { n: selectedIndex + 1, total: siblings.length })}</span>
                     <button
                       onClick={() => {
                         if (hasNewer) {
@@ -1668,7 +1781,8 @@ export default function Chat() {
                       className={`text-[10px] px-1.5 py-0.5 rounded transition-colors ${
                         hasNewer ? 'text-blue-400 hover:text-blue-200' : 'text-gray-500 cursor-not-allowed'
                       }`}
-                      title="Newer version"
+                      title={t('chat.newerVersion')}
+                      aria-label={t('chat.newerVersion')}
                     >
                       <LeftOutlined style={{ fontSize: 9 }} />
                     </button>
@@ -1693,7 +1807,8 @@ export default function Chat() {
                           setTimeout(() => inputRef.current?.focus(), 0)
                         }}
                         className="mt-1 text-blue-300 hover:text-blue-100 transition-colors"
-                        title="Edit message"
+                        title={t('chat.editMessage')}
+                        aria-label={t('chat.editMessage')}
                       >
                         <EditOutlined style={{ fontSize: 12 }} />
                       </button>
@@ -1720,15 +1835,32 @@ export default function Chat() {
                 {m.role === 'assistant' ? (
                   <div>
                     {renderAssistantContent(m.content, m.id)}
-                    <button
-                      onClick={() => handleGrammarAnalysis(m.id, m.content)}
-                      disabled={m.id === null || grammarAnalysisLoading === m.id}
-                      className="mt-1 text-gray-400 hover:text-indigo-500 transition-colors disabled:opacity-30"
-                      title="Analyze grammar"
-                    >
-                      <InfoCircleOutlined style={{ fontSize: 14 }} />
-                      {grammarAnalysisLoading === m.id && <span className="ml-1 text-xs text-gray-400">analyzing...</span>}
-                    </button>
+                    {m.id && shownTranslations.has(m.id) && (
+                      <div className="mt-2 pt-2 border-t border-dashed border-gray-200 text-sm text-gray-600 whitespace-pre-wrap">
+                        {translatingId === m.id ? <LoadingOutlined spin /> : translations.get(m.id)}
+                      </div>
+                    )}
+                    {!m.content.startsWith('[Error]') && (
+                      <div className="flex items-center gap-3 mt-1">
+                        <button
+                          onClick={() => toggleTranslation(m)}
+                          disabled={m.id === null || !apiHost || !apiKey}
+                          className="flex items-center gap-1 text-xs text-gray-400 hover:text-blue-500 transition-colors disabled:opacity-30"
+                        >
+                          <TranslationOutlined style={{ fontSize: 12 }} />
+                          {m.id && shownTranslations.has(m.id) ? t('chat.hideTranslation') : t('chat.translate')}
+                        </button>
+                        <button
+                          onClick={() => handleGrammarAnalysis(m.id, m.content)}
+                          disabled={m.id === null || grammarAnalysisLoading === m.id}
+                          className="flex items-center gap-1 text-xs text-gray-400 hover:text-indigo-500 transition-colors disabled:opacity-30"
+                          title={t('chat.analyzeGrammar')}
+                        >
+                          <InfoCircleOutlined style={{ fontSize: 12 }} />
+                          {grammarAnalysisLoading === m.id ? t('chat.analyzing') : t('home.grammar')}
+                        </button>
+                      </div>
+                    )}
                   </div>
                 ) : m.content}
               </div>
@@ -1744,7 +1876,8 @@ export default function Chat() {
                         setTimeout(() => inputRef.current?.focus(), 0)
                       }}
                       className="mt-1 text-blue-300 hover:text-blue-100 transition-colors"
-                      title="Edit message"
+                      title={t('chat.editMessage')}
+                        aria-label={t('chat.editMessage')}
                     >
                       <EditOutlined style={{ fontSize: 12 }} />
                     </button>
@@ -1773,26 +1906,26 @@ export default function Chat() {
           >
             <div className="px-3">
               <div className="flex items-center gap-1.5 mb-1">
-                <span className="text-[9px] font-semibold text-gray-400 uppercase tracking-wider">Try to use</span>
+                <span className="text-[9px] font-semibold text-gray-400 uppercase tracking-wider">{t('chat.tryToUse')}</span>
                 <span className="text-[9px] text-gray-300">
-                  {previewTargets.difficult.length} hard · {previewTargets.known.length} known
+                  {t('chat.targetCounts', { hard: previewTargets.difficult.length, known: previewTargets.known.length })}
                 </span>
               </div>
               <div className="flex flex-nowrap gap-1 overflow-x-auto" style={{ scrollbarWidth: 'none' }}>
-                {targetChips.map((t, i) => {
+                {targetChips.map((chip, i) => {
                   const expanded = detailIndex === i
-                  const palette = t.kind === 'hard'
+                  const palette = chip.kind === 'hard'
                     ? { chip: 'bg-red-50 text-red-600 border-red-200', btn: 'hover:bg-red-100 text-red-500' }
                     : { chip: 'bg-blue-50 text-blue-600 border-blue-200', btn: 'hover:bg-blue-100 text-blue-500' }
                   return (
                     <span
-                      key={`${t.kind}-${t.word}`}
+                      key={`${chip.kind}-${chip.word}`}
                       className={`shrink-0 flex items-center gap-1 pl-2 pr-1 py-0.5 rounded-full text-xs font-medium border whitespace-nowrap ${palette.chip}`}
                     >
-                      <span>{t.word}</span>
+                      <span>{chip.word}</span>
                       <button
                         onClick={() => expanded ? closeDetail() : openDetail(i)}
-                        aria-label={expanded ? 'Collapse word detail' : 'Expand word detail'}
+                        aria-label={expanded ? t('chat.collapseWord') : t('chat.expandWord')}
                         className={`flex items-center justify-center w-4 h-4 rounded-full transition-colors ${palette.btn}`}
                       >
                         {expanded ? <UpOutlined style={{ fontSize: 8 }} /> : <DownOutlined style={{ fontSize: 8 }} />}
@@ -1813,21 +1946,30 @@ export default function Chat() {
       >
         {editingMessageId && (
           <div className="flex items-center gap-2 mb-1">
-            <span className="text-[10px] font-semibold text-blue-500 uppercase tracking-wider">Edit</span>
+            <span className="text-[10px] font-semibold text-blue-500 uppercase tracking-wider">{t('common.edit')}</span>
             <button
               onClick={() => { setEditingMessageId(null); setInput('') }}
               className="text-[10px] text-gray-400 hover:text-gray-600 transition-colors"
             >
-              Cancel
+              {t('common.cancel')}
             </button>
           </div>
+        )}
+        {!editingMessageId && apiHost && apiKey && lang && lang !== explainLang && (
+          <button
+            onClick={() => setShowHelpReply(true)}
+            disabled={loading}
+            className="mb-1.5 flex items-center gap-1.5 px-3 py-1 rounded-full bg-indigo-50 text-indigo-700 text-xs font-medium disabled:opacity-50"
+          >
+            <BulbOutlined /> {t('chat.helpReply')}
+          </button>
         )}
         <div className="flex items-end gap-2">
           <TextArea
             ref={inputRef}
             value={input}
-            onChange={(e) => setInput(e.target.value)}
-            placeholder={editingMessageId ? 'Retype your message using target words...' : `Type in ${langInfo?.label || 'target language'}...`}
+            onChange={(e) => handleInputChange(e.target.value)}
+            placeholder={editingMessageId ? t('chat.retypePlaceholder') : romajiInput ? t('chat.romajiPlaceholder') : t('chat.typeIn', { language: langName || t('chat.yourTarget') })}
             className="flex-1 rounded-2xl bg-gray-100 border-none"
             style={{ borderRadius: 20, padding: '8px 16px', resize: 'none' }}
             autoSize={{ minRows: 1, maxRows: 4 }}
@@ -1854,6 +1996,7 @@ export default function Chat() {
               }
             }}
             disabled={!input.trim() || loading}
+            aria-label={t('chat.send')}
             className={`
               flex items-center justify-center w-10 h-10 rounded-full shrink-0 transition-colors
               ${input.trim() && !loading
@@ -1890,7 +2033,7 @@ export default function Chat() {
               </div>
               <button
                 onClick={closeDetail}
-                aria-label="Close detail"
+                aria-label={t('common.close')}
                 className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 transition-colors"
               >
                 <CloseOutlined />
@@ -1901,7 +2044,7 @@ export default function Chat() {
               {detailIndex > 0 && (
                 <button
                   onClick={() => openDetail(detailIndex - 1)}
-                  aria-label="Previous word"
+                  aria-label={t('chat.previousWord')}
                   className="hidden sm:flex absolute left-1 top-1/2 -translate-y-1/2 z-10 w-8 h-8 items-center justify-center rounded-full bg-white/90 shadow border border-gray-200 hover:bg-gray-50"
                 >
                   <LeftOutlined />
@@ -1910,7 +2053,7 @@ export default function Chat() {
               {detailIndex < targetChips.length - 1 && (
                 <button
                   onClick={() => openDetail(detailIndex + 1)}
-                  aria-label="Next word"
+                  aria-label={t('chat.nextWord')}
                   className="hidden sm:flex absolute right-1 top-1/2 -translate-y-1/2 z-10 w-8 h-8 items-center justify-center rounded-full bg-white/90 shadow border border-gray-200 hover:bg-gray-50"
                 >
                   <RightOutlined />
@@ -1923,49 +2066,49 @@ export default function Chat() {
                 className="h-full overflow-x-auto overflow-y-auto flex snap-x snap-mandatory"
                 style={{ scrollbarWidth: 'none' }}
               >
-                {targetChips.map((t, i) => {
-                  const item = detailItems.get(t.word)
+                {targetChips.map((chip, i) => {
+                  const item = detailItems.get(chip.word)
                   const parsed = item?.detail ? parseDetailJson(item.detail) : null
                   return (
                     <div
-                      key={`${t.kind}-${t.word}-${i}`}
+                      key={`${chip.kind}-${chip.word}-${i}`}
                       ref={el => { if (el) detailCardRefs.current.set(i, el); else detailCardRefs.current.delete(i) }}
                       className="snap-center shrink-0 w-full px-5 py-4 overflow-y-auto"
                     >
                       <div className="flex items-center justify-center gap-2 mb-2">
-                        <span className={`text-[10px] px-2 py-0.5 rounded-full text-white ${t.kind === 'hard' ? 'bg-red-500' : 'bg-blue-500'}`}>
-                          {t.kind === 'hard' ? 'Difficult' : 'Known'}
+                        <span className={`text-[10px] px-2 py-0.5 rounded-full text-white ${chip.kind === 'hard' ? 'bg-red-500' : 'bg-blue-500'}`}>
+                          {chip.kind === 'hard' ? t('chat.difficult') : t('chat.known')}
                         </span>
-                        {item?.state_label && (
+                        {item?.state && (
                           <span className="text-[10px] px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">
-                            {item.state_label}
+                            {t(`cardState.${item.state}`)}
                           </span>
                         )}
                       </div>
-                      <div className="text-2xl font-semibold text-center mb-3">{t.word}</div>
+                      <div className="text-2xl font-semibold text-center mb-3">{chip.word}</div>
 
                       {!item ? (
                         <div className="text-center text-sm text-gray-400 py-6">
-                          No saved entry yet. Tap the word in chat to add it to your deck.
+                          {t('chat.noSavedEntry')}
                         </div>
                       ) : (
                         <div className="space-y-2 text-left">
                           {parsed?.reading && (
                             <div className="flex items-baseline gap-2">
-                              <span className="text-xs text-gray-400 w-24 shrink-0">Reading</span>
+                              <span className="text-xs text-gray-400 w-24 shrink-0">{t('card.reading')}</span>
                               <span className="text-sm font-medium">{parsed.reading}</span>
                             </div>
                           )}
                           {parsed?.meaning && (
                             <div className="flex items-baseline gap-2">
-                              <span className="text-xs text-gray-400 w-24 shrink-0">Meaning</span>
+                              <span className="text-xs text-gray-400 w-24 shrink-0">{t('card.meaning')}</span>
                               <span className="text-sm font-medium">{parsed.meaning}</span>
                             </div>
                           )}
                           {parsed?.part_of_speech && (
                             <div className="flex items-baseline gap-2">
-                              <span className="text-xs text-gray-400 w-24 shrink-0">Part of speech</span>
-                              <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{parsed.part_of_speech}</span>
+                              <span className="text-xs text-gray-400 w-24 shrink-0">{t('card.partOfSpeech')}</span>
+                              <span className="text-xs px-2 py-0.5 rounded-full bg-gray-100 text-gray-600">{partOfSpeechLabel(parsed.part_of_speech)}</span>
                             </div>
                           )}
                           {parsed?.example && (
@@ -1979,9 +2122,12 @@ export default function Chat() {
                           {!parsed && item.detail && (
                             <p className="text-sm text-gray-600 whitespace-pre-wrap">{item.detail}</p>
                           )}
+                          {!item.detail && (
+                            <p className="text-sm text-gray-400">{t('quiz.noMeaningYet', { language: languageName(explainLang) })}</p>
+                          )}
                           {item.mnemonic && (
                             <div className="pt-2 mt-2 border-t border-gray-100">
-                              <span className="text-xs text-gray-400">Mnemonic</span>
+                              <span className="text-xs text-gray-400">{t('card.mnemonic')}</span>
                               <p className="text-sm text-amber-700 bg-amber-50 p-2 rounded-lg mt-1">{item.mnemonic}</p>
                             </div>
                           )}
@@ -1999,7 +2145,7 @@ export default function Chat() {
                   <button
                     key={i}
                     onClick={() => openDetail(i)}
-                    aria-label={`Go to word ${i + 1}`}
+                    aria-label={t('chat.goToWord', { n: i + 1 })}
                     className={`h-1.5 rounded-full transition-all ${i === detailIndex ? 'w-4 bg-gray-600' : 'w-1.5 bg-gray-300'}`}
                   />
                 ))}
@@ -2007,6 +2153,28 @@ export default function Chat() {
             )}
           </div>
         </div>
+      )}
+
+      {wordSheet && (
+        <WordSheet
+          word={wordSheet.word}
+          base={wordSheet.base}
+          language={lang || 'ja'}
+          api={{ apiHost, apiKey, model: localStorage.getItem('api_vocab_model') || model }}
+          onAdd={addWordFromSheet}
+          onClose={() => setWordSheet(null)}
+        />
+      )}
+
+      {showHelpReply && (
+        <HelpReplySheet
+          language={lang || 'ja'}
+          levelRule={lang === 'ja' ? JLPT_LEVELS[jlptLevel]?.promptRule ?? null : null}
+          context={visibleMessages.filter(m => !m.content.startsWith('[Error]')).map(m => ({ role: m.role, content: m.content }))}
+          api={{ apiHost, apiKey, model }}
+          onUse={(text) => { setInput(text); setShowHelpReply(false); setTimeout(() => inputRef.current?.focus(), 0) }}
+          onClose={() => setShowHelpReply(false)}
+        />
       )}
     </div>
   )

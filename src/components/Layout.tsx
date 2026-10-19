@@ -14,6 +14,7 @@ import {
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useActiveTimeHeartbeat } from '../hooks/useActiveTimeHeartbeat'
+import { t } from '../lib/i18n'
 
 type LinderaStage = 'idle' | 'downloading' | 'extracting' | 'building' | 'ready' | 'error'
 
@@ -24,11 +25,11 @@ interface LinderaProgress {
 }
 
 const NAV_ITEMS = [
-  { key: 'home', label: 'Home', icon: HomeOutlined, path: '/' },
-  { key: 'chats', label: 'Chats', icon: MessageOutlined, path: '/chats' },
-  { key: 'reading', label: 'Read', icon: FileTextOutlined, path: '/reading' },
-  { key: 'review', label: 'Review', icon: BookOutlined, path: '/review' },
-  { key: 'settings', label: 'Settings', icon: SettingOutlined, path: '/settings' },
+  { key: 'home', label: t('nav.home'), icon: HomeOutlined, path: '/' },
+  { key: 'chats', label: t('nav.chats'), icon: MessageOutlined, path: '/chats' },
+  { key: 'reading', label: t('nav.reading'), icon: FileTextOutlined, path: '/reading' },
+  { key: 'review', label: t('nav.review'), icon: BookOutlined, path: '/review' },
+  { key: 'settings', label: t('nav.settings'), icon: SettingOutlined, path: '/settings' },
 ]
 
 export default function Layout({ children }: { children: React.ReactNode }) {
@@ -47,14 +48,15 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     const unlisten = listen<LinderaProgress>('lindera-progress', (event) => {
       const { stage, message, percent } = event.payload
       setLinderaStage(stage as LinderaStage)
-      setLinderaMessage(message)
+      const key = `lindera.${stage}`
+      setLinderaMessage(t(key) === key ? message : t(key))
       setLinderaPercent(percent)
     })
 
     // Trigger init — no-op if dict already cached; otherwise starts download
     invoke<string>('init_lindera_dict').catch((err) => {
       setLinderaStage('error')
-      setLinderaMessage(String(err))
+      setLinderaMessage(`${t('lindera.error')} ${String(err)}`)
     })
 
     return () => {

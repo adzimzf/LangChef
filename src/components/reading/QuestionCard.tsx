@@ -1,6 +1,7 @@
 import { useState } from 'react'
 import { CheckCircleOutlined, CloseCircleOutlined, InfoCircleOutlined, LoadingOutlined } from '@ant-design/icons'
 import type { AnswerEvaluation } from '../../lib/types'
+import { t } from '../../lib/i18n'
 
 interface Props {
   question: string
@@ -31,10 +32,10 @@ export default function QuestionCard({
 
   const resultStyle = evaluation
     ? evaluation.result === 'correct'
-      ? { bg: 'bg-green-50 border-green-200', icon: <CheckCircleOutlined className="text-green-500" />, label: 'Correct!' }
+      ? { bg: 'bg-green-50 border-green-200', icon: <CheckCircleOutlined className="text-green-500" />, label: t('reading.correct') }
       : evaluation.result === 'partial'
-        ? { bg: 'bg-yellow-50 border-yellow-200', icon: <InfoCircleOutlined className="text-yellow-500" />, label: 'Almost there' }
-        : { bg: 'bg-red-50 border-red-200', icon: <CloseCircleOutlined className="text-red-500" />, label: 'Not quite' }
+        ? { bg: 'bg-yellow-50 border-yellow-200', icon: <InfoCircleOutlined className="text-yellow-500" />, label: t('reading.partial') }
+        : { bg: 'bg-red-50 border-red-200', icon: <CloseCircleOutlined className="text-red-500" />, label: t('reading.incorrect') }
     : null
 
   const isAnswered = !!evaluation
@@ -46,7 +47,7 @@ export default function QuestionCard({
     <div className="flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <span className="text-xs font-medium text-gray-400 uppercase tracking-wide">
-          Question {index + 1} / {total}
+          {t('reading.questionOf', { n: index + 1, total })}
         </span>
       </div>
 
@@ -57,7 +58,7 @@ export default function QuestionCard({
           placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-300
           resize-none disabled:opacity-60"
         rows={3}
-        placeholder="Type your answer…"
+        placeholder={t('reading.answerPlaceholderGeneric')}
         value={answer}
         onChange={(e) => setAnswer(e.target.value)}
         disabled={submitting || isCorrect}
@@ -82,7 +83,7 @@ export default function QuestionCard({
             className="flex-1 py-3 rounded-xl bg-blue-500 text-white font-semibold text-[15px]
               disabled:opacity-40 active:bg-blue-600 flex items-center justify-center gap-2"
           >
-            {submitting ? <><LoadingOutlined spin /> Checking…</> : 'Submit'}
+            {submitting ? <><LoadingOutlined spin /> {t('reading.checking')}</> : t('reading.submit')}
           </button>
         )}
         {isCorrect && (
@@ -90,7 +91,7 @@ export default function QuestionCard({
             onClick={onNext}
             className="flex-1 py-3 rounded-xl bg-green-500 text-white font-semibold text-[15px] active:bg-green-600"
           >
-            {index + 1 < total ? 'Next Question →' : 'Finish'}
+            {index + 1 < total ? `${t('reading.nextQuestion')} →` : t('quiz.finish')}
           </button>
         )}
         {isPartial && (
@@ -100,13 +101,13 @@ export default function QuestionCard({
               className="flex-1 py-3 rounded-xl border border-yellow-300 bg-yellow-50 text-yellow-700
                 font-semibold text-[15px] active:bg-yellow-100"
             >
-              Try Again
+              {t('common.retry')}
             </button>
             <button
               onClick={onContinue}
               className="flex-1 py-3 rounded-xl bg-blue-500 text-white font-semibold text-[15px] active:bg-blue-600"
             >
-              {index + 1 < total ? 'Continue →' : 'Finish'}
+              {index + 1 < total ? `${t('common.continue')} →` : t('quiz.finish')}
             </button>
           </>
         )}
@@ -116,7 +117,7 @@ export default function QuestionCard({
             className="flex-1 py-3 rounded-xl border border-red-200 bg-red-50 text-red-600
               font-semibold text-[15px] active:bg-red-100"
           >
-            Try Again
+            {t('common.retry')}
           </button>
         )}
       </div>

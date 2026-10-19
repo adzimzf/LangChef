@@ -8,6 +8,7 @@ No test suite. Use these to verify changes before finishing:
 
 ```bash
 npx tsc --noEmit                    # Frontend type check
+npm run i18n:check                  # Dictionaries in sync, no hardcoded UI text
 cd src-tauri && GOOGLE_CLIENT_ID=test GOOGLE_CLIENT_SECRET=test cargo check    # Rust compile check (no binary)
 cd src-tauri && GOOGLE_CLIENT_ID=test GOOGLE_CLIENT_SECRET=test cargo clippy   # Rust lint
 ```
@@ -23,6 +24,15 @@ Three steps — all must be done together:
 1. **Rust** (`src-tauri/src/lib.rs`): implement `#[tauri::command] fn your_fn(...)` and add it to `.invoke_handler(tauri::generate_handler![..., your_fn])`
 2. **Frontend**: call via `invoke('your_fn', { ...args })`
 3. **Type**: add corresponding TypeScript type in `src/lib/types.ts` if a new struct is returned
+
+## User-Visible Text (i18n)
+
+The app ships in English and Bahasa Indonesia. Never hardcode UI text:
+
+- **Frontend:** use `t('area.key', { params })` from `src/lib/i18n.ts` and add the key to **both** `src/locales/en.json` and `id.json` (plain, friendly Indonesian; "Anda"). Format dates/numbers/relative times with the helpers in `i18n.ts` (`formatDate`, `formatInMinutes`, …), never hand-built English.
+- **Backend:** don't return English sentences. Return codes the frontend translates: errors via `locale::app_error(code, detail)` (add `error.<code>` keys), grade reasons as `GradeReason { code, ms }`.
+- **LLM prompts:** prompts stay in English, but anything the learner reads must use `chat::complete_explained(...)` (appends `explain_instruction`); the reply to a chat stays in the target language. Use `locale::lang_name` instead of a new `"ja" => "Japanese"` match.
+- **Card meanings:** every write of `review_items.detail` also sets `meaning_lang` to `explain_lang(conn)`; read `detail` through `review_cols()` / `effective_detail_sql()`.
 
 ## DB Schema Changes
 

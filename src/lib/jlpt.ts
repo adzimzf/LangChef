@@ -1,3 +1,5 @@
+import { t } from './i18n'
+
 /**
  * JLPT level definitions for Japanese conversation adaptation.
  *
@@ -10,7 +12,7 @@ export type JLPTLevel = 'N5' | 'N4' | 'N3' | 'N2' | 'N1'
 export interface JLPTLevelInfo {
   /** Display label */
   label: string
-  /** Short description shown in the picker */
+  /** Short description shown in the picker, in the learner's language */
   description: string
   /** Maximum number of clauses/bunsetsu per sentence */
   maxClauses: number
@@ -26,7 +28,7 @@ export interface JLPTLevelInfo {
 export const JLPT_LEVELS: Record<JLPTLevel, JLPTLevelInfo> = {
   N5: {
     label: 'N5',
-    description: 'Basic — simple greetings, self-introduction',
+    description: t('jlpt.N5'),
     maxClauses: 1,
     maxChars: 25,
     promptRule: `JLPT N5 CONSTRAINTS:
@@ -39,7 +41,7 @@ export const JLPT_LEVELS: Record<JLPTLevel, JLPTLevelInfo> = {
   },
   N4: {
     label: 'N4',
-    description: 'Elementary — daily life, simple opinions',
+    description: t('jlpt.N4'),
     maxClauses: 2,
     maxChars: 40,
     promptRule: `JLPT N4 CONSTRAINTS:
@@ -51,7 +53,7 @@ export const JLPT_LEVELS: Record<JLPTLevel, JLPTLevelInfo> = {
   },
   N3: {
     label: 'N3',
-    description: 'Intermediate — opinions, reasons, comparisons',
+    description: t('jlpt.N3'),
     maxClauses: 3,
     maxChars: 60,
     promptRule: `JLPT N3 CONSTRAINTS:
@@ -62,7 +64,7 @@ export const JLPT_LEVELS: Record<JLPTLevel, JLPTLevelInfo> = {
   },
   N2: {
     label: 'N2',
-    description: 'Upper-intermediate — nuanced discussion, keigo',
+    description: t('jlpt.N2'),
     maxClauses: 4,
     maxChars: 80,
     promptRule: `JLPT N2 CONSTRAINTS:
@@ -73,7 +75,7 @@ export const JLPT_LEVELS: Record<JLPTLevel, JLPTLevelInfo> = {
   },
   N1: {
     label: 'N1',
-    description: 'Advanced — natural, any register',
+    description: t('jlpt.N1'),
     maxClauses: 0, // no limit
     maxChars: 0,   // no limit
     promptRule: `JLPT N1 CONSTRAINTS:

@@ -3,7 +3,7 @@ import { invoke } from '@tauri-apps/api/core'
 import {
   ArrowLeftOutlined, DownOutlined, UpOutlined, LoadingOutlined,
   PlusOutlined, CheckCircleOutlined, ClockCircleOutlined,
-  InfoCircleOutlined, CloseCircleOutlined,
+  InfoCircleOutlined, CloseCircleOutlined, TranslationOutlined,
 } from '@ant-design/icons'
 import ReadingTextComponent from '../components/reading/ReadingText'
 import ReadingSummary from '../components/reading/ReadingSummary'
@@ -16,25 +16,21 @@ import type {
   ReadingSessionSummary,
   ReviewItem,
 } from '../lib/types'
+import { t, lang as explainLang, errorText, formatDate, languageName } from '../lib/i18n'
+import { TARGET_LANGUAGES } from '../lib/languages'
+import { readFlag, writeFlag, READING_ANSWER_NATIVE_KEY } from '../lib/prefs'
 
 type Phase = 'init' | 'home' | 'level-pick' | 'loading' | 'reading' | 'qa' | 'summary'
 
-const LANGUAGES = [
-  { code: 'ja', label: 'Japanese', flag: '🇯🇵', levels: ['N5', 'N4', 'N3', 'N2', 'N1'] },
-  { code: 'id', label: 'Indonesian', flag: '🇮🇩', levels: ['A1', 'A2', 'B1', 'B2'] },
-]
-
-const LEVEL_DESCRIPTIONS: Record<string, string> = {
-  N5: 'Beginner — simple sentences',
-  N4: 'Elementary — daily life topics',
-  N3: 'Intermediate — opinions, reasons',
-  N2: 'Upper-intermediate — nuanced discussion',
-  N1: 'Advanced — natural, complex topics',
-  A1: 'Beginner — very simple phrases',
-  A2: 'Elementary — familiar everyday topics',
-  B1: 'Intermediate — main points',
-  B2: 'Upper-intermediate — complex texts',
+const LEVELS: Record<string, string[]> = {
+  ja: ['N5', 'N4', 'N3', 'N2', 'N1'],
+  id: ['A1', 'A2', 'B1', 'B2'],
 }
+
+const LANGUAGES = TARGET_LANGUAGES.map((l) => ({ ...l, levels: LEVELS[l.code] ?? [] }))
+
+/** Beginner levels where comprehension answers may be given in the learner's own language. */
+const NATIVE_ANSWER_LEVELS = ['N5', 'N4', 'A1', 'A2']
 
 const LANG_STORAGE_KEY = 'reading_language'
 const LEVEL_STORAGE_KEY = 'reading_level'
@@ -47,18 +43,23 @@ function defaultFurigana(level: string): boolean {
 
 function relativeDate(dateStr: string): string {
   const date = new Date(dateStr)
-  const now = new Date()
-  const diffDays = Math.floor((now.getTime() - date.getTime()) / 86400000)
-  if (diffDays === 0) return 'Today'
-  if (diffDays === 1) return 'Yesterday'
-  if (diffDays < 7) return `${diffDays}d ago`
-  if (diffDays < 30) return `${Math.floor(diffDays / 7)}w ago`
-  return `${Math.floor(diffDays / 30)}mo ago`
+  const diffDays = Math.floor((Date.now() - date.getTime()) / 86400000)
+  if (diffDays <= 0) return t('time.today')
+  if (diffDays === 1) return t('time.yesterday')
+  return formatDate(date)
+}
+
+/** Source badge: RSS feed name, or AI-written ("ai", or "AI Generated" in older sessions). */
+function sourceLabel(source: string): string {
+  return source === 'ai' || source === 'AI Generated' ? t('reading.sourceAi') : source
 }
 
 export default function Reading() {
   const [phase, setPhase] = useState<Phase>('init')
-  const [language, setLanguage] = useState(() => localStorage.getItem(LANG_STORAGE_KEY) || 'ja')
+  const [language, setLanguage] = useState(() => {
+    const stored = localStorage.getItem(LANG_STORAGE_KEY)
+    return LANGUAGES.some((l) => l.code === stored) ? stored! : (LANGUAGES[0]?.code ?? 'ja')
+  })
   const [level, setLevel] = useState(() => localStorage.getItem(LEVEL_STORAGE_KEY) || 'N4')
   const [loadingMsg, setLoadingMsg] = useState('')
   const [error, setError] = useState('')
@@ -76,6 +77,10 @@ export default function Reading() {
   const [submitting, setSubmitting] = useState(false)
   const [showPassage, setShowPassage] = useState(false)
   const [currentAnswer, setCurrentAnswer] = useState('')
+  const [translation, setTranslation] = useState<string | null>(null)
+  const [showTranslation, setShowTranslation] = useState(false)
+  const [translating, setTranslating] = useState(false)
+  const [answerNative, setAnswerNative] = useState(() => readFlag(READING_ANSWER_NATIVE_KEY))
 
   const startTimeRef = useRef<number>(Date.now())
   const [elapsedSeconds, setElapsedSeconds] = useState(0)
@@ -85,8 +90,29 @@ export default function Reading() {
   const apiKey = localStorage.getItem('api_key') || ''
   const model = localStorage.getItem('api_model') || ''
 
-  const currentLang = LANGUAGES.find(l => l.code === language)!
-  const levels = currentLang?.levels ?? []
+  const currentLang = LANGUAGES.find(l => l.code === language)
+  const levels = currentLang?.levels ?? LEVELS[language] ?? []
+
+  // Translation of the whole passage, only shown when the learner asks; cached per session in Rust.
+  async function toggleTranslation() {
+    if (showTranslation) { setShowTranslation(false); return }
+    setShowTranslation(true)
+    if (translation || !text) return
+    setTranslating(true)
+    try {
+      const res = await invoke<string>('llm_translate', {
+        apiHost, apiKey, model,
+        text: text.plain_body,
+        fromLang: text.language,
+        kind: sessionId && sessionId > 0 ? 'reading' : null,
+        refId: sessionId && sessionId > 0 ? sessionId : null,
+      })
+      setTranslation(res)
+    } catch (e) {
+      setTranslation(errorText(e))
+    }
+    setTranslating(false)
+  }
 
   useEffect(() => {
     invoke<ReviewItem[]>('db_get_review_items').then(setReviewItems).catch(() => {})
@@ -123,6 +149,8 @@ export default function Reading() {
     setCurrentQ(session.current_q)
     setAnswers(session.answers)
     setEvaluation(null)
+    setTranslation(null)
+    setShowTranslation(false)
     setShowFurigana(defaultFurigana(session.level))
     // Complete sessions go to reading view so user can re-read; in-progress resume at their phase
     setPhase(session.phase === 'complete' ? 'reading' : session.phase as Phase)
@@ -133,7 +161,7 @@ export default function Reading() {
     localStorage.setItem(LEVEL_STORAGE_KEY, level)
     setError('')
     setPhase('loading')
-    setLoadingMsg('Fetching article…')
+    setLoadingMsg(t('reading.fetching'))
 
     const targetWords = reviewItems
       .filter(item => !item.language || item.language === language)
@@ -146,12 +174,12 @@ export default function Reading() {
         apiHost, apiKey, model, language, level, targetWords,
       })
     } catch (e) {
-      setError(String(e))
+      setError(errorText(e))
       setPhase('level-pick')
       return
     }
 
-    setLoadingMsg('Generating questions…')
+    setLoadingMsg(t('reading.generatingQuestions'))
     let qs: ReadingQuestion[]
     try {
       qs = await invoke<ReadingQuestion[]>('generate_reading_questions', {
@@ -160,7 +188,7 @@ export default function Reading() {
         language, level,
       })
     } catch (e) {
-      setError(String(e))
+      setError(errorText(e))
       setPhase('level-pick')
       return
     }
@@ -180,6 +208,8 @@ export default function Reading() {
     setCurrentQ(0)
     setAnswers([])
     setEvaluation(null)
+    setTranslation(null)
+    setShowTranslation(false)
     setShowFurigana(defaultFurigana(level))
     startTimeRef.current = Date.now()
     setTotalRetries(0)
@@ -205,6 +235,7 @@ export default function Reading() {
         userAnswer,
         plainBody: text.plain_body,
         language,
+        answerInExplain: answerNative && NATIVE_ANSWER_LEVELS.includes(text.level),
       })
       setEvaluation(result)
       if (result.result !== 'correct') {
@@ -218,7 +249,7 @@ export default function Reading() {
         persistSession('qa', currentQ, newAnswers)
       }
     } catch (e) {
-      setEvaluation({ result: 'incorrect', feedback: String(e) })
+      setEvaluation({ result: 'incorrect', feedback: errorText(e) })
     } finally {
       setSubmitting(false)
     }
@@ -272,22 +303,22 @@ export default function Reading() {
       <div className="h-full flex flex-col max-w-lg mx-auto">
       <div className="shrink-0 pt-6 pb-3 flex items-center justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-gray-900">Reading</h1>
-          <p className="text-sm text-gray-500 mt-0.5">Articles &amp; comprehension</p>
+          <h1 className="text-2xl font-bold text-gray-900">{t('home.reading')}</h1>
+          <p className="text-sm text-gray-500 mt-0.5">{t('reading.subtitle')}</p>
         </div>
         <button
           onClick={() => { setError(''); setPhase('level-pick') }}
           className="flex items-center gap-1.5 px-4 py-2 rounded-xl bg-blue-500 text-white
             font-semibold text-sm active:bg-blue-600"
         >
-          <PlusOutlined /> New Article
+          <PlusOutlined /> {t('reading.newArticle')}
         </button>
       </div>
       <div className="flex-1 overflow-y-auto pb-2">
         {sessions.length === 0 ? (
           <div className="flex flex-col items-center justify-center py-16 gap-4 text-center">
             <span className="text-5xl">📖</span>
-            <p className="text-gray-500 text-sm">No articles yet.<br />Tap <strong>New Article</strong> to get started.</p>
+            <p className="text-gray-500 text-sm">{t('reading.empty')}</p>
           </div>
         ) : (
           <div className="flex flex-col gap-3">
@@ -308,21 +339,21 @@ export default function Reading() {
                     <span className={`shrink-0 flex items-center gap-1 text-[11px] font-medium px-2 py-0.5 rounded-full
                       ${isDone ? 'bg-green-100 text-green-600' : 'bg-blue-100 text-blue-600'}`}>
                       {isDone
-                        ? <><CheckCircleOutlined /> Done</>
-                        : <><ClockCircleOutlined /> In Progress</>}
+                        ? <><CheckCircleOutlined /> {t('reading.done')}</>
+                        : <><ClockCircleOutlined /> {t('reading.inProgress')}</>}
                     </span>
                   </div>
                   <div className="flex items-center gap-2 flex-wrap">
                     <span className="text-[11px] text-gray-400">{LANG_FLAGS[s.language] ?? ''} {s.level}</span>
                     <span className="text-[11px] text-gray-300">·</span>
-                    <span className="text-[11px] text-gray-400">{s.source}</span>
+                    <span className="text-[11px] text-gray-400">{sourceLabel(s.source)}</span>
                     <span className="text-[11px] text-gray-300">·</span>
                     <span className="text-[11px] text-gray-400">{relativeDate(s.created_at)}</span>
                     {isInProgress && s.total_questions > 0 && (
                       <>
                         <span className="text-[11px] text-gray-300">·</span>
                         <span className="text-[11px] text-blue-500 font-medium">
-                          Q {s.current_q + 1}/{s.total_questions}
+                          {t('reading.questionShort', { n: s.current_q + 1, total: s.total_questions })}
                         </span>
                       </>
                     )}
@@ -330,7 +361,7 @@ export default function Reading() {
                       <>
                         <span className="text-[11px] text-gray-300">·</span>
                         <span className="text-[11px] text-green-600 font-medium">
-                          {s.total_questions}/{s.total_questions} Qs
+                          {t('reading.allAnswered', { n: s.total_questions })}
                         </span>
                       </>
                     )}
@@ -351,10 +382,10 @@ export default function Reading() {
       <div className="h-full overflow-y-auto">
       <div className="flex flex-col pt-6 pb-4 gap-6 max-w-lg mx-auto">
         <div className="flex items-center gap-3">
-          <button onClick={goHome} className="text-gray-400 active:text-gray-600 p-1">
+          <button onClick={goHome} aria-label={t('common.back')} className="text-gray-400 active:text-gray-600 p-1">
             <ArrowLeftOutlined className="text-xl" />
           </button>
-          <h1 className="text-xl font-bold text-gray-900">New Article</h1>
+          <h1 className="text-xl font-bold text-gray-900">{t('reading.newArticle')}</h1>
         </div>
 
         {error && (
@@ -363,8 +394,9 @@ export default function Reading() {
           </div>
         )}
 
+        {LANGUAGES.length > 1 && (
         <div>
-          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Language</p>
+          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">{t('common.language')}</p>
           <div className="flex gap-2">
             {LANGUAGES.map(lang => (
               <button
@@ -380,9 +412,10 @@ export default function Reading() {
             ))}
           </div>
         </div>
+        )}
 
         <div>
-          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">Level</p>
+          <p className="text-xs font-semibold text-gray-400 uppercase tracking-wide mb-2">{t('common.level')}</p>
           <div className="flex flex-col gap-2">
             {levels.map(lvl => (
               <button
@@ -394,7 +427,7 @@ export default function Reading() {
                 <span className={`text-[15px] font-bold w-10 shrink-0 ${level === lvl ? 'text-blue-600' : 'text-gray-700'}`}>
                   {lvl}
                 </span>
-                <span className="text-sm text-gray-600">{LEVEL_DESCRIPTIONS[lvl] ?? ''}</span>
+                <span className="text-sm text-gray-600">{t(`readingLevel.${lvl}`)}</span>
               </button>
             ))}
           </div>
@@ -404,7 +437,7 @@ export default function Reading() {
           onClick={startReading}
           className="w-full py-3.5 rounded-xl bg-blue-500 text-white font-semibold text-[15px] active:bg-blue-600"
         >
-          Start Reading
+          {t('reading.start')}
         </button>
       </div>
       </div>
@@ -427,14 +460,14 @@ export default function Reading() {
       <div className="h-full flex flex-col max-w-lg mx-auto">
         {/* Fixed header */}
         <div className="shrink-0 pt-6 pb-3 flex items-center gap-3 bg-gray-50">
-          <button onClick={goHome} className="text-gray-400 active:text-gray-600 p-1">
+          <button onClick={goHome} aria-label={t('common.back')} className="text-gray-400 active:text-gray-600 p-1">
             <ArrowLeftOutlined className="text-xl" />
           </button>
           <div className="flex-1 min-w-0">
-            <h1 className="text-base font-bold text-gray-900 truncate">{text.title}</h1>
+            <h1 className="text-base font-bold text-gray-900 truncate">{text.title || t('reading.untitled')}</h1>
             <div className="flex items-center gap-2 mt-0.5">
               <span className="text-[11px] bg-gray-100 text-gray-500 px-2 py-0.5 rounded-full font-medium">
-                {text.source}
+                {sourceLabel(text.source)}
               </span>
               <span className="text-[11px] bg-blue-50 text-blue-500 px-2 py-0.5 rounded-full font-medium">
                 {text.level}
@@ -447,7 +480,7 @@ export default function Reading() {
               className={`shrink-0 px-3 py-1.5 rounded-xl text-xs font-semibold border
                 ${showFurigana ? 'bg-indigo-50 border-indigo-200 text-indigo-600' : 'bg-gray-50 border-gray-200 text-gray-500'}`}
             >
-              {showFurigana ? 'ふ ON' : 'ふ OFF'}
+              {showFurigana ? t('reading.furiganaOn') : t('reading.furiganaOff')}
             </button>
           )}
         </div>
@@ -457,6 +490,18 @@ export default function Reading() {
           <div className="bg-white rounded-2xl border border-gray-100 shadow-sm px-5 py-5 mb-4">
             <ReadingTextComponent text={text} reviewItems={reviewItems} showFurigana={showFurigana} />
           </div>
+          <button
+            onClick={toggleTranslation}
+            className="flex items-center gap-1.5 text-sm text-blue-600 mb-2 px-1"
+          >
+            <TranslationOutlined />
+            {showTranslation ? t('reading.hideTranslation') : t('reading.showTranslation', { language: languageName(explainLang) })}
+          </button>
+          {showTranslation && (
+            <div className="bg-blue-50 rounded-2xl px-5 py-4 mb-4 text-sm text-gray-700 whitespace-pre-wrap">
+              {translating ? <LoadingOutlined spin /> : translation}
+            </div>
+          )}
         </div>
 
         {/* Fixed footer */}
@@ -465,7 +510,7 @@ export default function Reading() {
             onClick={beginQA}
             className="w-full py-3.5 rounded-xl bg-blue-500 text-white font-semibold text-[15px] active:bg-blue-600"
           >
-            Start Questions
+            {t('reading.startQuestions')}
           </button>
         </div>
       </div>
@@ -482,22 +527,22 @@ export default function Reading() {
 
     const resultStyle = evaluation
       ? evaluation.result === 'correct'
-        ? { bg: 'bg-green-50 border-green-200', icon: <CheckCircleOutlined className="text-green-500" />, label: 'Correct!' }
+        ? { bg: 'bg-green-50 border-green-200', icon: <CheckCircleOutlined className="text-green-500" />, label: t('reading.correct') }
         : evaluation.result === 'partial'
-          ? { bg: 'bg-yellow-50 border-yellow-200', icon: <InfoCircleOutlined className="text-yellow-500" />, label: 'Almost there' }
-          : { bg: 'bg-red-50 border-red-200', icon: <CloseCircleOutlined className="text-red-500" />, label: 'Not quite' }
+          ? { bg: 'bg-yellow-50 border-yellow-200', icon: <InfoCircleOutlined className="text-yellow-500" />, label: t('reading.partial') }
+          : { bg: 'bg-red-50 border-red-200', icon: <CloseCircleOutlined className="text-red-500" />, label: t('reading.incorrect') }
       : null
 
     return (
       <div className="h-full flex flex-col max-w-lg mx-auto">
         {/* Fixed header */}
         <div className="shrink-0 pt-6 pb-3 flex items-center gap-3 bg-gray-50">
-          <button onClick={goHome} className="text-gray-400 active:text-gray-600 p-1">
+          <button onClick={goHome} aria-label={t('common.back')} className="text-gray-400 active:text-gray-600 p-1">
             <ArrowLeftOutlined className="text-xl" />
           </button>
           <div className="flex-1 min-w-0">
-            <h1 className="text-sm font-semibold text-gray-700 truncate">{text.title}</h1>
-            <p className="text-[11px] text-gray-400 mt-0.5">Question {currentQ + 1} / {questions.length}</p>
+            <h1 className="text-sm font-semibold text-gray-700 truncate">{text.title || t('reading.untitled')}</h1>
+            <p className="text-[11px] text-gray-400 mt-0.5">{t('reading.questionOf', { n: currentQ + 1, total: questions.length })}</p>
           </div>
         </div>
 
@@ -507,7 +552,7 @@ export default function Reading() {
             onClick={() => setShowPassage(v => !v)}
             className="flex items-center justify-between w-full bg-gray-50 rounded-xl px-4 py-3 border border-gray-100"
           >
-            <span className="text-sm font-medium text-gray-600">View passage</span>
+            <span className="text-sm font-medium text-gray-600">{t('reading.viewPassage')}</span>
             {showPassage ? <UpOutlined className="text-gray-400" /> : <DownOutlined className="text-gray-400" />}
           </button>
 
@@ -537,16 +582,26 @@ export default function Reading() {
               onClick={advanceQuestion}
               className="w-full py-3 rounded-xl bg-green-500 text-white font-semibold text-[15px] active:bg-green-600"
             >
-              {currentQ + 1 < questions.length ? 'Next Question →' : 'Finish'}
+              {currentQ + 1 < questions.length ? `${t('reading.nextQuestion')} →` : t('quiz.finish')}
             </button>
           ) : (
             <>
+              {NATIVE_ANSWER_LEVELS.includes(text.level) && explainLang !== text.language && (
+                <label className="flex items-center gap-2 text-xs text-gray-600">
+                  <input
+                    type="checkbox"
+                    checked={answerNative}
+                    onChange={(e) => { setAnswerNative(e.target.checked); writeFlag(READING_ANSWER_NATIVE_KEY, e.target.checked) }}
+                  />
+                  {t('reading.answerNative', { language: languageName(explainLang) })}
+                </label>
+              )}
               <textarea
                 className="w-full rounded-xl border border-gray-200 bg-gray-50 px-4 py-3 text-[15px]
                   placeholder:text-gray-400 focus:outline-none focus:ring-2 focus:ring-blue-300
                   resize-none disabled:opacity-60"
                 rows={3}
-                placeholder="Type your answer…"
+                placeholder={answerNative && NATIVE_ANSWER_LEVELS.includes(text.level) ? t('reading.answerPlaceholderNative', { language: languageName(explainLang) }) : t('reading.answerPlaceholder', { language: languageName(text.language) })}
                 value={currentAnswer}
                 onChange={(e) => setCurrentAnswer(e.target.value)}
                 disabled={submitting}
@@ -560,7 +615,7 @@ export default function Reading() {
                     className="flex-1 py-3 rounded-xl bg-blue-500 text-white font-semibold text-[15px]
                       disabled:opacity-40 active:bg-blue-600 flex items-center justify-center gap-2"
                   >
-                    {submitting ? <><LoadingOutlined spin /> Checking…</> : 'Submit'}
+                    {submitting ? <><LoadingOutlined spin /> {t('reading.checking')}</> : t('reading.submit')}
                   </button>
                 )}
                 {isPartial && (
@@ -570,13 +625,13 @@ export default function Reading() {
                       className="flex-1 py-3 rounded-xl border border-yellow-300 bg-yellow-50 text-yellow-700
                         font-semibold text-[15px] active:bg-yellow-100"
                     >
-                      Try Again
+                      {t('common.retry')}
                     </button>
                     <button
                       onClick={advanceQuestion}
                       className="flex-1 py-3 rounded-xl bg-blue-500 text-white font-semibold text-[15px] active:bg-blue-600"
                     >
-                      {currentQ + 1 < questions.length ? 'Continue →' : 'Finish'}
+                      {currentQ + 1 < questions.length ? `${t('common.continue')} →` : t('quiz.finish')}
                     </button>
                   </>
                 )}
@@ -586,7 +641,7 @@ export default function Reading() {
                     className="flex-1 py-3 rounded-xl border border-red-200 bg-red-50 text-red-600
                       font-semibold text-[15px] active:bg-red-100"
                   >
-                    Try Again
+                    {t('common.retry')}
                   </button>
                 )}
               </div>
@@ -603,10 +658,10 @@ export default function Reading() {
       <div className="h-full overflow-y-auto">
       <div className="flex flex-col pt-6 pb-4 max-w-lg mx-auto">
         <div className="flex items-center gap-3 mb-4">
-          <button onClick={goHome} className="text-gray-400 active:text-gray-600 p-1">
+          <button onClick={goHome} aria-label={t('common.back')} className="text-gray-400 active:text-gray-600 p-1">
             <ArrowLeftOutlined className="text-xl" />
           </button>
-          <span className="text-sm font-semibold text-gray-600">Summary</span>
+          <span className="text-sm font-semibold text-gray-600">{t('reading.summary')}</span>
         </div>
         <ReadingSummary
           totalQuestions={questions.length}
