@@ -574,10 +574,20 @@ pub fn db_get_difficult_and_known_words(
 
 #[tauri::command]
 pub fn db_delete_review_item(app: tauri::AppHandle, id: String) -> Result<(), String> {
-    let conn = open_db(&app)?;
-    conn.execute("DELETE FROM review_items WHERE id=?1", params![id])
+    let mut conn = open_db(&app)?;
+    // study_card references review_items (foreign keys are on in bundled SQLite),
+    // so a card that was ever in a daily queue has to leave it first.
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM study_card WHERE review_item_id=?1", params![id])
         .map_err(|e| e.to_string())?;
-    Ok(())
+    tx.execute(
+        "DELETE FROM review_confusions WHERE review_item_id=?1 OR confused_with_id=?1",
+        params![id],
+    )
+    .map_err(|e| e.to_string())?;
+    tx.execute("DELETE FROM review_items WHERE id=?1", params![id])
+        .map_err(|e| e.to_string())?;
+    tx.commit().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
