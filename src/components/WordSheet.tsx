@@ -8,6 +8,13 @@ import { readFlag, ROMAJI_KEY } from '../lib/prefs'
 
 type Api = { apiHost: string; apiKey: string; model: string }
 
+/** Keeps the meaning a sheet already looked up on a card that has none yet. */
+export async function keepSheetMeaning(content: string, detail: string | null) {
+  if (!detail) return
+  const [item] = await invoke<ReviewItem[]>('db_get_review_items_by_words', { words: [content.toLowerCase()] })
+  if (item && !item.detail) await invoke('db_update_review_detail', { id: item.id, detail })
+}
+
 /**
  * Bottom sheet for a word tapped in chat: its meaning in the learner's language (from the deck,
  * or made by the AI) and a button to add it to the review cards.

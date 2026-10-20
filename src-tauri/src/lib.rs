@@ -246,6 +246,8 @@ pub fn run() {
             reading::db_get_reading_session,
             reading::db_get_active_reading_session,
             reading::db_update_reading_session,
+            reading::db_reading_overview,
+            reading::db_delete_reading_session,
             // Sentence breakdown
             breakdown::db_start_sentence_breakdown,
             breakdown::llm_breakdown_section,

@@ -1,13 +1,13 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { splitTappable, isWordSegment } from '../lib/unknown'
-import { renderFurigana, hasFuriganaAnnotations, stripFurigana } from '../lib/furigana'
+import { renderFurigana, hasFuriganaAnnotations, stripFurigana, sliceAnnotated } from '../lib/furigana'
 import { JLPT_LEVELS, DEFAULT_JLPT_LEVEL, JLPT_LEVEL_STORAGE_KEY } from '../lib/jlpt'
 import type { JLPTLevel } from '../lib/jlpt'
 import type { ReviewItem } from '../lib/types'
 import { parseDetailJson } from '../lib/types'
 import UserMessageFeedback, { type UserFeedback } from '../components/UserMessageFeedback'
-import WordSheet from '../components/WordSheet'
+import WordSheet, { keepSheetMeaning } from '../components/WordSheet'
 import HelpReplySheet from '../components/HelpReplySheet'
 import { t, lang as explainLang, errorText, languageName, partOfSpeechLabel } from '../lib/i18n'
 import { languageLabel } from '../lib/languages'
@@ -660,9 +660,7 @@ export default function Chat() {
   // Adds a tapped word to the deck, keeping a meaning the sheet already looked up.
   async function addWordFromSheet(content: string, detail: string | null) {
     await markWordDifficult(content)
-    if (!detail) return
-    const [item] = await invoke<ReviewItem[]>('db_get_review_items_by_words', { words: [content.toLowerCase()] })
-    if (item && !item.detail) await invoke('db_update_review_detail', { id: item.id, detail })
+    await keepSheetMeaning(content, detail)
   }
 
   // Auto-scroll
@@ -833,62 +831,6 @@ export default function Chat() {
     } finally {
       setGrammarAnalysisLoading(null)
     }
-  }
-
-  /**
-   * Given annotated text (with {kanji|reading} syntax), a plain-text
-   * character offset, and a length, extract the corresponding slice
-   * of annotated text.
-   *
-   * Example: annotated = "abc{漢字|かんじ}def", offset=3, length=2
-   *   → returns "{漢字|かんじ}" (plain chars at index 3,4 are 漢字)
-   */
-  function sliceAnnotated(annotated: string, plainOffset: number, plainLength: number): string {
-    let plainIdx = 0
-    let start = -1
-    let end = -1
-
-    for (let i = 0; i < annotated.length; ) {
-      if (annotated[i] === '{') {
-        // Find the closing }
-        const closeIdx = annotated.indexOf('}', i)
-        if (closeIdx === -1) break
-
-        // Extract kanji part (before |)
-        const inner = annotated.slice(i + 1, closeIdx)
-        const pipeIdx = inner.indexOf('|')
-        const kanji = pipeIdx >= 0 ? inner.slice(0, pipeIdx) : inner
-
-        // Each kanji char counts as one plain char
-        for (let k = 0; k < kanji.length; k++) {
-          if (plainIdx === plainOffset && start === -1) {
-            start = i
-          }
-          plainIdx++
-          if (plainIdx === plainOffset + plainLength) {
-            end = closeIdx + 1
-            return annotated.slice(start, end)
-          }
-        }
-        i = closeIdx + 1
-      } else {
-        if (plainIdx === plainOffset && start === -1) {
-          start = i
-        }
-        plainIdx++
-        if (plainIdx === plainOffset + plainLength) {
-          end = i + 1
-          return annotated.slice(start, end)
-        }
-        i++
-      }
-    }
-
-    // Fallback: if we didn't find exact boundaries, return from start to end
-    if (start !== -1) {
-      return annotated.slice(start)
-    }
-    return ''
   }
 
   /**

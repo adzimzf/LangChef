@@ -62,6 +62,62 @@ export function parseFurigana(text: string): Array<{ text: string; reading: stri
 }
 
 /**
+ * Given annotated text (with {kanji|reading} syntax), a plain-text
+ * character offset, and a length, extract the corresponding slice
+ * of annotated text.
+ *
+ * Example: annotated = "abc{漢字|かんじ}def", offset=3, length=2
+ *   → returns "{漢字|かんじ}" (plain chars at index 3,4 are 漢字)
+ */
+export function sliceAnnotated(annotated: string, plainOffset: number, plainLength: number): string {
+  let plainIdx = 0
+  let start = -1
+  let end = -1
+
+  for (let i = 0; i < annotated.length; ) {
+    if (annotated[i] === '{') {
+      // Find the closing }
+      const closeIdx = annotated.indexOf('}', i)
+      if (closeIdx === -1) break
+
+      // Extract kanji part (before |)
+      const inner = annotated.slice(i + 1, closeIdx)
+      const pipeIdx = inner.indexOf('|')
+      const kanji = pipeIdx >= 0 ? inner.slice(0, pipeIdx) : inner
+
+      // Each kanji char counts as one plain char
+      for (let k = 0; k < kanji.length; k++) {
+        if (plainIdx === plainOffset && start === -1) {
+          start = i
+        }
+        plainIdx++
+        if (plainIdx === plainOffset + plainLength) {
+          end = closeIdx + 1
+          return annotated.slice(start, end)
+        }
+      }
+      i = closeIdx + 1
+    } else {
+      if (plainIdx === plainOffset && start === -1) {
+        start = i
+      }
+      plainIdx++
+      if (plainIdx === plainOffset + plainLength) {
+        end = i + 1
+        return annotated.slice(start, end)
+      }
+      i++
+    }
+  }
+
+  // Fallback: if we didn't find exact boundaries, return from start to end
+  if (start !== -1) {
+    return annotated.slice(start)
+  }
+  return ''
+}
+
+/**
  * Render text with furigana annotations as React elements using <ruby> tags.
  * When showFurigana is false, the <rt> content is hidden via CSS class.
  * When showFurigana is true, readings appear above kanji.

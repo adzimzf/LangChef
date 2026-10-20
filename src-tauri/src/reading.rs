@@ -34,6 +34,40 @@ pub struct SavedAnswer {
     pub user_answer: String,
     pub result: String,
     pub retries: u32,
+    /// Feedback on the final answer, shown again on the results screen.
+    #[serde(default)]
+    pub feedback: String,
+}
+
+/// How the questions of one article went: correct (on any try), correct on the first try,
+/// moved on with a partial answer, and wrong tries in total.
+#[derive(Serialize, Deserialize, Default, Clone, Copy, PartialEq, Debug)]
+pub struct AnswerStats {
+    pub answered: i64,
+    pub correct: i64,
+    pub first_try: i64,
+    pub partial: i64,
+    pub retries: i64,
+}
+
+fn answer_stats(answers: &[SavedAnswer]) -> AnswerStats {
+    let mut s = AnswerStats { answered: answers.len() as i64, ..Default::default() };
+    for a in answers {
+        s.retries += a.retries as i64;
+        match a.result.as_str() {
+            "correct" => {
+                s.correct += 1;
+                if a.retries == 0 { s.first_try += 1; }
+            }
+            "partial" => s.partial += 1,
+            _ => {}
+        }
+    }
+    s
+}
+
+fn answers_from_json(json: &str) -> Vec<SavedAnswer> {
+    serde_json::from_str(json).unwrap_or_default()
 }
 
 #[derive(Serialize, Deserialize)]
@@ -50,6 +84,8 @@ pub struct ReadingSession {
     pub phase: String,
     pub current_q: i64,
     pub created_at: String,
+    pub elapsed_seconds: i64,
+    pub stats: AnswerStats,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -63,6 +99,19 @@ pub struct ReadingSessionSummary {
     pub current_q: i64,
     pub total_questions: i64,
     pub created_at: String,
+    pub stats: AnswerStats,
+}
+
+/// Totals for the top of the reading page.
+#[derive(Serialize, Deserialize)]
+pub struct ReadingOverview {
+    pub finished: i64,
+    pub in_progress: i64,
+    pub questions_answered: i64,
+    /// Share of answered questions that were right on the first try, 0–100; None before any answer.
+    pub first_try_pct: Option<i64>,
+    /// The latest article not finished yet, offered as "continue reading".
+    pub resume: Option<ReadingSessionSummary>,
 }
 
 fn level_text_char_range(level: &str) -> (usize, usize) {
@@ -299,17 +348,16 @@ pub fn db_save_reading_session(
     Ok(conn.last_insert_rowid())
 }
 
-#[tauri::command]
-pub fn db_list_reading_sessions(app: tauri::AppHandle) -> Result<Vec<ReadingSessionSummary>, String> {
-    let conn = open_db(&app)?;
-    let mut stmt = conn.prepare(
+fn list_sessions(conn: &rusqlite::Connection, filter: &str, limit: i64) -> Result<Vec<ReadingSessionSummary>, String> {
+    let sql = format!(
         "SELECT id, language, level, title, source, phase, current_q,
-                json_array_length(questions) as total_questions, created_at
-         FROM reading_sessions
+                json_array_length(questions) as total_questions, created_at, answers
+         FROM reading_sessions {filter}
          ORDER BY id DESC
-         LIMIT 100",
-    ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map([], |row| {
+         LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql).map_err(|e| e.to_string())?;
+    let rows = stmt.query_map(params![limit], |row| {
         Ok(ReadingSessionSummary {
             id: row.get(0)?,
             language: row.get(1)?,
@@ -320,39 +368,47 @@ pub fn db_list_reading_sessions(app: tauri::AppHandle) -> Result<Vec<ReadingSess
             current_q: row.get(6)?,
             total_questions: row.get(7)?,
             created_at: row.get(8)?,
+            stats: answer_stats(&answers_from_json(&row.get::<_, String>(9)?)),
         })
     }).map_err(|e| e.to_string())?;
     rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
 }
 
 #[tauri::command]
+pub fn db_list_reading_sessions(app: tauri::AppHandle) -> Result<Vec<ReadingSessionSummary>, String> {
+    list_sessions(&open_db(&app)?, "", 100)
+}
+
+const SESSION_COLS: &str =
+    "id, language, level, title, body, plain_body, source, questions, answers, phase, current_q, created_at, elapsed_seconds";
+
+fn session_from_row(row: &rusqlite::Row) -> rusqlite::Result<ReadingSession> {
+    let questions: Vec<ReadingQuestion> = serde_json::from_str(&row.get::<_, String>(7)?).unwrap_or_default();
+    let answers = answers_from_json(&row.get::<_, String>(8)?);
+    Ok(ReadingSession {
+        id: row.get(0)?,
+        language: row.get(1)?,
+        level: row.get(2)?,
+        title: row.get(3)?,
+        body: row.get(4)?,
+        plain_body: row.get(5)?,
+        source: row.get(6)?,
+        questions,
+        stats: answer_stats(&answers),
+        answers,
+        phase: row.get(9)?,
+        current_q: row.get(10)?,
+        created_at: row.get(11)?,
+        elapsed_seconds: row.get(12)?,
+    })
+}
+
+#[tauri::command]
 pub fn db_get_reading_session(app: tauri::AppHandle, id: i64) -> Result<Option<ReadingSession>, String> {
     let conn = open_db(&app)?;
-    let result = conn.query_row(
-        "SELECT id, language, level, title, body, plain_body, source, questions, answers, phase, current_q, created_at
-         FROM reading_sessions WHERE id = ?1",
-        params![id],
-        |row| Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, String>(6)?,
-            row.get::<_, String>(7)?,
-            row.get::<_, String>(8)?,
-            row.get::<_, String>(9)?,
-            row.get::<_, i64>(10)?,
-            row.get::<_, String>(11)?,
-        )),
-    );
-    match result {
-        Ok((id, lang, lvl, title, body, plain_body, source, qs_json, ans_json, phase, current_q, created_at)) => {
-            let questions: Vec<ReadingQuestion> = serde_json::from_str(&qs_json).unwrap_or_default();
-            let answers: Vec<SavedAnswer> = serde_json::from_str(&ans_json).unwrap_or_default();
-            Ok(Some(ReadingSession { id, language: lang, level: lvl, title, body, plain_body, source, questions, answers, phase, current_q, created_at }))
-        }
+    let sql = format!("SELECT {SESSION_COLS} FROM reading_sessions WHERE id = ?1");
+    match conn.query_row(&sql, params![id], session_from_row) {
+        Ok(s) => Ok(Some(s)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
@@ -364,46 +420,82 @@ pub fn db_get_active_reading_session(
     language: String,
 ) -> Result<Option<ReadingSession>, String> {
     let conn = open_db(&app)?;
-    let result = conn.query_row(
-        "SELECT id, language, level, title, body, plain_body, source, questions, answers, phase, current_q, created_at
-         FROM reading_sessions WHERE language = ?1 AND phase != 'complete'
-         ORDER BY id DESC LIMIT 1",
-        params![language],
-        |row| Ok((
-            row.get::<_, i64>(0)?,
-            row.get::<_, String>(1)?,
-            row.get::<_, String>(2)?,
-            row.get::<_, String>(3)?,
-            row.get::<_, String>(4)?,
-            row.get::<_, String>(5)?,
-            row.get::<_, String>(6)?,
-            row.get::<_, String>(7)?,
-            row.get::<_, String>(8)?,
-            row.get::<_, String>(9)?,
-            row.get::<_, i64>(10)?,
-            row.get::<_, String>(11)?,
-        )),
+    let sql = format!(
+        "SELECT {SESSION_COLS} FROM reading_sessions WHERE language = ?1 AND phase != 'complete'
+         ORDER BY id DESC LIMIT 1"
     );
-    match result {
-        Ok((id, lang, lvl, title, body, plain_body, source, qs_json, ans_json, phase, current_q, created_at)) => {
-            let questions: Vec<ReadingQuestion> = serde_json::from_str(&qs_json).unwrap_or_default();
-            let answers: Vec<SavedAnswer> = serde_json::from_str(&ans_json).unwrap_or_default();
-            Ok(Some(ReadingSession { id, language: lang, level: lvl, title, body, plain_body, source, questions, answers, phase, current_q, created_at }))
-        }
+    match conn.query_row(&sql, params![language], session_from_row) {
+        Ok(s) => Ok(Some(s)),
         Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
         Err(e) => Err(e.to_string()),
     }
 }
 
 #[tauri::command]
+pub fn db_reading_overview(app: tauri::AppHandle) -> Result<ReadingOverview, String> {
+    let conn = open_db(&app)?;
+    let mut stmt = conn.prepare("SELECT phase, answers FROM reading_sessions").map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
+        .map_err(|e| e.to_string())?;
+    let (mut finished, mut in_progress, mut answered, mut first_try) = (0, 0, 0, 0);
+    for row in rows {
+        let (phase, answers) = row.map_err(|e| e.to_string())?;
+        if phase == "complete" { finished += 1 } else { in_progress += 1 }
+        let s = answer_stats(&answers_from_json(&answers));
+        answered += s.answered;
+        first_try += s.first_try;
+    }
+    Ok(ReadingOverview {
+        finished,
+        in_progress,
+        questions_answered: answered,
+        first_try_pct: (answered > 0).then(|| (first_try * 100 + answered / 2) / answered),
+        resume: list_sessions(&conn, "WHERE phase != 'complete'", 1)?.into_iter().next(),
+    })
+}
+
+#[tauri::command]
+pub fn db_delete_reading_session(app: tauri::AppHandle, id: i64) -> Result<(), String> {
+    let conn = open_db(&app)?;
+    conn.execute("DELETE FROM reading_sessions WHERE id = ?1", params![id]).map_err(|e| e.to_string())?;
+    // The cached translation of the passage goes with it.
+    let _ = conn.execute("DELETE FROM translations WHERE kind = 'reading' AND ref_id = ?1", params![id]);
+    Ok(())
+}
+
+#[tauri::command]
 pub fn db_update_reading_session(
     app: tauri::AppHandle,
     id: i64, phase: String, current_q: i64, answers: String,
+    elapsed_seconds: Option<i64>,
 ) -> Result<(), String> {
     let conn = open_db(&app)?;
     conn.execute(
-        "UPDATE reading_sessions SET phase = ?1, current_q = ?2, answers = ?3 WHERE id = ?4",
-        params![phase, current_q, answers, id],
+        "UPDATE reading_sessions SET phase = ?1, current_q = ?2, answers = ?3,
+                elapsed_seconds = COALESCE(?5, elapsed_seconds) WHERE id = ?4",
+        params![phase, current_q, answers, id, elapsed_seconds],
     ).map_err(|e| e.to_string())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ans(result: &str, retries: u32) -> SavedAnswer {
+        SavedAnswer { question_index: 0, user_answer: String::new(), result: result.into(), retries, feedback: String::new() }
+    }
+
+    #[test]
+    fn stats_count_first_try_partial_and_retries() {
+        let s = answer_stats(&[ans("correct", 0), ans("correct", 2), ans("partial", 1)]);
+        assert_eq!(s, AnswerStats { answered: 3, correct: 2, first_try: 1, partial: 1, retries: 3 });
+    }
+
+    #[test]
+    fn old_answers_without_feedback_still_parse() {
+        let a = answers_from_json(r#"[{"question_index":0,"user_answer":"x","result":"correct","retries":0}]"#);
+        assert_eq!(a.len(), 1);
+    }
 }
