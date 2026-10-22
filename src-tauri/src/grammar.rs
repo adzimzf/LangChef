@@ -1,5 +1,6 @@
 use crate::chat::{complete_explained, json_part};
 use crate::db::open_db;
+use crate::grammar_review::{level_order, review_statuses, GrammarReview};
 use crate::locale::{app_error, explain_lang, lang_name};
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
@@ -18,9 +19,15 @@ pub struct GrammarItem {
     /// Shown in English because this level has nothing in the learner's language yet.
     #[serde(default)]
     pub fallback: bool,
+    /// The row this one was translated from.
+    #[serde(default)]
+    pub source_id: Option<String>,
+    /// Where the pattern stands in grammar review (filled in by `db_list_grammar_items`).
+    #[serde(default)]
+    pub review: Option<GrammarReview>,
 }
 
-const GRAMMAR_COLS: &str = "id, pattern, detail, language, level, is_default, explain_lang, ai_translated";
+const GRAMMAR_COLS: &str = "id, pattern, detail, language, level, is_default, explain_lang, ai_translated, source_id";
 
 fn row_to_grammar(row: &rusqlite::Row) -> rusqlite::Result<GrammarItem> {
     Ok(GrammarItem {
@@ -33,6 +40,8 @@ fn row_to_grammar(row: &rusqlite::Row) -> rusqlite::Result<GrammarItem> {
         explain_lang: row.get(6)?,
         ai_translated: row.get(7)?,
         fallback: false,
+        source_id: row.get(8)?,
+        review: None,
     })
 }
 
@@ -98,16 +107,24 @@ pub struct GrammarAnalysis {
 #[tauri::command]
 pub fn db_list_grammar_items(app: tauri::AppHandle, language: Option<String>, level: Option<String>) -> Result<Vec<GrammarItem>, String> {
     let conn = open_db(&app)?;
-    list_grammar(&conn, language.as_deref(), level.as_deref())
+    let mut items = list_grammar(&conn, language.as_deref(), level.as_deref())?;
+    if let Some(lang) = language.as_deref() {
+        let statuses = review_statuses(&conn, lang)?;
+        for item in &mut items {
+            let key = item.source_id.as_deref().unwrap_or(&item.id);
+            item.review = statuses.get(key).cloned();
+        }
+    }
+    Ok(items)
 }
 
 #[allow(clippy::too_many_arguments)]
-fn insert_grammar(conn: &Connection, pattern: &str, detail: &str, language: &str, level: &str, is_default: bool, explain: &str, ai_translated: bool) -> Result<GrammarItem, String> {
+fn insert_grammar(conn: &Connection, pattern: &str, detail: &str, language: &str, level: &str, is_default: bool, explain: &str, ai_translated: bool, source_id: Option<&str>) -> Result<GrammarItem, String> {
     let id = uuid::Uuid::new_v4().to_string();
     conn.execute(
-        "INSERT INTO grammar_items(id, pattern, detail, language, level, is_default, explain_lang, ai_translated)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![id, pattern, detail, language, level, is_default, explain, ai_translated],
+        "INSERT INTO grammar_items(id, pattern, detail, language, level, is_default, explain_lang, ai_translated, source_id)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![id, pattern, detail, language, level, is_default, explain, ai_translated, source_id],
     )
     .map_err(|e| e.to_string())?;
     Ok(GrammarItem {
@@ -120,6 +137,8 @@ fn insert_grammar(conn: &Connection, pattern: &str, detail: &str, language: &str
         explain_lang: explain.to_string(),
         ai_translated,
         fallback: false,
+        source_id: source_id.map(String::from),
+        review: None,
     })
 }
 
@@ -127,7 +146,7 @@ fn insert_grammar(conn: &Connection, pattern: &str, detail: &str, language: &str
 pub fn db_add_grammar_item(app: tauri::AppHandle, pattern: String, detail: String, language: String, level: String) -> Result<GrammarItem, String> {
     let conn = open_db(&app)?;
     let explain = explain_lang(&conn);
-    insert_grammar(&conn, &pattern, &detail, &language, &level, false, &explain, false)
+    insert_grammar(&conn, &pattern, &detail, &language, &level, false, &explain, false, None)
 }
 
 #[tauri::command]
@@ -162,7 +181,7 @@ fn import_grammar(app: &tauri::AppHandle, items: Vec<SeedGrammarItem>, is_defaul
     let explain = explain_lang(&conn);
     let imported = items
         .iter()
-        .filter(|i| insert_grammar(&conn, &i.pattern, &i.detail, &i.language, &i.level, is_default, &explain, false).is_ok())
+        .filter(|i| insert_grammar(&conn, &i.pattern, &i.detail, &i.language, &i.level, is_default, &explain, false, None).is_ok())
         .count();
     Ok(imported.to_string())
 }
@@ -170,15 +189,7 @@ fn import_grammar(app: &tauri::AppHandle, items: Vec<SeedGrammarItem>, is_defaul
 #[tauri::command]
 pub fn db_get_grammar_levels(app: tauri::AppHandle, language: String) -> Result<Vec<String>, String> {
     let conn = open_db(&app)?;
-    let mut stmt = conn.prepare(
-        "SELECT DISTINCT level FROM grammar_items WHERE language=?1 ORDER BY level ASC"
-    ).map_err(|e| e.to_string())?;
-    let rows = stmt.query_map(params![language], |row| row.get::<_, String>(0)).map_err(|e| e.to_string())?;
-    let mut levels = Vec::new();
-    for r in rows {
-        levels.push(r.map_err(|e| e.to_string())?);
-    }
-    Ok(levels)
+    level_order(&conn, &language)
 }
 
 #[tauri::command]
@@ -295,7 +306,8 @@ async fn translate_grammar_row(app: &tauri::AppHandle, api_host: &str, api_key: 
     .await?;
     let t: TranslatedGrammar = serde_json::from_str(json_part(&raw)).map_err(|e| app_error("api_bad_response", format!("{}: {}", e, raw)))?;
     let conn = open_db(app)?;
-    insert_grammar(&conn, &t.pattern, &t.detail, &item.language, &item.level, false, explain, true)
+    let source = item.source_id.as_deref().unwrap_or(&item.id);
+    insert_grammar(&conn, &t.pattern, &t.detail, &item.language, &item.level, false, explain, true, Some(source))
 }
 
 fn grammar_by_id(conn: &Connection, id: &str) -> Result<GrammarItem, String> {
@@ -352,6 +364,8 @@ mod tests {
             explain_lang: explain.into(),
             ai_translated: explain != "en",
             fallback: false,
+            source_id: None,
+            review: None,
         }
     }
 

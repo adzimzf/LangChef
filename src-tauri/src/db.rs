@@ -14,6 +14,12 @@ pub fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
     // Breakdown sections are written by parallel requests; wait for a lock instead of failing.
     conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
+    prepare_db(&conn)?;
+    Ok(conn)
+}
+
+/// Schema, migrations and bundled data. Runs on every open and must stay idempotent.
+pub fn prepare_db(conn: &Connection) -> Result<(), String> {
     conn.execute_batch(
         "
         CREATE TABLE IF NOT EXISTS messages(
@@ -211,14 +217,25 @@ pub fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     // Cached AI output is only reused while the learner reads the same language.
     let _ = conn.execute("ALTER TABLE message_grammar_analysis ADD COLUMN lang TEXT NOT NULL DEFAULT 'en'", []);
     let _ = conn.execute("ALTER TABLE user_message_feedback ADD COLUMN lang TEXT NOT NULL DEFAULT 'en'", []);
+    // Grammar review: a card is a word or a grammar pattern. A grammar card points at its grammar row,
+    // keeps the pattern's level, and starts with a quick level check when it is below the learner's level.
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN item_type TEXT NOT NULL DEFAULT 'word'", []);
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN grammar_id TEXT", []);
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN level TEXT", []);
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN placement INTEGER NOT NULL DEFAULT 0", []);
+    let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_review_items_grammar ON review_items(grammar_id)", []);
+    let _ = conn.execute("ALTER TABLE review_answers ADD COLUMN placement INTEGER NOT NULL DEFAULT 0", []);
+    // A translated grammar row points at the row it was translated from.
+    let _ = conn.execute("ALTER TABLE grammar_items ADD COLUMN source_id TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN parent_message_id INTEGER", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN is_active_path INTEGER DEFAULT 1", []);
     let _ = conn.execute("UPDATE review_items SET state = 'review' WHERE state IS NULL OR state = ''", []);
     let _ = conn.execute("UPDATE review_items SET state = 'new' WHERE state IS NULL OR state = ''", []);
-    seed_bundled_grammar_if_empty(&conn);
-    migrate_sm2_to_fsrs(&conn);
-    migrate_telemetry_to_activity(&conn)?;
-    Ok(conn)
+    seed_bundled_grammar_if_empty(conn);
+    link_bundled_translations(conn);
+    migrate_sm2_to_fsrs(conn);
+    migrate_telemetry_to_activity(conn)?;
+    Ok(())
 }
 
 fn migrate_telemetry_to_activity(conn: &Connection) -> Result<(), String> {
@@ -422,6 +439,42 @@ fn seed_bundled_grammar_if_empty(conn: &Connection) {
                 Ok(_) => {}
                 Err(e) => eprintln!("[seed] FAILED to insert '{}': {}", pattern, e),
             }
+        }
+    }
+}
+
+/// Bundled translations (e.g. `ja/id/N5.md`) list the same patterns in the same order as the English
+/// files, so each translated row is paired with its original by position. Runs only while some are unpaired.
+fn link_bundled_translations(conn: &Connection) {
+    let groups: Vec<(String, String, String)> = conn
+        .prepare(
+            "SELECT DISTINCT language, level, explain_lang FROM grammar_items
+             WHERE is_default = 1 AND ai_translated = 1 AND source_id IS NULL",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .map(|rows| rows.filter_map(|r| r.ok()).collect())
+        })
+        .unwrap_or_default();
+    for (language, level, explain) in groups {
+        let ids = |sql: &str, args: &[&dyn rusqlite::ToSql]| -> Vec<String> {
+            conn.prepare(sql)
+                .and_then(|mut stmt| stmt.query_map(args, |r| r.get(0)).map(|rows| rows.filter_map(|r| r.ok()).collect()))
+                .unwrap_or_default()
+        };
+        let originals = ids(
+            "SELECT id FROM grammar_items WHERE language = ?1 AND level = ?2 AND is_default = 1 AND ai_translated = 0 ORDER BY rowid",
+            &[&language, &level],
+        );
+        let translated = ids(
+            "SELECT id FROM grammar_items WHERE language = ?1 AND level = ?2 AND explain_lang = ?3 AND is_default = 1 AND ai_translated = 1 ORDER BY rowid",
+            &[&language, &level, &explain],
+        );
+        if originals.len() != translated.len() {
+            continue;
+        }
+        for (source, id) in originals.iter().zip(&translated) {
+            let _ = conn.execute("UPDATE grammar_items SET source_id = ?1 WHERE id = ?2", params![source, id]);
         }
     }
 }

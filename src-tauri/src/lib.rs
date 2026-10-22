@@ -13,6 +13,7 @@ mod quiz;
 mod words;
 mod stats;
 mod grammar;
+mod grammar_review;
 mod feedback;
 mod reading;
 mod breakdown;
@@ -233,6 +234,10 @@ pub fn run() {
             grammar::db_analyze_grammar,
             grammar::db_translate_grammar_item,
             grammar::db_translate_grammar_level,
+            grammar_review::db_get_grammar_plan,
+            grammar_review::db_set_grammar_plan,
+            grammar_review::db_seed_grammar_level,
+            grammar_review::db_add_grammar_to_review,
             // Feedback
             feedback::db_get_user_feedback,
             feedback::db_list_all_feedback,

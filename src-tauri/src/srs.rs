@@ -1,4 +1,5 @@
 use crate::db::open_db;
+use crate::grammar_review::{enroll_for_today, grammar_slots, new_grammar_kind, ITEM_GRAMMAR};
 use crate::locale::effective_detail_sql;
 use crate::quiz::{cards_missing_meaning, clear_task, issue_task, QuizTask};
 use rusqlite::params;
@@ -26,13 +27,25 @@ pub struct ReviewItem {
     pub difficulty_label: String,
     pub state_label: String,
     pub next_review_formatted: String,
+    /// `word` or `grammar`.
+    pub item_type: String,
+    /// Grammar cards: the pattern's level (e.g. N4).
+    pub level: Option<String>,
+    /// Grammar cards below the learner's level start with a level check instead of a lesson.
+    pub placement: bool,
+}
+
+impl ReviewItem {
+    pub fn is_grammar(&self) -> bool {
+        self.item_type == ITEM_GRAMMAR
+    }
 }
 
 /// Columns read by `row_to_review_item`. `detail` is only returned while it is in the learner's
 /// explanation language; a meaning in another language reads as no meaning.
 pub fn review_cols(prefix: &str) -> String {
     format!(
-        "{p}id, {p}content, {p}EF, {p}I, {p}R, {p}state, {p}step, {p}lapse_count, {p}next_review, {p}language, {d}, {p}mnemonic, {p}fsrs_stability, {p}fsrs_difficulty",
+        "{p}id, {p}content, {p}EF, {p}I, {p}R, {p}state, {p}step, {p}lapse_count, {p}next_review, {p}language, {d}, {p}mnemonic, {p}fsrs_stability, {p}fsrs_difficulty, COALESCE({p}item_type, 'word'), {p}level, COALESCE({p}placement, 0)",
         p = prefix,
         d = effective_detail_sql(prefix)
     )
@@ -75,6 +88,9 @@ pub fn row_to_review_item(row: &rusqlite::Row) -> rusqlite::Result<ReviewItem> {
         difficulty_label,
         state_label: compute_state_label(&state).to_string(),
         next_review_formatted: compute_next_review_formatted(next_review),
+        item_type: row.get(14)?,
+        level: row.get(15)?,
+        placement: row.get(16)?,
     })
 }
 
@@ -870,6 +886,9 @@ pub struct SessionStartResult {
     pub new_cards_seen: i64,
     /// Words in today's queue with no meaning yet, for the "Generate all" banner.
     pub missing_meaning: Vec<String>,
+    pub queue_done: usize,
+    pub grammar_done: i64,
+    pub grammar_total: i64,
 }
 
 pub(crate) fn ensure_study(
@@ -899,7 +918,7 @@ fn classify_kind(state: &str) -> &'static str {
     }
 }
 
-fn top_up_queue(
+pub(crate) fn top_up_queue(
     conn: &rusqlite::Connection,
     study_id: i64,
     language: &str,
@@ -918,9 +937,11 @@ fn top_up_queue(
 
     let mut review_slots = (max_review - n_review).max(0);
     let mut new_slots = (max_new - n_new).max(0);
+    enroll_for_today(conn, study_id, language)?;
+    let (mut grammar_new_slots, mut check_slots) = grammar_slots(conn, study_id, language)?;
 
     let mut stmt = conn.prepare(
-        "SELECT id, state FROM review_items
+        "SELECT id, state, item_type, placement FROM review_items
          WHERE language = ?1
            AND (next_review IS NULL OR next_review <= ?2)
            AND id NOT IN (SELECT review_item_id FROM study_card WHERE study_id = ?3)
@@ -933,9 +954,9 @@ fn top_up_queue(
             created_at DESC"
     ).map_err(|e| e.to_string())?;
 
-    let candidates: Vec<(String, String)> = stmt
+    let candidates: Vec<(String, String, String, bool)> = stmt
         .query_map(params![language, eod, study_id], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
         })
         .map_err(|e| e.to_string())?
         .filter_map(|r| r.ok())
@@ -947,19 +968,23 @@ fn top_up_queue(
          VALUES (?1, ?2, ?3, 'pending', ?4, ?4)"
     ).map_err(|e| e.to_string())?;
 
-    for (id, state) in candidates {
-        let kind = classify_kind(&state);
-        match kind {
-            "review" => {
-                if review_slots <= 0 { continue; }
-                review_slots -= 1;
-            }
-            "new" => {
-                if new_slots <= 0 { continue; }
-                new_slots -= 1;
-            }
-            _ => {}
+    // Learning cards are always queued.
+    let mut learning_slots = i64::MAX;
+    for (id, state, item_type, placement) in candidates {
+        let mut kind = classify_kind(&state);
+        // New grammar has its own daily limits; due grammar shares the review limit with words.
+        if kind == "new" && item_type == ITEM_GRAMMAR {
+            kind = new_grammar_kind(placement);
         }
+        let slots = match kind {
+            "review" => &mut review_slots,
+            "new" => &mut new_slots,
+            "grammar_new" => &mut grammar_new_slots,
+            "grammar_check" => &mut check_slots,
+            _ => &mut learning_slots,
+        };
+        if *slots <= 0 { continue; }
+        *slots -= 1;
         insert_stmt
             .execute(params![study_id, id, kind, now_ms])
             .map_err(|e| e.to_string())?;
@@ -1021,6 +1046,19 @@ fn count_reviewed(conn: &rusqlite::Connection, study_id: i64) -> Result<i64, Str
     )
 }
 
+/// New grammar and level checks in today's queue: (answered at least once today, total).
+fn count_grammar(conn: &rusqlite::Connection, study_id: i64) -> Result<(i64, i64), String> {
+    conn.query_row(
+        "SELECT COALESCE(SUM(EXISTS (SELECT 1 FROM review_answers ra
+                    WHERE ra.review_item_id = sc.review_item_id AND ra.answered_at >= sc.create_time)), 0),
+                COUNT(*)
+         FROM study_card sc WHERE sc.study_id = ?1 AND sc.kind IN ('grammar_new', 'grammar_check')",
+        params![study_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .map_err(|e| e.to_string())
+}
+
 fn count_new_seen(conn: &rusqlite::Connection, study_id: i64) -> Result<i64, String> {
     count_scalar(conn,
         "SELECT COUNT(*) FROM study_card WHERE study_id = ?1 AND kind = 'new' AND status = 'graded'",
@@ -1077,6 +1115,12 @@ pub struct SessionProgress {
     pub reviews_completed: i64,
     pub new_cards_seen: i64,
     pub remaining_count: usize,
+    /// Cards in today's queue (words and grammar) and how many of them are no longer waiting.
+    pub queue_total: usize,
+    pub queue_done: usize,
+    /// New grammar and level checks in today's queue: answered today, and in the queue.
+    pub grammar_done: i64,
+    pub grammar_total: i64,
     pub session_done: bool,
     pub next_card: Option<ReviewItem>,
     pub next_task: Option<QuizTask>,
@@ -1088,6 +1132,8 @@ pub(crate) fn session_progress(conn: &rusqlite::Connection, study_id: i64) -> Re
     let reviews_completed = count_reviewed(conn, study_id)?;
     let new_cards_seen = count_new_seen(conn, study_id)?;
     let remaining_count = count_pending(conn, study_id)?;
+    let queue_total = count_total(conn, study_id)?;
+    let (grammar_done, grammar_total) = count_grammar(conn, study_id)?;
     let next_card = fetch_next_pending(conn, study_id, now)?;
     let (next_task, grade_options) = match &next_card {
         Some(card) => (
@@ -1100,6 +1146,10 @@ pub(crate) fn session_progress(conn: &rusqlite::Connection, study_id: i64) -> Re
         reviews_completed,
         new_cards_seen,
         remaining_count,
+        queue_total,
+        queue_done: queue_total.saturating_sub(remaining_count),
+        grammar_done,
+        grammar_total,
         session_done: remaining_count == 0,
         next_card,
         next_task,
@@ -1135,6 +1185,9 @@ pub fn db_session_start(
         reviews_completed: progress.reviews_completed,
         new_cards_seen: progress.new_cards_seen,
         missing_meaning,
+        queue_done: progress.queue_done,
+        grammar_done: progress.grammar_done,
+        grammar_total: progress.grammar_total,
     })
 }
 

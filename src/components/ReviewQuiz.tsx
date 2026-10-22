@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { BulbOutlined } from '@ant-design/icons'
 import { NONE_ANSWER } from '../lib/types'
-import type { AnswerResult, CardDetail, GradeReason, QuizAnswer, QuizTask, SessionSummary } from '../lib/types'
+import type { AnswerResult, CardDetail, GradeReason, GrammarInfo, QuizAnswer, QuizTask, SessionSummary } from '../lib/types'
 import { t, lang as explainLang, formatInMinutes, formatSeconds, languageName, partOfSpeechLabel } from '../lib/i18n'
 
 export const GRADE_COLORS: Record<string, string> = {
@@ -26,6 +26,9 @@ const KIND_LABEL: Record<string, string> = {
   recall_confirm: t('quiz.kind.recall_confirm'),
   reading: t('quiz.kind.reading'),
   context: t('quiz.kind.context'),
+  grammar_meaning: t('quiz.kind.grammar_meaning'),
+  grammar_gap: t('quiz.kind.grammar_gap'),
+  grammar_mistake: t('quiz.kind.grammar_mistake'),
 }
 
 /** A grade reason from Rust, in the learner's language. */
@@ -72,6 +75,71 @@ function TimerBar({ startedAt }: { startedAt: number }) {
   )
 }
 
+type Sentence = NonNullable<QuizTask['sentence']>
+
+/** A sentence with the pattern marked, or with a blank where it goes (`fill` fills the blank). */
+function GrammarSentence({ sentence, fill }: { sentence: Sentence; fill?: string }) {
+  const target = fill ?? sentence.target
+  return (
+    <div className="text-xl leading-loose">
+      {sentence.before}
+      {target
+        ? <mark className="bg-blue-50 text-blue-600 rounded px-1">{target}</mark>
+        : <span className="inline-block min-w-[4.5rem] mx-0.5 border-b-2 border-blue-400">{'\u00a0'}</span>}
+      {sentence.after}
+    </div>
+  )
+}
+
+function Highlighted({ sentence, target }: { sentence: string; target: string }) {
+  const at = target ? sentence.indexOf(target) : -1
+  if (at < 0) return <>{sentence}</>
+  return (
+    <>
+      {sentence.slice(0, at)}
+      <mark className="bg-blue-50 text-blue-600 rounded px-0.5">{target}</mark>
+      {sentence.slice(at + target.length)}
+    </>
+  )
+}
+
+/** What a grammar pattern means and how it is built: intro, result screen, card details. */
+export function GrammarInfoView({ title, info }: { title?: string; info: GrammarInfo }) {
+  return (
+    <div className="flex flex-col gap-2 text-left w-full">
+      {title && <div className="text-2xl font-semibold text-center">{title}</div>}
+      <div className={`text-sm text-gray-700 ${title ? 'text-center' : ''}`}>{info.meaning}</div>
+      {info.form && (
+        <div className="bg-gray-50 rounded-xl px-3 py-2">
+          <div className="text-[11px] text-gray-400">{t('grammarCard.form')}</div>
+          <div className="text-sm">{info.form}</div>
+        </div>
+      )}
+      {info.examples.map(e => (
+        <div key={e.sentence} className="flex flex-col gap-0.5">
+          <div className="text-base"><Highlighted sentence={e.sentence} target={e.target} /></div>
+          <div className="text-xs text-gray-500">{e.translation}</div>
+        </div>
+      ))}
+      {info.note && <div className="text-xs text-gray-500">{info.note}</div>}
+    </div>
+  )
+}
+
+/** "Grammar · N4", or "Level check · N5" for a pattern below the learner's level. */
+function GrammarChip({ task }: { task: QuizTask }) {
+  if (!task.grammar) return null
+  const level = task.grammar.level
+  const text = task.placement
+    ? (level ? t('quiz.levelCheckChip', { level }) : t('quiz.levelCheck'))
+    : (level ? t('quiz.grammarChip', { level }) : t('quiz.grammar'))
+  return (
+    <span className={`text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full ${task.placement ? 'bg-amber-50 text-amber-700' : 'bg-indigo-50 text-indigo-600'}`}>
+      {text}
+    </span>
+  )
+}
+
 type Phase = 'intro' | 'recall' | 'answer'
 
 /** Renders one question and reports what the user did. Grading happens in Rust. */
@@ -108,17 +176,40 @@ export function ReviewQuiz({ task, submitting, onAnswer }: {
   )
 
   const isTf = task.kind === 'intro_tf' || task.kind === 'true_false'
-  const showMeaningOnCard = task.kind === 'reading' || phase === 'intro'
+  const isGrammar = !!task.grammar
+  const showMeaningOnCard = (task.kind === 'reading' || phase === 'intro') && !isGrammar
+  const twoColumns = task.kind === 'reading' || task.kind === 'grammar_gap'
   // Recall → confirm is timed only up to "I know it"; the confirm tap isn't part of recall.
   const showTimer = phase === 'recall' || (phase === 'answer' && task.kind !== 'recall_confirm')
 
   return (
     <div className="flex flex-col gap-3 w-full max-w-sm mx-auto">
       <div className="bg-white rounded-2xl shadow-md px-6 py-8 text-center flex flex-col items-center gap-2">
-        <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-blue-50 text-blue-500">
-          {KIND_LABEL[task.kind]}{task.mature ? ` · ${t('quiz.mature')}` : ''}
-        </span>
-        {task.kind === 'context' && task.sentence ? (
+        <div className="flex flex-wrap justify-center gap-1.5">
+          <GrammarChip task={task} />
+          <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-blue-50 text-blue-500">
+            {KIND_LABEL[task.kind]}{task.mature ? ` · ${t('quiz.mature')}` : ''}
+          </span>
+        </div>
+        {phase === 'intro' && task.grammar ? (
+          <GrammarInfoView title={task.word} info={task.grammar} />
+        ) : (task.kind === 'grammar_meaning' || task.kind === 'grammar_gap') && task.sentence ? (
+          <GrammarSentence sentence={task.sentence} />
+        ) : task.kind === 'grammar_mistake' ? (
+          <div className="flex flex-wrap justify-center gap-1.5">
+            {task.options.map(o => (
+              <button
+                key={o.text}
+                type="button"
+                disabled={submitting}
+                onClick={() => send({ dont_know: false, choice: o.text })}
+                className="px-3 py-2 rounded-xl bg-white border-[1.5px] border-gray-200 text-xl hover:border-blue-300 active:bg-gray-50 disabled:opacity-60"
+              >
+                {o.text}
+              </button>
+            ))}
+          </div>
+        ) : task.kind === 'context' && task.sentence ? (
           <div className="text-xl leading-loose">
             {task.sentence.before}
             <mark className="bg-blue-50 text-blue-600 rounded px-1">
@@ -138,8 +229,16 @@ export function ReviewQuiz({ task, submitting, onAnswer }: {
         )}
         {phase === 'recall' && <span className="text-xs text-gray-400 mt-1">{t('quiz.thinkThenTap')}</span>}
         {task.kind === 'context' && <span className="text-xs text-gray-400 mt-1">{t('quiz.contextQuestion')}</span>}
+        {(task.kind === 'grammar_gap' || task.kind === 'grammar_mistake') && task.sentence?.translation && (
+          <span className="text-sm text-gray-500">“{task.sentence.translation}”</span>
+        )}
+        {task.kind === 'grammar_meaning' && <span className="text-xs text-gray-400 mt-1">{t('quiz.grammarMeaningQuestion')}</span>}
+        {task.kind === 'grammar_gap' && <span className="text-xs text-gray-400 mt-1">{t('quiz.gapQuestion')}</span>}
+        {task.kind === 'grammar_mistake' && <span className="text-xs text-gray-400 mt-1">{t('quiz.mistakeQuestion')}</span>}
         {phase === 'answer' && task.kind === 'recall_confirm' && <span className="text-xs text-gray-400 mt-1">{t('quiz.whichRecalled')}</span>}
       </div>
+
+      {task.placement && phase === 'answer' && <p className="text-xs text-center text-gray-500">{t('quiz.levelCheckHint')}</p>}
 
       {showTimer && <TimerBar startedAt={startedAt} />}
 
@@ -169,19 +268,21 @@ export function ReviewQuiz({ task, submitting, onAnswer }: {
 
       {phase === 'answer' && !isTf && (
         <>
-          <div className={task.kind === 'reading' ? 'grid grid-cols-2 gap-2' : 'flex flex-col gap-2'}>
-            {task.options.map(o => (
-              <button
-                key={o.text}
-                type="button"
-                disabled={submitting}
-                className={`${optionBase} ${task.kind === 'reading' ? 'text-center text-base' : ''}`}
-                onClick={() => send({ dont_know: false, choice: o.text }, recallMs ?? undefined)}
-              >
-                {o.text}
-              </button>
-            ))}
-          </div>
+          {task.kind !== 'grammar_mistake' && (
+            <div className={twoColumns ? 'grid grid-cols-2 gap-2' : 'flex flex-col gap-2'}>
+              {task.options.map(o => (
+                <button
+                  key={o.text}
+                  type="button"
+                  disabled={submitting}
+                  className={`${optionBase} ${twoColumns ? 'text-center text-base' : ''}`}
+                  onClick={() => send({ dont_know: false, choice: o.text }, recallMs ?? undefined)}
+                >
+                  {o.text}
+                </button>
+              ))}
+            </div>
+          )}
           {task.kind === 'recall_confirm' ? (
             <button type="button" disabled={submitting} className="py-2 text-sm text-gray-500 hover:text-gray-700" onClick={() => send({ dont_know: false, choice: NONE_ANSWER }, recallMs ?? undefined)}>
               {t('quiz.noneOfThese')}
@@ -211,9 +312,15 @@ export function QuizVerdictView({ task, result, details, onNext, onOverride, ove
   return (
     <div className="flex flex-col gap-3 w-full max-w-sm mx-auto">
       <div className="bg-white rounded-2xl shadow-md px-6 py-6 text-center flex flex-col items-center gap-1">
+        <GrammarChip task={task} />
         <Word word={task.word} reading={task.reading} showReading size="text-3xl" />
         <div className="text-sm text-gray-500">{task.meaning}</div>
-        {task.kind === 'context' && task.sentence?.translation && (
+        {(task.kind === 'grammar_meaning' || task.kind === 'grammar_gap') && task.sentence && (
+          <div className="mt-2">
+            <GrammarSentence sentence={task.sentence} fill={task.kind === 'grammar_gap' ? v.correct_answer : undefined} />
+          </div>
+        )}
+        {(task.kind === 'context' || task.kind === 'grammar_meaning' || task.kind === 'grammar_gap' || task.kind === 'grammar_mistake') && task.sentence?.translation && (
           <div className="text-xs text-gray-400 mt-1">{task.sentence.translation}</div>
         )}
       </div>
@@ -262,6 +369,15 @@ export function QuizVerdictView({ task, result, details, onNext, onOverride, ove
           </div>
         )}
       </div>
+
+      {task.placement && (
+        <p className="text-xs text-center text-gray-600">{v.correct ? t('quiz.checkPassed') : t('quiz.checkMissed')}</p>
+      )}
+      {task.grammar && !v.correct && (
+        <div className="bg-white rounded-2xl shadow-sm px-4 py-3">
+          <GrammarInfoView info={task.grammar} />
+        </div>
+      )}
 
       {v.can_override && (
         <button type="button" disabled={overriding} onClick={onOverride} className="py-1 text-xs text-gray-400 hover:text-gray-600">
@@ -328,6 +444,11 @@ export function SessionSummaryView({ summary }: { summary: SessionSummary }) {
           ? stat(`${summary.mature_retention}%`, t('summary.matureKept'))
           : stat(String(summary.hints), t('summary.hintsUsed', { count: summary.hints }))}
       </div>
+      {summary.grammar > 0 && (
+        <div className="bg-white rounded-xl px-3 py-2 text-sm text-center">
+          {t('summary.wordsAndGrammar', { words: summary.words, grammar: summary.grammar })}
+        </div>
+      )}
       <div className="bg-white rounded-xl px-3 py-2 flex flex-col gap-1.5">
         <div className="text-[11px] text-gray-400">{t('summary.grades')}</div>
         <div className="flex h-2.5 rounded-full overflow-hidden bg-gray-100">
@@ -365,9 +486,13 @@ const DETAIL_FIELDS: { key: keyof CardDetail; label: string; placeholder: string
   { key: 'example_meaning', label: t('card.exampleMeaning'), placeholder: t('card.exampleMeaningPlaceholder') },
 ]
 
-/** A card with no meaning yet: generate or write the back, check it, then it is quizzed later. */
-export function MeaningSetup({ task, hasApi, generating, saving, error, onGenerate, onSave, onSkip, onOpenSettings }: {
+/**
+ * A card with no meaning yet: generate or write the back, check it, then it is quizzed later.
+ * A grammar card's back is AI-made practice material; only its meaning can be edited.
+ */
+export function MeaningSetup({ task, isGrammar = false, hasApi, generating, saving, error, onGenerate, onSave, onSkip, onOpenSettings }: {
   task: QuizTask
+  isGrammar?: boolean
   hasApi: boolean
   generating: boolean
   saving: boolean
@@ -382,7 +507,7 @@ export function MeaningSetup({ task, hasApi, generating, saving, error, onGenera
 
   const label = (
     <span className="text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full bg-orange-50 text-orange-500">
-      {editing ? t('quiz.editBack') : draft ? t('quiz.checkBack') : t('quiz.noMeaningYet', { language: languageName(explainLang) })}
+      {editing ? t('quiz.editBack') : draft ? t('quiz.checkBack') : isGrammar ? t('quiz.noPracticeYet') : t('quiz.noMeaningYet', { language: languageName(explainLang) })}
     </span>
   )
 
@@ -394,7 +519,7 @@ export function MeaningSetup({ task, hasApi, generating, saving, error, onGenera
             {label}
             <div className="text-3xl font-semibold">{task.word}</div>
           </div>
-          {DETAIL_FIELDS.map(f => (
+          {DETAIL_FIELDS.filter(f => !isGrammar || f.key === 'meaning').map(f => (
             <label key={f.key} className="flex flex-col gap-1">
               <span className="text-xs text-gray-400">{f.label}{f.key === 'meaning' ? ` ${t('card.required')}` : ''}</span>
               <input
@@ -430,6 +555,46 @@ export function MeaningSetup({ task, hasApi, generating, saving, error, onGenera
           </div>
           <span className="text-xs text-gray-400">{t('quiz.generatingBack')}</span>
         </div>
+      </div>
+    )
+  }
+
+  if (draft && isGrammar && task.grammar) {
+    return (
+      <div className="flex flex-col gap-3 w-full max-w-sm mx-auto">
+        <div className="bg-white rounded-2xl shadow-md px-5 py-6 flex flex-col items-center gap-3">
+          {label}
+          <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-600">{t('common.aiMade')}</span>
+          <GrammarInfoView title={task.word} info={task.grammar} />
+        </div>
+        {error && <p className="text-xs text-center text-red-500">{error}</p>}
+        <button type="button" className={primaryBtn} disabled={saving} onClick={() => onSave(draft)}>
+          {saving ? t('common.saving') : t('quiz.looksRight')}
+        </button>
+        <div className="grid grid-cols-2 gap-2">
+          <button type="button" className={secondaryBtn} onClick={() => setEditing({ ...draft })}>✎ {t('quiz.editMeaning')}</button>
+          <button type="button" className={secondaryBtn} disabled={!hasApi} onClick={onGenerate}>↻ {t('card.regenerate')}</button>
+        </div>
+        <button type="button" className="py-1 text-xs text-gray-400 hover:text-gray-600" onClick={onSkip}>{t('quiz.skipToday')}</button>
+      </div>
+    )
+  }
+
+  if (isGrammar) {
+    return (
+      <div className="flex flex-col gap-3 w-full max-w-sm mx-auto">
+        <div className="bg-white rounded-2xl shadow-md px-6 py-8 text-center flex flex-col items-center gap-2">
+          {label}
+          <div className="text-3xl font-semibold">{task.word}</div>
+          <span className="text-xs text-gray-400 mt-1">{hasApi ? t('quiz.practiceHint') : t('quiz.practiceNeedsApi')}</span>
+        </div>
+        {error && <p className="text-xs text-center text-red-500">{error}</p>}
+        {hasApi ? (
+          <button type="button" className={primaryBtn} onClick={onGenerate}>✨ {t('quiz.generatePractice')}</button>
+        ) : (
+          <button type="button" className={primaryBtn} onClick={onOpenSettings}>{t('quiz.openSettings')}</button>
+        )}
+        <button type="button" className={secondaryBtn} onClick={onSkip}>{t('quiz.skipToday')}</button>
       </div>
     )
   }

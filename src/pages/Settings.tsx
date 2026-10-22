@@ -20,6 +20,7 @@ import ProviderGuide from '../components/ProviderGuide'
 import { t, lang, switchExplainLang, errorText, type ExplainLang } from '../lib/i18n'
 import { PROVIDER_PRESETS, TRANSLATION_REPORT_URL, type ProviderPreset } from '../lib/providers'
 import { readFlag, writeFlag, CHAT_HINTS_KEY, ROMAJI_KEY, ROMAJI_INPUT_KEY } from '../lib/prefs'
+import GrammarPlanSettings from '../components/GrammarPlanSettings'
 
 const MAX_REVIEWS_DEFAULT = 100
 const MAX_REVIEWS_KEY = 'max_reviews_per_day'
@@ -393,6 +394,8 @@ export default function Settings() {
           </div>
         </div>
       </div>
+
+      <GrammarPlanSettings />
 
       {/* Chat settings */}
       <div className="space-y-3">

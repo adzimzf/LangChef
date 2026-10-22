@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState } from 'react'
+import { useNavigate } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
 import { PlusOutlined, DeleteOutlined, EditOutlined, CheckOutlined, CloseOutlined, ReadOutlined, UploadOutlined, TranslationOutlined, LoadingOutlined } from '@ant-design/icons'
 import ReactMarkdown from 'react-markdown'
 import { JLPT_LEVEL_ORDER, DEFAULT_JLPT_LEVEL } from '../lib/jlpt'
-import type { GrammarItem } from '../lib/types'
+import type { GrammarItem, GrammarPlan, GrammarReviewStatus } from '../lib/types'
 import { t, lang as explainLang, errorText, languageName } from '../lib/i18n'
 import { TARGET_LANGUAGES } from '../lib/languages'
 import { TRANSLATION_REPORT_URL } from '../lib/providers'
@@ -19,6 +20,23 @@ function getApiConfig() {
 const FALLBACK_LEVELS: Record<string, string[]> = {
   ja: JLPT_LEVEL_ORDER,
   id: ['A1', 'A2'],
+}
+
+const STATUS_STYLE: Record<GrammarReviewStatus, string> = {
+  known: 'bg-green-50 text-green-700',
+  learning: 'bg-blue-50 text-blue-700',
+  new: 'bg-blue-50 text-blue-700',
+  check: 'bg-amber-50 text-amber-800',
+  coming: 'bg-gray-100 text-gray-600',
+  coming_check: 'bg-gray-100 text-gray-600',
+  not_planned: 'bg-gray-100 text-gray-600',
+}
+
+const ROLE_STYLE: Record<string, string> = {
+  current: 'text-blue-600',
+  below: 'text-amber-700',
+  above: 'text-gray-500',
+  other: 'text-gray-500',
 }
 
 export default function Grammar() {
@@ -39,7 +57,12 @@ export default function Grammar() {
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const [translating, setTranslating] = useState<string | null>(null)
   const [translateMsg, setTranslateMsg] = useState<string | null>(null)
+  const [plan, setPlan] = useState<GrammarPlan | null>(null)
+  const [addingReview, setAddingReview] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // Opens on the learner's own level once per language.
+  const jumpedToLevel = useRef<string | null>(null)
+  const navigate = useNavigate()
 
   async function load() {
     try {
@@ -59,11 +82,49 @@ export default function Grammar() {
     }
   }
 
+  async function loadPlan() {
+    try {
+      const p = await invoke<GrammarPlan>('db_get_grammar_plan', { language: selectedLang })
+      setPlan(p)
+      if (p.level && jumpedToLevel.current !== selectedLang) {
+        jumpedToLevel.current = selectedLang
+        setSelectedLevel(p.level)
+      }
+    } catch {
+      setPlan(null)
+    }
+  }
+
+  async function changeLevel(level: string) {
+    try {
+      setPlan(await invoke<GrammarPlan>('db_set_grammar_plan', { language: selectedLang, level }))
+      setSelectedLevel(level)
+      await load()
+    } catch (e) {
+      setTranslateMsg(errorText(e))
+    }
+  }
+
+  async function addToReview(item: GrammarItem) {
+    setAddingReview(item.id)
+    try {
+      await invoke('db_add_grammar_to_review', { grammarId: item.id })
+      await Promise.all([load(), loadPlan()])
+    } catch (e) {
+      setTranslateMsg(errorText(e))
+    }
+    setAddingReview(null)
+  }
+
   // Load levels and items on mount and when language/level changes
   useEffect(() => {
     loadLevels()
     load()
   }, [selectedLang, selectedLevel])
+
+  useEffect(() => {
+    loadPlan()
+  }, [selectedLang])
 
   // Reset level when language changes
   useEffect(() => {
@@ -205,8 +266,9 @@ export default function Grammar() {
     e.target.value = ''
   }
 
-  const levels = dbLevels
+  const levels = plan && plan.levels.length > 0 ? plan.levels.map(l => l.level) : dbLevels
   const showFallback = explainLang !== 'en' && items.some((i) => i.fallback)
+  const progress = plan?.levels.find(l => l.level === selectedLevel)
 
   return (
     <div className="flex flex-col h-full overflow-y-auto">
@@ -236,21 +298,66 @@ export default function Grammar() {
       </div>
       )}
 
-      <div className="flex gap-1.5 mb-4 overflow-x-auto no-scrollbar shrink-0">
-        {levels.map(level => (
-          <button
-            key={level}
-            onClick={() => setSelectedLevel(level)}
-            className={`shrink-0 px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
-              selectedLevel === level
-                ? 'bg-indigo-500 text-white'
-                : 'bg-white text-gray-600 hover:bg-indigo-50 active:bg-indigo-100'
-            }`}
-          >
-            {level}
-          </button>
-        ))}
+      <div className="flex gap-1.5 mb-3 overflow-x-auto no-scrollbar shrink-0">
+        {levels.map(level => {
+          const p = plan?.levels.find(l => l.level === level)
+          return (
+            <button
+              key={level}
+              onClick={() => setSelectedLevel(level)}
+              className={`shrink-0 px-3 py-1.5 rounded-full text-sm font-medium transition-colors ${
+                selectedLevel === level
+                  ? 'bg-indigo-500 text-white'
+                  : 'bg-white text-gray-600 hover:bg-indigo-50 active:bg-indigo-100'
+              }`}
+            >
+              {level}
+              {p && p.total > 0 && <span className="ml-1 text-[11px] opacity-80">{p.pct}%</span>}
+            </button>
+          )
+        })}
       </div>
+
+      {/* Where this level stands in grammar review */}
+      {plan?.level && progress && (
+        <div className="bg-white rounded-xl shadow-sm p-4 mb-3 space-y-2 shrink-0">
+          <div className="flex items-center justify-between gap-2">
+            <div className="text-sm font-semibold">
+              {selectedLevel} · <span className={ROLE_STYLE[progress.role]}>{t(`grammarPlan.role.${progress.role}`)}</span>
+            </div>
+            <label className="flex items-center gap-1.5 text-xs text-gray-500">
+              {t('grammarPlan.yourLevel')}
+              <select
+                value={plan.level}
+                onChange={e => changeLevel(e.target.value)}
+                className="px-2 py-1 rounded-lg bg-gray-50 text-sm font-semibold text-gray-800 outline-none focus:ring-2 focus:ring-blue-300"
+              >
+                {plan.levels.map(l => <option key={l.level} value={l.level}>{l.level}</option>)}
+              </select>
+            </label>
+          </div>
+          <div className="h-2 rounded-full bg-gray-100 overflow-hidden">
+            <div className="h-full bg-green-500" style={{ width: `${progress.pct}%` }} />
+          </div>
+          <div className="text-xs text-gray-600">
+            {t('grammarPlan.counts', { known: progress.known, learning: progress.learning, total: progress.total })}
+          </div>
+          <p className="text-xs text-gray-500">{t(`grammarPlan.blurb.${progress.role}`, { n: plan.new_per_day, checks: plan.checks_today })}</p>
+          {plan.move_up_to && progress.role === 'current' && (
+            <div className="bg-green-50 rounded-lg p-3 flex items-center justify-between gap-2">
+              <span className="text-xs text-green-800">{t('grammarPlan.moveUp', { pct: progress.pct, level: plan.move_up_to })}</span>
+              <button onClick={() => changeLevel(plan.move_up_to!)} className="shrink-0 px-3 py-1.5 rounded-lg bg-green-600 text-white text-xs font-medium">
+                {t('grammarPlan.moveUpButton', { level: plan.move_up_to })}
+              </button>
+            </div>
+          )}
+          {progress.role === 'current' && (
+            <button onClick={() => navigate('/review')} className="w-full py-2 rounded-xl bg-blue-500 text-white text-sm font-medium hover:bg-blue-600">
+              {t('grammarPlan.practiceNow', { level: selectedLevel })}
+            </button>
+          )}
+        </div>
+      )}
 
       {/* Action buttons */}
       <div className="flex gap-2 mb-3 shrink-0">
@@ -465,6 +572,11 @@ export default function Grammar() {
                       {item.fallback && explainLang !== 'en' && (
                         <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700 font-medium">{languageName('en')}</span>
                       )}
+                      {item.review && !item.review.can_add && (
+                        <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-medium ${STATUS_STYLE[item.review.status]}`}>
+                          {t(`grammarPlan.status.${item.review.status}`)}
+                        </span>
+                      )}
                     </div>
                     {expandedId === item.id ? (
                       <div className="grammar-detail prose prose-sm max-w-none text-gray-600 mt-2">
@@ -489,6 +601,15 @@ export default function Grammar() {
                     )}
                   </div>
                   <div className="flex items-center gap-1 shrink-0">
+                    {item.review?.can_add && (
+                      <button
+                        onClick={() => addToReview(item)}
+                        disabled={addingReview !== null}
+                        className="px-2.5 h-8 rounded-lg border-[1.5px] border-blue-500 text-blue-600 text-xs font-medium hover:bg-blue-50 disabled:opacity-50"
+                      >
+                        {addingReview === item.id ? <LoadingOutlined /> : t('grammarPlan.addToReview')}
+                      </button>
+                    )}
                     <button
                       onClick={() => startEdit(item)}
                       className="w-8 h-8 flex items-center justify-center rounded-full hover:bg-gray-100 active:bg-gray-200 transition-colors text-gray-400 hover:text-gray-600"

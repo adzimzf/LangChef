@@ -1,3 +1,4 @@
+import { invoke } from '@tauri-apps/api/core'
 import { t } from './i18n'
 
 /**
@@ -94,3 +95,10 @@ export const DEFAULT_JLPT_LEVEL: JLPTLevel = 'N4'
 
 /** localStorage key for persisting the last-selected JLPT level */
 export const JLPT_LEVEL_STORAGE_KEY = 'jlpt_level'
+
+/** Grammar review starts at the JLPT level picked before it existed; Rust ignores this once a level is set. */
+export function seedGrammarLevel(): Promise<void> {
+  let level: string | null = null
+  try { level = localStorage.getItem(JLPT_LEVEL_STORAGE_KEY) } catch { /* storage blocked */ }
+  return level ? invoke<void>('db_seed_grammar_level', { language: 'ja', level }).catch(() => {}) : Promise.resolve()
+}
