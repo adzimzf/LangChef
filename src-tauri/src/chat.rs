@@ -31,6 +31,9 @@ pub struct ChatRequest<'a> {
     pub model: &'a str,
     pub messages: &'a [ChatMessage],
     pub stream: bool,
+    /// OpenRouter only: keeps "thinking" models from reasoning for minutes before writing anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -89,7 +92,9 @@ const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// until the whole text is ready (which mobile networks and proxies cut off as a timeout).
 pub async fn complete(api_host: &str, api_key: &str, model: &str, messages: &[ChatMessage]) -> Result<String, String> {
     let url = build_url(api_host, "chat/completions");
-    let req = ChatRequest { model, messages, stream: true };
+    // None of our prompts need long reasoning, and a reasoning model writes nothing while it thinks.
+    let reasoning = api_host.contains("openrouter.ai").then(|| serde_json::json!({ "effort": "low" }));
+    let req = ChatRequest { model, messages, stream: true, reasoning };
     let client = Client::builder()
         .connect_timeout(std::time::Duration::from_secs(20))
         .build()
@@ -114,12 +119,20 @@ pub async fn complete(api_host: &str, api_key: &str, model: &str, messages: &[Ch
 
     let mut stream = SseReader::default();
     let mut raw: Vec<u8> = Vec::new();
+    let mut received = 0usize;
     loop {
         let chunk = tokio::time::timeout(STREAM_IDLE_TIMEOUT, resp.chunk())
             .await
-            .map_err(|_| app_error("api_timeout", format!("no data for {}s (url: {})", STREAM_IDLE_TIMEOUT.as_secs(), url)))?
+            .map_err(|_| {
+                let model = stream.model.as_deref().unwrap_or("?");
+                app_error(
+                    "api_timeout",
+                    format!("no data for {}s after {} bytes (model: {}, url: {})", STREAM_IDLE_TIMEOUT.as_secs(), received, model, url),
+                )
+            })?
             .map_err(|e| send_error(e, &url))?;
         let Some(chunk) = chunk else { break };
+        received += chunk.len();
         if !is_stream {
             raw.extend_from_slice(&chunk);
             continue;
@@ -142,6 +155,8 @@ pub async fn complete(api_host: &str, api_key: &str, model: &str, messages: &[Ch
 struct SseReader {
     pending: Vec<u8>,
     text: String,
+    /// The model the provider actually picked (e.g. behind `openrouter/auto`), for error details.
+    model: Option<String>,
 }
 
 impl SseReader {
@@ -158,6 +173,9 @@ impl SseReader {
                 return Ok(true);
             }
             let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else { continue };
+            if self.model.is_none() {
+                self.model = event["model"].as_str().map(str::to_string);
+            }
             if let Some(err) = event.get("error") {
                 return Err(app_error("api_error", err.to_string()));
             }
@@ -392,10 +410,11 @@ mod tests {
     #[test]
     fn sse_reader_joins_deltas_across_split_chunks() {
         let mut r = SseReader::default();
-        assert!(!r.push(b": OPENROUTER PROCESSING\n\ndata: {\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\nda").unwrap());
+        assert!(!r.push(b": OPENROUTER PROCESSING\n\ndata: {\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\nda").unwrap());
         assert!(!r.push("ta: {\"choices\":[{\"delta\":{\"content\":\"lo 世界\"}}]}\n\n".as_bytes()).unwrap());
         assert!(r.push(b"data: [DONE]\n\n").unwrap());
         assert_eq!(r.text, "Hello 世界");
+        assert_eq!(r.model.as_deref(), Some("m"));
     }
 
     #[test]
