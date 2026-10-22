@@ -840,6 +840,8 @@ mod tests {
 
         // No practice material yet: every card asks for its back first.
         let progress = session_progress(&conn, study).unwrap();
+        assert_eq!((progress.queue_done, progress.queue_total), (0, total as usize));
+        assert_eq!((progress.grammar_done, progress.grammar_total), (0, DEFAULT_NEW_PER_DAY + DEFAULT_CHECKS_PER_DAY));
         assert_eq!(progress.next_task.unwrap().kind, KIND_NEEDS_MEANING);
 
         let back = r#"{"meaning":"m","examples":[{"sentence":"AXB","target":"X","translation":"t","distractors":["Y","Z"]}],
@@ -865,6 +867,15 @@ mod tests {
         let srs = apply_session_grade(&conn, study, &check.id, "easy").unwrap();
         assert_eq!(srs.state, "review");
         assert!(srs.next_minutes > 7 * 24 * 60);
+        conn.execute(
+            "INSERT INTO review_answers(review_item_id, language, task, correct, elapsed_ms, grade, answered_at, placement)
+             VALUES (?1, 'ja', 'grammar_gap', 1, 3000, 'easy', ?2, 1)",
+            params![check.id, chrono::Utc::now().timestamp_millis()],
+        )
+        .unwrap();
+        let progress = session_progress(&conn, study).unwrap();
+        assert_eq!(progress.queue_done, 1);
+        assert_eq!(progress.grammar_done, 1);
 
         let plan = grammar_plan(&conn, "ja").unwrap();
         assert_eq!(plan.levels[0].level, "N5");

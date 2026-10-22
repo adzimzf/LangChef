@@ -45,6 +45,9 @@ type SessionStartResult = {
   reviews_completed: number
   new_cards_seen: number
   missing_meaning: string[]
+  queue_done: number
+  grammar_done: number
+  grammar_total: number
 }
 
 type SessionGradeResult = SessionProgress & { lapsed: boolean; graduated: boolean }
@@ -89,6 +92,8 @@ export default function Review() {
   const [currentCard, setCurrentCard] = useState<ReviewItem | null>(null)
   const [sessionTotal, setSessionTotal] = useState(0)
   const [sessionRemaining, setSessionRemaining] = useState(0)
+  const [grammarDone, setGrammarDone] = useState(0)
+  const [grammarTotal, setGrammarTotal] = useState(0)
   const [sessionCompleted, setSessionCompleted] = useState(0)
   const [reviewedToday, setReviewedToday] = useState(0)
   const [newCardsToday, setNewCardsToday] = useState(0)
@@ -141,7 +146,9 @@ export default function Review() {
       setMissingMeaning(result.missing_meaning)
       setGradeOptions(toGradeOptions(result.grade_options))
       setSessionTotal(result.total_cards)
-      setSessionRemaining(result.total_cards)
+      setSessionRemaining(result.total_cards - result.queue_done)
+      setGrammarDone(result.grammar_done)
+      setGrammarTotal(result.grammar_total)
       setReviewedToday(result.reviews_completed)
       setNewCardsToday(result.new_cards_seen)
       setSessionCompleted(0)
@@ -202,12 +209,20 @@ export default function Review() {
     setTimeout(() => { isGrading.current = false }, 0)
   }
 
-  function applyProgress(p: SessionProgress) {
+  /** Today's counters, from any session step. */
+  function applyCounts(p: SessionProgress) {
     setReviewedToday(p.reviews_completed)
     setNewCardsToday(p.new_cards_seen)
+    setSessionTotal(p.queue_total)
+    setSessionRemaining(p.remaining_count)
+    setGrammarDone(p.grammar_done)
+    setGrammarTotal(p.grammar_total)
+  }
+
+  function applyProgress(p: SessionProgress) {
+    applyCounts(p)
     setCurrentCard(p.next_card ?? null)
     setCurrentTask(p.next_task ?? null)
-    setSessionRemaining(p.remaining_count)
     setGradeOptions(toGradeOptions(p.grade_options))
     setAnswerResult(null)
     setRevealed(false)
@@ -335,8 +350,7 @@ export default function Review() {
       })
       invoke('db_record_activity', { activityType: 'review' }).catch(() => {})
       if (result.card) setCurrentCard(result.card)
-      setReviewedToday(result.reviews_completed)
-      setNewCardsToday(result.new_cards_seen)
+      applyCounts(result)
       setAnswerResult(result)
       if (result.graduated && !result.lapsed) {
         setSessionCompleted(prev => prev + 1)
@@ -358,8 +372,7 @@ export default function Review() {
         maxNewCards: getMaxNewCards(),
       })
       if (result.card) setCurrentCard(result.card)
-      setReviewedToday(result.reviews_completed)
-      setNewCardsToday(result.new_cards_seen)
+      applyCounts(result)
       setAnswerResult(result)
     } catch (e) {
       alert(errorText(e))
@@ -767,7 +780,10 @@ export default function Review() {
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-lg font-semibold">{t('review.title')}</h2>
           <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-400">{t('review.todayCounts', { reviewed: reviewedToday, maxReviews, newSeen: newCardsToday, maxNew: maxNewCards })}</span>
+            <span className="text-xs text-gray-400">
+              {t('review.todayCounts', { reviewed: reviewedToday, maxReviews, newSeen: newCardsToday, maxNew: maxNewCards })}
+              {grammarTotal > 0 && ` · ${t('review.todayGrammar', { done: grammarDone, total: grammarTotal })}`}
+            </span>
             <button
               onClick={() => setShowImport(true)}
               className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-gray-100 text-gray-600 text-xs font-medium hover:bg-gray-200 transition-colors"
@@ -803,10 +819,10 @@ export default function Review() {
           </div>
         )}
 
-        {/* Session progress bar */}
+        {/* Today's queue: words and grammar, done vs in the queue */}
         {currentCard !== null && (() => {
-          const dailyTarget = maxReviews + maxNewCards
-          const dailyDone = reviewedToday + newCardsToday
+          const dailyTarget = sessionTotal
+          const dailyDone = sessionTotal - sessionRemaining
           return (
             <div className="flex items-center gap-2">
               <div className="flex-1 h-1.5 bg-gray-100 rounded-full overflow-hidden">

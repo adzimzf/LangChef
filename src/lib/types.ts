@@ -100,6 +100,12 @@ export type SessionProgress = {
   reviews_completed: number
   new_cards_seen: number
   remaining_count: number
+  /** Cards in today's queue (words and grammar) and how many no longer wait */
+  queue_total: number
+  queue_done: number
+  /** New grammar and level checks in today's queue: answered today / total */
+  grammar_done: number
+  grammar_total: number
   session_done: boolean
   next_card: ReviewItem | null
   next_task: QuizTask | null

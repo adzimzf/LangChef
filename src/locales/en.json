@@ -612,6 +612,7 @@
   "review.tapReveal": "Tap to reveal",
   "review.title": "Review",
   "review.todayCounts": "{reviewed}/{maxReviews} today · {newSeen}/{maxNew} new",
+  "review.todayGrammar": "{done}/{total} grammar",
   "settings.addHiragana": "Add hiragana",
   "settings.addKatakana": "Add katakana",
   "settings.aiTranslationNote": "This app's translation was made with AI and may not be perfect.",

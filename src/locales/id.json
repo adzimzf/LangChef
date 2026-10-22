@@ -612,6 +612,7 @@
   "review.tapReveal": "Ketuk untuk melihat",
   "review.title": "Ulas",
   "review.todayCounts": "{reviewed}/{maxReviews} hari ini · {newSeen}/{maxNew} baru",
+  "review.todayGrammar": "{done}/{total} tata bahasa",
   "settings.addHiragana": "Tambah hiragana",
   "settings.addKatakana": "Tambah katakana",
   "settings.aiTranslationNote": "Terjemahan aplikasi ini dibuat dengan AI dan mungkin belum sempurna.",

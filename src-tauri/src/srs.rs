@@ -886,6 +886,9 @@ pub struct SessionStartResult {
     pub new_cards_seen: i64,
     /// Words in today's queue with no meaning yet, for the "Generate all" banner.
     pub missing_meaning: Vec<String>,
+    pub queue_done: usize,
+    pub grammar_done: i64,
+    pub grammar_total: i64,
 }
 
 pub(crate) fn ensure_study(
@@ -1043,6 +1046,19 @@ fn count_reviewed(conn: &rusqlite::Connection, study_id: i64) -> Result<i64, Str
     )
 }
 
+/// New grammar and level checks in today's queue: (answered at least once today, total).
+fn count_grammar(conn: &rusqlite::Connection, study_id: i64) -> Result<(i64, i64), String> {
+    conn.query_row(
+        "SELECT COALESCE(SUM(EXISTS (SELECT 1 FROM review_answers ra
+                    WHERE ra.review_item_id = sc.review_item_id AND ra.answered_at >= sc.create_time)), 0),
+                COUNT(*)
+         FROM study_card sc WHERE sc.study_id = ?1 AND sc.kind IN ('grammar_new', 'grammar_check')",
+        params![study_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )
+    .map_err(|e| e.to_string())
+}
+
 fn count_new_seen(conn: &rusqlite::Connection, study_id: i64) -> Result<i64, String> {
     count_scalar(conn,
         "SELECT COUNT(*) FROM study_card WHERE study_id = ?1 AND kind = 'new' AND status = 'graded'",
@@ -1099,6 +1115,12 @@ pub struct SessionProgress {
     pub reviews_completed: i64,
     pub new_cards_seen: i64,
     pub remaining_count: usize,
+    /// Cards in today's queue (words and grammar) and how many of them are no longer waiting.
+    pub queue_total: usize,
+    pub queue_done: usize,
+    /// New grammar and level checks in today's queue: answered today, and in the queue.
+    pub grammar_done: i64,
+    pub grammar_total: i64,
     pub session_done: bool,
     pub next_card: Option<ReviewItem>,
     pub next_task: Option<QuizTask>,
@@ -1110,6 +1132,8 @@ pub(crate) fn session_progress(conn: &rusqlite::Connection, study_id: i64) -> Re
     let reviews_completed = count_reviewed(conn, study_id)?;
     let new_cards_seen = count_new_seen(conn, study_id)?;
     let remaining_count = count_pending(conn, study_id)?;
+    let queue_total = count_total(conn, study_id)?;
+    let (grammar_done, grammar_total) = count_grammar(conn, study_id)?;
     let next_card = fetch_next_pending(conn, study_id, now)?;
     let (next_task, grade_options) = match &next_card {
         Some(card) => (
@@ -1122,6 +1146,10 @@ pub(crate) fn session_progress(conn: &rusqlite::Connection, study_id: i64) -> Re
         reviews_completed,
         new_cards_seen,
         remaining_count,
+        queue_total,
+        queue_done: queue_total.saturating_sub(remaining_count),
+        grammar_done,
+        grammar_total,
         session_done: remaining_count == 0,
         next_card,
         next_task,
@@ -1157,6 +1185,9 @@ pub fn db_session_start(
         reviews_completed: progress.reviews_completed,
         new_cards_seen: progress.new_cards_seen,
         missing_meaning,
+        queue_done: progress.queue_done,
+        grammar_done: progress.grammar_done,
+        grammar_total: progress.grammar_total,
     })
 }
 
