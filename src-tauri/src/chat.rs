@@ -31,7 +31,7 @@ pub struct ChatRequest<'a> {
     pub model: &'a str,
     pub messages: &'a [ChatMessage],
     pub stream: bool,
-    /// OpenRouter only: keeps "thinking" models from reasoning for minutes before writing anything.
+    /// OpenRouter only: turns off (or keeps short) the silent "thinking" before a model writes anything.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reasoning: Option<serde_json::Value>,
 }
@@ -92,24 +92,35 @@ const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(
 /// until the whole text is ready (which mobile networks and proxies cut off as a timeout).
 pub async fn complete(api_host: &str, api_key: &str, model: &str, messages: &[ChatMessage]) -> Result<String, String> {
     let url = build_url(api_host, "chat/completions");
-    // None of our prompts need long reasoning, and a reasoning model writes nothing while it thinks.
-    let reasoning = api_host.contains("openrouter.ai").then(|| serde_json::json!({ "effort": "low" }));
-    let req = ChatRequest { model, messages, stream: true, reasoning };
     let client = Client::builder()
         .connect_timeout(std::time::Duration::from_secs(20))
         .build()
         .map_err(|e| send_error(e, &url))?;
-    let mut resp = client
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&req)
-        .send()
+    let send = |reasoning: Option<serde_json::Value>| {
+        let req = ChatRequest { model, messages, stream: true, reasoning };
+        client.post(&url).header("Authorization", format!("Bearer {}", api_key)).json(&req).send()
+    };
+    // None of our prompts need reasoning, and a reasoning model writes nothing while it thinks:
+    // on N1 passages it was ~75% of the answer and most of the wait. Some models can't turn it
+    // off; those get the shortest reasoning instead.
+    let openrouter = api_host.contains("openrouter.ai");
+    let mut resp = send(openrouter.then(|| serde_json::json!({ "enabled": false })))
         .await
         .map_err(|e| send_error(e, &url))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(http_error(status, &body, &url));
+        if !(openrouter && status.as_u16() == 400 && body.contains("easoning")) {
+            return Err(http_error(status, &body, &url));
+        }
+        resp = send(Some(serde_json::json!({ "effort": "low" })))
+            .await
+            .map_err(|e| send_error(e, &url))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(http_error(status, &body, &url));
+        }
     }
     let is_stream = resp
         .headers()

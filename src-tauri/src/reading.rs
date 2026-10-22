@@ -14,8 +14,6 @@ pub struct ReadingText {
     pub source: String,
     pub language: String,
     pub level: String,
-    /// Made together with an AI-written passage; empty for a news article (ask `generate_reading_questions`).
-    pub questions: Vec<ReadingQuestion>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -207,7 +205,7 @@ async fn try_fetch_rss(language: &str) -> Option<(String, String)> {
     Some(articles[idx].clone())
 }
 
-/// The shared rules for comprehension questions, used both with a new passage and for a news article.
+/// The rules for comprehension questions, for an AI passage and a news article alike.
 fn question_rules(lang_name: &str, n: usize) -> String {
     format!(
         "{n} comprehension questions: answerable from the text only; answers in {lang_name}; \
@@ -215,16 +213,16 @@ fn question_rules(lang_name: &str, n: usize) -> String {
     )
 }
 
-/// Writes a passage and its questions in one request. Furigana is not asked for: Lindera adds it
+/// Writes a passage only, so the learner can start reading sooner; its questions come from
+/// `generate_reading_questions` while they read. Furigana is not asked for: Lindera adds it
 /// afterwards, and having the model write it roughly doubled the answer and the wait.
 async fn llm_generate_reading_text(
     api_host: &str, api_key: &str, model: &str,
     language: &str, level: &str,
     target_words: &[String],
-) -> Result<(String, String, Vec<ReadingQuestion>), String> {
+) -> Result<(String, String), String> {
     let lang_name = lang_name(language);
     let (min, max) = level_text_char_range(level);
-    let rules = question_rules(lang_name, reading_question_count(level));
     let vocab_note = if !target_words.is_empty() {
         let words = target_words.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
         format!("The learner is studying these vocabulary words: {words}.\n\
@@ -234,9 +232,7 @@ async fn llm_generate_reading_text(
         "Write a {level}-level {lang_name} reading passage on a random everyday topic.\n\
         Length: {min}–{max} characters. Vocabulary and grammar must match {level}. Plain text, no furigana or markup.\n\
         {vocab_note}\
-        Then write {rules}\n\
-        Return ONLY valid JSON (no markdown fences): \
-        {{\"title\": \"...\", \"body\": \"...\", \"questions\": [{{\"question\": \"...\", \"answer_hint\": \"...\"}}]}}",
+        Return ONLY valid JSON (no markdown fences): {{\"title\": \"...\", \"body\": \"...\"}}",
     );
     let raw = complete_prompt(api_host, api_key, model, prompt).await?;
     let cleaned = json_part(&raw);
@@ -246,13 +242,11 @@ async fn llm_generate_reading_text(
         title: String,
         #[serde(default)]
         body: String,
-        #[serde(default)]
-        questions: Vec<ReadingQuestion>,
     }
     let g: Generated = serde_json::from_str(cleaned)
         .map_err(|_| app_error("api_bad_response", cleaned))?;
     if g.body.is_empty() { return Err(app_error("api_bad_response", "empty passage")); }
-    Ok((g.title, g.body, g.questions))
+    Ok((g.title, g.body))
 }
 
 #[tauri::command]
@@ -263,21 +257,20 @@ pub async fn fetch_reading_text(
     target_words: Vec<String>,
 ) -> Result<ReadingText, String> {
     let (min, max) = level_text_char_range(&level);
-    let (title, raw_body, source, questions) = match try_fetch_rss(&language).await {
+    let (title, raw_body, source) = match try_fetch_rss(&language).await {
         Some((t, b)) if b.chars().count() >= min / 2 => {
             let src = match language.as_str() {
                 "ja" => "NHK News".to_string(),
                 "id" => "Detik".to_string(),
                 _ => "RSS".to_string(),
             };
-            (t, truncate_at_sentence_boundary(&b, max), src, Vec::new())
+            (t, truncate_at_sentence_boundary(&b, max), src)
         }
         _ => {
-            let (t, b, q) = llm_generate_reading_text(&api_host, &api_key, &model, &language, &level, &target_words).await?;
-            (t, b, "ai".to_string(), q)
+            let (t, b) = llm_generate_reading_text(&api_host, &api_key, &model, &language, &level, &target_words).await?;
+            (t, b, "ai".to_string())
         }
     };
-    // An AI passage is kept whole: its questions were written for all of it.
     let plain_body = furigana::strip_existing_furigana(&raw_body);
     let body = if language == "ja" {
         match state.lock() {
@@ -287,13 +280,18 @@ pub async fn fetch_reading_text(
     } else {
         plain_body.clone()
     };
-    Ok(ReadingText { title, body, plain_body, source, language, level, questions })
+    Ok(ReadingText { title, body, plain_body, source, language, level })
 }
 
+/// Writes the questions for a passage. With `session_id`, also saves them to that reading session,
+/// so they are kept even if the learner leaves the page before they arrive.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn generate_reading_questions(
+    app: tauri::AppHandle,
     api_host: String, api_key: String, model: String,
     plain_body: String, language: String, level: String,
+    session_id: Option<i64>,
 ) -> Result<Vec<ReadingQuestion>, String> {
     let lang_name = lang_name(&language);
     let rules = question_rules(lang_name, reading_question_count(&level));
@@ -304,8 +302,18 @@ pub async fn generate_reading_questions(
     );
     let raw = complete_prompt(&api_host, &api_key, &model, prompt).await?;
     let cleaned = json_part(&raw);
-    serde_json::from_str::<Vec<ReadingQuestion>>(cleaned)
-        .map_err(|_| app_error("api_bad_response", cleaned))
+    let questions = serde_json::from_str::<Vec<ReadingQuestion>>(cleaned)
+        .map_err(|_| app_error("api_bad_response", cleaned))?;
+    if questions.is_empty() {
+        return Err(app_error("api_bad_response", "no questions"));
+    }
+    if let Some(id) = session_id {
+        let json = serde_json::to_string(&questions).map_err(|e| e.to_string())?;
+        open_db(&app)?
+            .execute("UPDATE reading_sessions SET questions = ?1 WHERE id = ?2", params![json, id])
+            .map_err(|e| e.to_string())?;
+    }
+    Ok(questions)
 }
 
 /// Checks a comprehension answer. Feedback is in the learner's explanation language. With
