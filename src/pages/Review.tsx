@@ -776,14 +776,11 @@ export default function Review() {
   return (
     <div className="flex flex-col h-full -m-4 p-4 overflow-y-auto">
       {/* Header */}
-      <div className="mb-3 shrink-0 sticky top-0 z-10 bg-gray-50 pt-4 pb-2">
+      {/* Covers the page padding (sides and top) so cards scrolling underneath never show around it */}
+      <div className="mb-3 shrink-0 sticky -top-4 z-10 -mx-4 -mt-4 px-4 bg-gray-50 pt-8 pb-2.5 border-b border-gray-200/70">
         <div className="flex items-center justify-between mb-2">
           <h2 className="text-lg font-semibold">{t('review.title')}</h2>
           <div className="flex items-center gap-2">
-            <span className="text-xs text-gray-400">
-              {t('review.todayCounts', { reviewed: reviewedToday, maxReviews, newSeen: newCardsToday, maxNew: maxNewCards })}
-              {grammarTotal > 0 && ` · ${t('review.todayGrammar', { done: grammarDone, total: grammarTotal })}`}
-            </span>
             <button
               onClick={() => setShowImport(true)}
               className="flex items-center gap-1 px-2.5 py-1 rounded-lg bg-gray-100 text-gray-600 text-xs font-medium hover:bg-gray-200 transition-colors"
@@ -837,6 +834,10 @@ export default function Review() {
             </div>
           )
         })()}
+        <div className="mt-1.5 text-xs text-gray-400 truncate">
+          {t('review.todayCounts', { reviewed: reviewedToday, maxReviews, newSeen: newCardsToday, maxNew: maxNewCards })}
+          {grammarTotal > 0 && ` · ${t('review.todayGrammar', { done: grammarDone, total: grammarTotal })}`}
+        </div>
       </div>
 
       {/* No due cards */}
