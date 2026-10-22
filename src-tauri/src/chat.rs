@@ -30,6 +30,10 @@ pub struct ChatMessage {
 pub struct ChatRequest<'a> {
     pub model: &'a str,
     pub messages: &'a [ChatMessage],
+    pub stream: bool,
+    /// OpenRouter only: turns off (or keeps short) the silent "thinking" before a model writes anything.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reasoning: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -80,27 +84,118 @@ async fn get_models(api_host: &str, api_key: &str) -> Result<ModelsResponse, Str
     resp.json().await.map_err(|e| app_error("api_bad_response", format!("{} (url: {})", e, url)))
 }
 
+/// Longest silence allowed while waiting for the next piece of a streamed answer.
+const STREAM_IDLE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
+
 /// One chat completion against the user's OpenAI-compatible provider. Every LLM call goes through here.
+/// The answer is streamed so long generations keep the connection busy instead of sitting silent
+/// until the whole text is ready (which mobile networks and proxies cut off as a timeout).
 pub async fn complete(api_host: &str, api_key: &str, model: &str, messages: &[ChatMessage]) -> Result<String, String> {
     let url = build_url(api_host, "chat/completions");
-    let req = ChatRequest { model, messages };
-    let resp = Client::new()
-        .post(&url)
-        .header("Authorization", format!("Bearer {}", api_key))
-        .json(&req)
-        .send()
+    let client = Client::builder()
+        .connect_timeout(std::time::Duration::from_secs(20))
+        .build()
+        .map_err(|e| send_error(e, &url))?;
+    let send = |reasoning: Option<serde_json::Value>| {
+        let req = ChatRequest { model, messages, stream: true, reasoning };
+        client.post(&url).header("Authorization", format!("Bearer {}", api_key)).json(&req).send()
+    };
+    // None of our prompts need reasoning, and a reasoning model writes nothing while it thinks:
+    // on N1 passages it was ~75% of the answer and most of the wait. Some models can't turn it
+    // off; those get the shortest reasoning instead.
+    let openrouter = api_host.contains("openrouter.ai");
+    let mut resp = send(openrouter.then(|| serde_json::json!({ "enabled": false })))
         .await
         .map_err(|e| send_error(e, &url))?;
     if !resp.status().is_success() {
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
-        return Err(http_error(status, &body, &url));
+        if !(openrouter && status.as_u16() == 400 && body.contains("easoning")) {
+            return Err(http_error(status, &body, &url));
+        }
+        resp = send(Some(serde_json::json!({ "effort": "low" })))
+            .await
+            .map_err(|e| send_error(e, &url))?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            return Err(http_error(status, &body, &url));
+        }
     }
-    let parsed: ChatResponse = resp
-        .json()
-        .await
+    let is_stream = resp
+        .headers()
+        .get(reqwest::header::CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.contains("text/event-stream"));
+
+    let mut stream = SseReader::default();
+    let mut raw: Vec<u8> = Vec::new();
+    let mut received = 0usize;
+    loop {
+        let chunk = tokio::time::timeout(STREAM_IDLE_TIMEOUT, resp.chunk())
+            .await
+            .map_err(|_| {
+                let model = stream.model.as_deref().unwrap_or("?");
+                app_error(
+                    "api_timeout",
+                    format!("no data for {}s after {} bytes (model: {}, url: {})", STREAM_IDLE_TIMEOUT.as_secs(), received, model, url),
+                )
+            })?
+            .map_err(|e| send_error(e, &url))?;
+        let Some(chunk) = chunk else { break };
+        received += chunk.len();
+        if !is_stream {
+            raw.extend_from_slice(&chunk);
+            continue;
+        }
+        if stream.push(&chunk)? {
+            break;
+        }
+    }
+    if is_stream {
+        return Ok(stream.text);
+    }
+    // The provider ignored `stream` and sent the whole answer at once.
+    let parsed: ChatResponse = serde_json::from_slice(&raw)
         .map_err(|e| app_error("api_bad_response", format!("{} (url: {})", e, url)))?;
     Ok(parsed.choices.first().map(|c| c.message.content.clone()).unwrap_or_default())
+}
+
+/// Collects the text of a server-sent-events chat completion stream.
+#[derive(Default)]
+struct SseReader {
+    pending: Vec<u8>,
+    text: String,
+    /// The model the provider actually picked (e.g. behind `openrouter/auto`), for error details.
+    model: Option<String>,
+}
+
+impl SseReader {
+    /// Feeds raw bytes; returns true once the stream says it is done.
+    fn push(&mut self, bytes: &[u8]) -> Result<bool, String> {
+        self.pending.extend_from_slice(bytes);
+        while let Some(nl) = self.pending.iter().position(|&b| b == b'\n') {
+            let line: Vec<u8> = self.pending.drain(..=nl).collect();
+            let line = String::from_utf8_lossy(&line);
+            // Lines starting with ':' are keep-alive comments; blank lines end an event.
+            let Some(data) = line.trim().strip_prefix("data:") else { continue };
+            let data = data.trim();
+            if data == "[DONE]" {
+                return Ok(true);
+            }
+            let Ok(event) = serde_json::from_str::<serde_json::Value>(data) else { continue };
+            if self.model.is_none() {
+                self.model = event["model"].as_str().map(str::to_string);
+            }
+            if let Some(err) = event.get("error") {
+                return Err(app_error("api_error", err.to_string()));
+            }
+            if let Some(piece) = event["choices"][0]["delta"]["content"].as_str() {
+                self.text.push_str(piece);
+            }
+        }
+        Ok(false)
+    }
 }
 
 pub async fn complete_prompt(api_host: &str, api_key: &str, model: &str, prompt: String) -> Result<String, String> {
@@ -321,5 +416,21 @@ mod tests {
     fn finds_json_inside_fences() {
         assert_eq!(json_part("```json\n{\"a\":1}\n```"), "{\"a\":1}");
         assert_eq!(json_part("[1,2]"), "[1,2]");
+    }
+
+    #[test]
+    fn sse_reader_joins_deltas_across_split_chunks() {
+        let mut r = SseReader::default();
+        assert!(!r.push(b": OPENROUTER PROCESSING\n\ndata: {\"model\":\"m\",\"choices\":[{\"delta\":{\"content\":\"Hel\"}}]}\n\nda").unwrap());
+        assert!(!r.push("ta: {\"choices\":[{\"delta\":{\"content\":\"lo 世界\"}}]}\n\n".as_bytes()).unwrap());
+        assert!(r.push(b"data: [DONE]\n\n").unwrap());
+        assert_eq!(r.text, "Hello 世界");
+        assert_eq!(r.model.as_deref(), Some("m"));
+    }
+
+    #[test]
+    fn sse_reader_reports_a_mid_stream_error() {
+        let mut r = SseReader::default();
+        assert!(r.push(b"data: {\"error\":{\"message\":\"overloaded\"}}\n\n").is_err());
     }
 }

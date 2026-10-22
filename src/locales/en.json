@@ -229,6 +229,7 @@
   "error.api_not_found": "The AI address or model was not found. Check the API host and model in Settings.",
   "error.api_rate_limited": "Too many requests or quota used up. Wait a moment and try again.",
   "error.api_server_error": "The AI provider is having problems. Try again later.",
+  "error.api_timeout": "The AI took too long to answer. Try again, or pick a faster model in Settings.",
   "error.api_unauthorized": "Wrong API key. Copy the key again from your provider's page and make sure there are no spaces.",
   "error.api_unreachable": "Can't reach the AI. Check your internet connection and the API host.",
   "error.breakdown_bad_section": "Unknown part of the breakdown.",

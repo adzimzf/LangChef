@@ -340,7 +340,7 @@ fn katakana_to_hiragana(katakana: &str) -> String {
         .collect()
 }
 
-fn strip_existing_furigana(text: &str) -> String {
+pub fn strip_existing_furigana(text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
 

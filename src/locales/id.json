@@ -229,6 +229,7 @@
   "error.api_not_found": "Alamat AI atau model tidak ditemukan. Periksa alamat API dan model di Pengaturan.",
   "error.api_rate_limited": "Terlalu banyak permintaan atau kuota habis. Tunggu sebentar lalu coba lagi.",
   "error.api_server_error": "Penyedia AI sedang bermasalah. Coba lagi nanti.",
+  "error.api_timeout": "AI terlalu lama menjawab. Coba lagi, atau pilih model yang lebih cepat di Pengaturan.",
   "error.api_unauthorized": "Kunci API salah. Salin ulang kunci dari halaman penyedia AI dan pastikan tidak ada spasi.",
   "error.api_unreachable": "Tidak bisa terhubung ke AI. Periksa koneksi internet dan alamat API.",
   "error.breakdown_bad_section": "Bagian uraian tidak dikenal.",

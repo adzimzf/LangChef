@@ -4,7 +4,7 @@ import { invoke } from '@tauri-apps/api/core'
 import {
   ArrowLeftOutlined, LoadingOutlined, PlusOutlined, CheckCircleFilled, CloseOutlined,
   TranslationOutlined, DeleteOutlined, RightOutlined, ReadOutlined, BulbOutlined,
-  CheckOutlined, FileTextOutlined, ThunderboltOutlined, SendOutlined, TrophyOutlined,
+  FileTextOutlined, ThunderboltOutlined, SendOutlined, TrophyOutlined,
 } from '@ant-design/icons'
 import ReadingTextComponent, { type TextSize } from '../components/reading/ReadingText'
 import ReadingSummary, { RESULT_STYLE } from '../components/reading/ReadingSummary'
@@ -20,7 +20,7 @@ import type {
   ReadingOverview,
   ReviewItem,
 } from '../lib/types'
-import { t, lang as explainLang, errorText, formatDay, languageName } from '../lib/i18n'
+import { t, lang as explainLang, errorText, errorWithDetail, formatDay, languageName } from '../lib/i18n'
 import { TARGET_LANGUAGES } from '../lib/languages'
 import { readFlag, writeFlag, READING_ANSWER_NATIVE_KEY } from '../lib/prefs'
 
@@ -110,7 +110,6 @@ export default function Reading() {
     const lv = LEVELS[language] ?? []
     return stored && lv.includes(stored) ? stored : (lv[1] ?? lv[0] ?? 'N4')
   })
-  const [loadingStep, setLoadingStep] = useState<0 | 1>(0)
   const [error, setError] = useState('')
 
   const [sessions, setSessions] = useState<ReadingSessionSummary[]>([])
@@ -126,6 +125,11 @@ export default function Reading() {
   const [tapHintSeen, setTapHintSeen] = useState(() => readStored(TAP_HINT_KEY) === '1')
   const [readProgress, setReadProgress] = useState(0)
   const [questions, setQuestions] = useState<ReadingQuestion[]>([])
+  // Questions are written while the learner reads; this tracks that request.
+  const [questionsState, setQuestionsState] = useState<'ready' | 'loading' | 'error'>('ready')
+  const [questionsError, setQuestionsError] = useState('')
+  /** The passage now on screen, so a late answer for an earlier one is dropped. */
+  const shownPassageRef = useRef('')
   const [reviewItems, setReviewItems] = useState<ReviewItem[]>([])
   const [wordSheet, setWordSheet] = useState<{ word: string; base: string } | null>(null)
 
@@ -219,9 +223,13 @@ export default function Reading() {
   }
 
   function restoreSession(session: ReadingSession) {
-    setText({ title: session.title, body: session.body, plain_body: session.plain_body,
-      source: session.source, language: session.language, level: session.level })
+    const restored: ReadingText = { title: session.title, body: session.body, plain_body: session.plain_body,
+      source: session.source, language: session.language, level: session.level }
+    setText(restored)
     setQuestions(session.questions)
+    shownPassageRef.current = session.plain_body
+    setQuestionsState('ready')
+    if (session.questions.length === 0) loadQuestions(restored, session.id)
     setSessionId(session.id)
     setSessionPhase(session.phase)
     setCurrentQ(session.current_q)
@@ -240,11 +248,31 @@ export default function Reading() {
     setLevel(lv[1] ?? lv[0])
   }
 
+  /** Writes the questions for the passage on screen (saved to its session) while the learner reads it. */
+  async function loadQuestions(passage: ReadingText, sid: number) {
+    setQuestionsState('loading')
+    setQuestionsError('')
+    try {
+      const qs = await invoke<ReadingQuestion[]>('generate_reading_questions', {
+        apiHost, apiKey, model,
+        plainBody: passage.plain_body,
+        language: passage.language, level: passage.level,
+        sessionId: sid > 0 ? sid : null,
+      })
+      if (shownPassageRef.current !== passage.plain_body) return
+      setQuestions(qs)
+      setQuestionsState('ready')
+    } catch (e) {
+      if (shownPassageRef.current !== passage.plain_body) return
+      setQuestionsError(errorWithDetail(e))
+      setQuestionsState('error')
+    }
+  }
+
   async function startReading() {
     writeStored(LANG_STORAGE_KEY, language)
     writeStored(LEVEL_STORAGE_KEY, level)
     setError('')
-    setLoadingStep(0)
     setPhase('loading')
 
     const targetWords = reviewItems
@@ -253,19 +281,12 @@ export default function Reading() {
       .map(item => item.content)
 
     let readingText: ReadingText
-    let qs: ReadingQuestion[]
     try {
       readingText = await invoke<ReadingText>('fetch_reading_text', {
         apiHost, apiKey, model, language, level, targetWords,
       })
-      setLoadingStep(1)
-      qs = await invoke<ReadingQuestion[]>('generate_reading_questions', {
-        apiHost, apiKey, model,
-        plainBody: readingText.plain_body,
-        language, level,
-      })
     } catch (e) {
-      setError(errorText(e))
+      setError(errorWithDetail(e))
       loadHome()
       return
     }
@@ -275,12 +296,13 @@ export default function Reading() {
       sid = await invoke<number>('db_save_reading_session', {
         language, level, title: readingText.title,
         body: readingText.body, plainBody: readingText.plain_body,
-        source: readingText.source, questions: JSON.stringify(qs),
+        source: readingText.source, questions: '[]',
       })
     } catch { sid = -1 }
 
     setText(readingText)
-    setQuestions(qs)
+    setQuestions([])
+    shownPassageRef.current = readingText.plain_body
     setSessionId(sid)
     setSessionPhase('reading')
     setCurrentQ(0)
@@ -289,6 +311,7 @@ export default function Reading() {
     baseElapsedRef.current = 0
     resetReadingView(level)
     setPhase('reading')
+    loadQuestions(readingText, sid)
   }
 
   function beginQA(fresh: boolean) {
@@ -410,6 +433,8 @@ export default function Reading() {
 
   function goHome() {
     setWordSheet(null)
+    shownPassageRef.current = ''
+
     setPhase('init')
     loadHome()
   }
@@ -634,7 +659,6 @@ export default function Reading() {
 
   // ─── Loading ───────────────────────────────────────────────────────────────
   if (phase === 'loading') {
-    const steps = [t('reading.fetching'), t('reading.generatingQuestions')]
     return (
       <div className="h-full flex flex-col max-w-lg mx-auto pt-6">
         <div className="bg-white rounded-3xl border border-gray-100 shadow-sm px-5 py-5">
@@ -643,16 +667,11 @@ export default function Reading() {
               {LANG_FLAGS[language] ?? ''} {level}
             </span>
           </div>
-          <div className="flex flex-col gap-3">
-            {steps.map((label, i) => (
-              <div key={label} className="flex items-center gap-3">
-                <span className={`w-7 h-7 rounded-full flex items-center justify-center text-sm
-                  ${i < loadingStep ? 'bg-emerald-500 text-white' : i === loadingStep ? 'bg-indigo-50 text-indigo-600' : 'bg-gray-100 text-gray-300'}`}>
-                  {i < loadingStep ? <CheckOutlined /> : i === loadingStep ? <LoadingOutlined spin /> : i + 1}
-                </span>
-                <span className={`text-sm ${i <= loadingStep ? 'text-gray-800 font-medium' : 'text-gray-400'}`}>{label}</span>
-              </div>
-            ))}
+          <div className="flex items-center gap-3">
+            <span className="w-7 h-7 rounded-full flex items-center justify-center text-sm bg-indigo-50 text-indigo-600">
+              <LoadingOutlined spin />
+            </span>
+            <span className="text-sm text-gray-800 font-medium">{t('reading.fetching')}</span>
           </div>
           <div className="mt-6 space-y-3 animate-pulse">
             <div className="h-5 bg-gray-100 rounded-lg w-2/3" />
@@ -760,33 +779,52 @@ export default function Reading() {
               </div>
             )}
           </div>
+
+          {/* At the end of the passage, so it only shows once the learner has scrolled to the bottom. */}
+          <div className="pb-2 flex gap-2">
+            {isComplete ? (
+              <>
+                <button
+                  onClick={() => beginQA(true)}
+                  className="flex-1 py-3.5 rounded-2xl bg-white border border-gray-200 text-gray-700 font-semibold text-[15px] active:bg-gray-50"
+                >
+                  {t('reading.answerAgain')}
+                </button>
+                <button
+                  onClick={() => setPhase('summary')}
+                  className="flex-1 py-3.5 rounded-2xl bg-indigo-600 text-white font-semibold text-[15px] active:bg-indigo-700"
+                >
+                  {t('reading.seeResults')}
+                </button>
+              </>
+            ) : questionsState === 'loading' ? (
+              <button
+                disabled
+                className="w-full py-3.5 rounded-2xl bg-indigo-100 text-indigo-500 font-semibold text-[15px] flex items-center justify-center gap-2"
+              >
+                <LoadingOutlined spin /> {t('reading.generatingQuestions')}
+              </button>
+            ) : questionsState === 'error' ? (
+              <div className="w-full">
+                <p className="text-xs text-rose-600 mb-2 break-words">{questionsError}</p>
+                <button
+                  onClick={() => sessionId !== null && loadQuestions(text, sessionId)}
+                  className="w-full py-3.5 rounded-2xl bg-white border border-gray-200 text-gray-700 font-semibold text-[15px] active:bg-gray-50"
+                >
+                  {t('common.retry')}
+                </button>
+              </div>
+            ) : (
+              <button
+                onClick={() => beginQA(false)}
+                className="w-full py-3.5 rounded-2xl bg-indigo-600 text-white font-semibold text-[15px] active:bg-indigo-700 flex items-center justify-center gap-2"
+              >
+                {t('reading.answerQuestions', { count: questions.length })} <RightOutlined className="text-xs" />
+              </button>
+            )}
+          </div>
         </div>
 
-        <div className="shrink-0 pt-3 pb-2 bg-gray-50 flex gap-2">
-          {isComplete ? (
-            <>
-              <button
-                onClick={() => beginQA(true)}
-                className="flex-1 py-3.5 rounded-2xl bg-white border border-gray-200 text-gray-700 font-semibold text-[15px] active:bg-gray-50"
-              >
-                {t('reading.answerAgain')}
-              </button>
-              <button
-                onClick={() => setPhase('summary')}
-                className="flex-1 py-3.5 rounded-2xl bg-indigo-600 text-white font-semibold text-[15px] active:bg-indigo-700"
-              >
-                {t('reading.seeResults')}
-              </button>
-            </>
-          ) : (
-            <button
-              onClick={() => beginQA(false)}
-              className="w-full py-3.5 rounded-2xl bg-indigo-600 text-white font-semibold text-[15px] active:bg-indigo-700 flex items-center justify-center gap-2"
-            >
-              {t('reading.answerQuestions', { count: questions.length })} <RightOutlined className="text-xs" />
-            </button>
-          )}
-        </div>
         {wordSheetEl}
       </div>
     )
