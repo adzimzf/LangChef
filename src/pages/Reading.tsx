@@ -20,7 +20,7 @@ import type {
   ReadingOverview,
   ReviewItem,
 } from '../lib/types'
-import { t, lang as explainLang, errorText, formatDay, languageName } from '../lib/i18n'
+import { t, lang as explainLang, errorText, errorWithDetail, formatDay, languageName } from '../lib/i18n'
 import { TARGET_LANGUAGES } from '../lib/languages'
 import { readFlag, writeFlag, READING_ANSWER_NATIVE_KEY } from '../lib/prefs'
 
@@ -220,7 +220,7 @@ export default function Reading() {
 
   function restoreSession(session: ReadingSession) {
     setText({ title: session.title, body: session.body, plain_body: session.plain_body,
-      source: session.source, language: session.language, level: session.level })
+      source: session.source, language: session.language, level: session.level, questions: session.questions })
     setQuestions(session.questions)
     setSessionId(session.id)
     setSessionPhase(session.phase)
@@ -259,13 +259,14 @@ export default function Reading() {
         apiHost, apiKey, model, language, level, targetWords,
       })
       setLoadingStep(1)
-      qs = await invoke<ReadingQuestion[]>('generate_reading_questions', {
+      // An AI-written passage comes with its questions; a news article still needs them.
+      qs = readingText.questions.length > 0 ? readingText.questions : await invoke<ReadingQuestion[]>('generate_reading_questions', {
         apiHost, apiKey, model,
         plainBody: readingText.plain_body,
         language, level,
       })
     } catch (e) {
-      setError(errorText(e))
+      setError(errorWithDetail(e))
       loadHome()
       return
     }

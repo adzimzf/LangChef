@@ -166,6 +166,8 @@ export type ReadingText = {
   source: string
   language: string
   level: string
+  /** Comes with an AI-written passage; empty for a news article */
+  questions: ReadingQuestion[]
 }
 
 export type ReadingQuestion = {

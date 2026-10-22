@@ -14,6 +14,8 @@ pub struct ReadingText {
     pub source: String,
     pub language: String,
     pub level: String,
+    /// Made together with an AI-written passage; empty for a news article (ask `generate_reading_questions`).
+    pub questions: Vec<ReadingQuestion>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -119,8 +121,8 @@ fn level_text_char_range(level: &str) -> (usize, usize) {
         "N5" | "A1" => (80, 300),
         "N4" | "A2" => (200, 500),
         "N3" | "B1" => (400, 800),
-        "N2" | "B2" => (700, 1500),
-        "N1" => (1200, 2500),
+        "N2" | "B2" => (600, 1200),
+        "N1" => (900, 1800),
         _ => (200, 500),
     }
 }
@@ -205,16 +207,24 @@ async fn try_fetch_rss(language: &str) -> Option<(String, String)> {
     Some(articles[idx].clone())
 }
 
+/// The shared rules for comprehension questions, used both with a new passage and for a news article.
+fn question_rules(lang_name: &str, n: usize) -> String {
+    format!(
+        "{n} comprehension questions: answerable from the text only; answers in {lang_name}; \
+        vary types (who, what, why, how)."
+    )
+}
+
+/// Writes a passage and its questions in one request. Furigana is not asked for: Lindera adds it
+/// afterwards, and having the model write it roughly doubled the answer and the wait.
 async fn llm_generate_reading_text(
     api_host: &str, api_key: &str, model: &str,
     language: &str, level: &str,
     target_words: &[String],
-) -> Result<(String, String), String> {
+) -> Result<(String, String, Vec<ReadingQuestion>), String> {
     let lang_name = lang_name(language);
     let (min, max) = level_text_char_range(level);
-    let furigana_note = if language == "ja" {
-        format!("Add furigana for kanji above {level} using {{kanji|reading}} format (e.g. {{食べる|たべる}}).\n")
-    } else { String::new() };
+    let rules = question_rules(lang_name, reading_question_count(level));
     let vocab_note = if !target_words.is_empty() {
         let words = target_words.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
         format!("The learner is studying these vocabulary words: {words}.\n\
@@ -222,19 +232,27 @@ async fn llm_generate_reading_text(
     } else { String::new() };
     let prompt = format!(
         "Write a {level}-level {lang_name} reading passage on a random everyday topic.\n\
-        Length: {min}–{max} characters. Vocabulary and grammar must match {level}.\n\
-        {furigana_note}\
+        Length: {min}–{max} characters. Vocabulary and grammar must match {level}. Plain text, no furigana or markup.\n\
         {vocab_note}\
-        Return ONLY valid JSON (no markdown fences): {{\"title\": \"...\", \"body\": \"...\"}}",
+        Then write {rules}\n\
+        Return ONLY valid JSON (no markdown fences): \
+        {{\"title\": \"...\", \"body\": \"...\", \"questions\": [{{\"question\": \"...\", \"answer_hint\": \"...\"}}]}}",
     );
     let raw = complete_prompt(api_host, api_key, model, prompt).await?;
     let cleaned = json_part(&raw);
-    let val: serde_json::Value = serde_json::from_str(cleaned)
+    #[derive(Deserialize)]
+    struct Generated {
+        #[serde(default)]
+        title: String,
+        #[serde(default)]
+        body: String,
+        #[serde(default)]
+        questions: Vec<ReadingQuestion>,
+    }
+    let g: Generated = serde_json::from_str(cleaned)
         .map_err(|_| app_error("api_bad_response", cleaned))?;
-    let title = val["title"].as_str().unwrap_or("").to_string();
-    let body = val["body"].as_str().unwrap_or("").to_string();
-    if body.is_empty() { return Err(app_error("api_bad_response", "empty passage")); }
-    Ok((title, body))
+    if g.body.is_empty() { return Err(app_error("api_bad_response", "empty passage")); }
+    Ok((g.title, g.body, g.questions))
 }
 
 #[tauri::command]
@@ -245,21 +263,22 @@ pub async fn fetch_reading_text(
     target_words: Vec<String>,
 ) -> Result<ReadingText, String> {
     let (min, max) = level_text_char_range(&level);
-    let (title, raw_body, source) = match try_fetch_rss(&language).await {
+    let (title, raw_body, source, questions) = match try_fetch_rss(&language).await {
         Some((t, b)) if b.chars().count() >= min / 2 => {
             let src = match language.as_str() {
                 "ja" => "NHK News".to_string(),
                 "id" => "Detik".to_string(),
                 _ => "RSS".to_string(),
             };
-            (t, b, src)
+            (t, truncate_at_sentence_boundary(&b, max), src, Vec::new())
         }
         _ => {
-            let (t, b) = llm_generate_reading_text(&api_host, &api_key, &model, &language, &level, &target_words).await?;
-            (t, b, "ai".to_string())
+            let (t, b, q) = llm_generate_reading_text(&api_host, &api_key, &model, &language, &level, &target_words).await?;
+            (t, b, "ai".to_string(), q)
         }
     };
-    let plain_body = truncate_at_sentence_boundary(&raw_body, max);
+    // An AI passage is kept whole: its questions were written for all of it.
+    let plain_body = furigana::strip_existing_furigana(&raw_body);
     let body = if language == "ja" {
         match state.lock() {
             Ok(mut g) => g.as_mut().map(|a| a.annotate(&plain_body)).unwrap_or_else(|| plain_body.clone()),
@@ -268,7 +287,7 @@ pub async fn fetch_reading_text(
     } else {
         plain_body.clone()
     };
-    Ok(ReadingText { title, body, plain_body, source, language, level })
+    Ok(ReadingText { title, body, plain_body, source, language, level, questions })
 }
 
 #[tauri::command]
@@ -277,10 +296,9 @@ pub async fn generate_reading_questions(
     plain_body: String, language: String, level: String,
 ) -> Result<Vec<ReadingQuestion>, String> {
     let lang_name = lang_name(&language);
-    let n = reading_question_count(&level);
+    let rules = question_rules(lang_name, reading_question_count(&level));
     let prompt = format!(
-        "You are a {lang_name} teacher. Generate {n} comprehension questions for this {level}-level passage.\n\
-        Rules: questions answerable from text only; answers in {lang_name}; vary types (who, what, why, how).\n\
+        "You are a {lang_name} teacher. For this {level}-level passage, write {rules}\n\
         Return ONLY a JSON array (no markdown): [{{\"question\": \"...\", \"answer_hint\": \"...\"}}]\n\n\
         Passage:\n{plain_body}",
     );
