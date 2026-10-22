@@ -73,6 +73,8 @@ export default function Onboarding({ onDone }: { onDone: () => void }) {
       const chosen = STARTS.find((s) => s.id === start)!
       localStorage.setItem(JLPT_LEVEL_STORAGE_KEY, chosen.jlpt)
       localStorage.setItem('reading_level', chosen.jlpt)
+      // Grammar review teaches this level and checks the ones below it.
+      await invoke('db_set_grammar_plan', { language: 'ja', level: chosen.jlpt }).catch(() => {})
       const beginner = start === 'zero' || start === 'kana'
       writeFlag(ROMAJI_KEY, start === 'zero')
       writeFlag(CHAT_HINTS_KEY, beginner)

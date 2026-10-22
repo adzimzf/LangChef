@@ -1,5 +1,6 @@
 use crate::chat::{complete_explained, json_part};
 use crate::db::open_db;
+use crate::grammar_review::generate_card_back;
 use crate::locale::{app_error, effective_detail_sql, explain_lang, lang_name};
 use crate::quiz::{parse_detail, CardDetail};
 use crate::srs::{review_cols, row_to_review_item, ReviewItem};
@@ -60,7 +61,7 @@ fn find_mnemonic_matches(
     let mut all_words: Vec<KnownWord> = Vec::new();
 
     let mut stmt = conn.prepare(&format!(
-        "SELECT content, EF, R, {}, fsrs_difficulty FROM review_items WHERE language=?1",
+        "SELECT content, EF, R, {}, fsrs_difficulty FROM review_items WHERE language=?1 AND item_type='word'",
         effective_detail_sql("")
     )).map_err(|e| e.to_string())?;
     let rows = stmt.query_map(params![language], |row| {
@@ -313,7 +314,8 @@ pub fn db_search_review_items(
     use rusqlite::types::ToSql;
     let conn = open_db(&app)?;
 
-    let mut conditions: Vec<String> = Vec::new();
+    // The word list; grammar cards are shown on the Grammar page.
+    let mut conditions: Vec<String> = vec!["item_type = 'word'".to_string()];
     let mut filter_params: Vec<String> = Vec::new();
 
     if let Some(ref lang) = language {
@@ -512,11 +514,11 @@ pub fn db_get_difficult_and_known_words(
         (
             format!(
                 "SELECT {cols} FROM review_items \
-                 WHERE language=?1 AND COALESCE(fsrs_difficulty, 5.0) >= 5.0 \
+                 WHERE language=?1 AND item_type='word' AND COALESCE(fsrs_difficulty, 5.0) >= 5.0 \
                  ORDER BY COALESCE(fsrs_difficulty, 5.0) DESC LIMIT 20"
             ),
             "SELECT content FROM review_items \
-             WHERE language=?1 AND COALESCE(fsrs_difficulty, 5.0) < 5.0 \
+             WHERE language=?1 AND item_type='word' AND COALESCE(fsrs_difficulty, 5.0) < 5.0 \
              ORDER BY COALESCE(fsrs_difficulty, 5.0) ASC LIMIT 20"
                 .to_string(),
         )
@@ -524,11 +526,11 @@ pub fn db_get_difficult_and_known_words(
         (
             format!(
                 "SELECT {cols} FROM review_items \
-                 WHERE COALESCE(fsrs_difficulty, 5.0) >= 5.0 \
+                 WHERE item_type='word' AND COALESCE(fsrs_difficulty, 5.0) >= 5.0 \
                  ORDER BY COALESCE(fsrs_difficulty, 5.0) DESC LIMIT 20"
             ),
             "SELECT content FROM review_items \
-             WHERE COALESCE(fsrs_difficulty, 5.0) < 5.0 \
+             WHERE item_type='word' AND COALESCE(fsrs_difficulty, 5.0) < 5.0 \
              ORDER BY COALESCE(fsrs_difficulty, 5.0) ASC LIMIT 20"
                 .to_string(),
         )
@@ -671,7 +673,7 @@ pub(crate) async fn generate_detail_text(api_host: &str, api_key: &str, model: &
     complete_explained(api_host, api_key, model, &prompt, explain, meaning_of).await
 }
 
-/// Generates a card's back. With `draft`, it is kept aside for the user to approve in review
+/// Generates a card's back (practice material for a grammar card). With `draft`, it is kept aside for the user to approve in review
 /// instead of being saved as the card's detail.
 #[tauri::command]
 pub async fn db_generate_detail(
@@ -684,7 +686,7 @@ pub async fn db_generate_detail(
     draft: Option<bool>,
 ) -> Result<String, String> {
     let explain = explain_lang(&open_db(&app)?);
-    let text = generate_detail_text(&api_host, &api_key, &model, &content, &language, &explain).await?;
+    let text = generate_card_back(&app, &api_host, &api_key, &model, &content, &language, &explain).await?;
     let conn = open_db(&app)?;
     if draft.unwrap_or(false) {
         conn.execute("UPDATE review_items SET draft_detail=?1 WHERE content=?2", params![text, content])

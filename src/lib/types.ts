@@ -19,6 +19,11 @@ export type ReviewItem = {
   difficulty_label: string
   state_label: string
   next_review_formatted: string
+  item_type: 'word' | 'grammar'
+  /** Grammar cards: the pattern's level */
+  level: string | null
+  /** Grammar card below the learner's level, waiting for its level check */
+  placement: boolean
 }
 
 /** Anki-style grade button */
@@ -29,6 +34,17 @@ export type CardState = 'new' | 'learning' | 'review' | 'relearning'
 
 /** Question kinds for auto-graded review (see src-tauri/src/quiz.rs) */
 export type QuizKind = 'classic' | 'needs_meaning' | 'intro_tf' | 'true_false' | 'choice' | 'recall_confirm' | 'reading' | 'context'
+  | 'grammar_meaning' | 'grammar_gap' | 'grammar_mistake'
+
+/** What a grammar card teaches (see src-tauri/src/quiz.rs `GrammarInfo`) */
+export type GrammarInfo = {
+  level: string
+  meaning: string
+  form: string
+  note: string
+  /** Only sent where they give nothing away (intro, true/false, a draft) */
+  examples: { sentence: string; target: string; translation: string }[]
+}
 
 /** Back of a card, as saved in `review_items.detail` */
 export type CardDetail = {
@@ -56,6 +72,10 @@ export type QuizTask = {
   mature: boolean
   /** needs_meaning: AI-generated back waiting for approval */
   draft: CardDetail | null
+  /** Grammar cards only */
+  grammar: GrammarInfo | null
+  /** Level check: a grammar pattern below the learner's level, asked once */
+  placement: boolean
 }
 
 export type QuizAnswer = {
@@ -128,6 +148,9 @@ export type SessionSummary = {
   mixed_up: { word: string; other: string; count: number }[]
   reading_slips: { word: string; reading: string; picked: string }[]
   context_misses: { word: string; other: string; count: number }[]
+  /** Answers today on word cards and on grammar cards */
+  words: number
+  grammar: number
 }
 
 export type ReadingText = {
@@ -215,6 +238,40 @@ export type GrammarItem = {
   ai_translated: boolean
   /** English row shown because the level has nothing in the learner's language yet */
   fallback: boolean
+  /** The row this one was translated from */
+  source_id: string | null
+  /** Where the pattern stands in grammar review */
+  review: GrammarReview | null
+}
+
+/** Status codes from src-tauri/src/grammar_review.rs `review_statuses` */
+export type GrammarReviewStatus = 'known' | 'learning' | 'new' | 'check' | 'coming' | 'coming_check' | 'not_planned'
+
+export type GrammarReview = { status: GrammarReviewStatus; can_add: boolean }
+
+export type GrammarLevelProgress = {
+  level: string
+  role: 'below' | 'current' | 'above' | 'other'
+  total: number
+  known: number
+  learning: number
+  pct: number
+}
+
+/** The learner's grammar level and daily grammar limits (src-tauri/src/grammar_review.rs) */
+export type GrammarPlan = {
+  language: string
+  level: string | null
+  levels: GrammarLevelProgress[]
+  new_per_day: number
+  checks_per_day: number
+  speed_up: boolean
+  checks_today: number
+  to_introduce: number
+  to_check: number
+  days_to_introduce: number | null
+  days_to_check: number | null
+  move_up_to: string | null
 }
 
 export function parseDetailJson(detail: string): {

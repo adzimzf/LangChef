@@ -14,7 +14,7 @@ import {
 import type { AnswerResult, CardDetail, GradePreview, QuizAnswer, QuizTask, ReviewItem, SessionProgress, SessionSummary } from '../lib/types'
 import { parseDetailJson } from '../lib/types'
 import EditWordForm from '../components/EditWordForm'
-import { GRADE_COLORS, MeaningSetup, QuizVerdictView, ReviewQuiz, SessionSummaryView, useAutoAdvance } from '../components/ReviewQuiz'
+import { GRADE_COLORS, GrammarInfoView, MeaningSetup, QuizVerdictView, ReviewQuiz, SessionSummaryView, useAutoAdvance } from '../components/ReviewQuiz'
 import { t, lang as explainLang, errorText, partOfSpeechLabel as posLabel, formatInMinutes, formatDate, formatNumber, languageName, type ExplainLang } from '../lib/i18n'
 import { TARGET_LANGUAGES, languageLabel } from '../lib/languages'
 
@@ -236,7 +236,10 @@ export default function Review() {
         draft: true,
       })
       const parsed = parseDetailJson(text)
-      if (!parsed?.meaning) {
+      if (currentCard.item_type === 'grammar') {
+        // The draft's practice material is shown from the question Rust rebuilds.
+        await startSession(currentCard.language || selectedLang)
+      } else if (!parsed?.meaning) {
         setMeaningError(t('review.noMeaningInAnswer'))
       } else {
         setCurrentTask({
@@ -869,6 +872,7 @@ export default function Review() {
               <MeaningSetup
                 key={currentCard.id}
                 task={currentTask}
+                isGrammar={currentCard.item_type === 'grammar'}
                 hasApi={getApiConfig().ready}
                 generating={meaningBusy === 'generating'}
                 saving={meaningBusy === 'saving'}
@@ -882,7 +886,7 @@ export default function Review() {
               <QuizVerdictView
                 task={currentTask}
                 result={answerResult}
-                details={renderDetailContent(currentCard.detail)}
+                details={currentTask.grammar ? <GrammarInfoView info={currentTask.grammar} /> : renderDetailContent(currentCard.detail)}
                 onNext={handleNext}
                 onOverride={handleOverride}
                 overriding={overriding}
