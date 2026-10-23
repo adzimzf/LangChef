@@ -249,17 +249,63 @@ fn pick_reading_target_words(conn: &rusqlite::Connection, language: &str) -> Vec
         .unwrap_or_default()
 }
 
+/// How many of the level's grammar patterns a passage must use.
+const READING_LEVEL_PATTERNS: usize = 4;
+
+/// What a passage at `level` reads like. Told only "match N3", models write N5-style ます
+/// sentences, so this sets the floor as well as the ceiling.
+fn level_style(level: &str) -> &'static str {
+    match level {
+        "N5" => "Polite です/ます form, short simple sentences, basic everyday words; kanji only for the most common N5 words.",
+        "N4" => "Polite form, sentences joined with て-form, から, けど, たら and simple relative clauses; common N4 kanji words.",
+        "N3" => "Written like a short blog post or column, in plain form (だ/である) or a mix with polite form. \
+                 Most sentences join two or three clauses with relative clauses, ので, のに, ために, ように. \
+                 Use N3 vocabulary written in kanji (e.g. 経験, 将来, 関係, 習慣, 確認). \
+                 It must NOT read like a beginner text made of short です/ます sentences.",
+        "N2" => "Written like a newspaper feature or opinion column, in plain form (だ/である). \
+                 Long sentences with embedded clauses, abstract vocabulary in kanji (e.g. 影響, 状況, 対策, 傾向, 維持), \
+                 and connectives such as 一方で, にもかかわらず, ことから. It must NOT read like a beginner or N3 text.",
+        "N1" => "Written like an editorial or essay, in plain form (である), with a clear line of argument, nuanced and abstract \
+                 vocabulary, formal written connectives and advanced grammar. Native-level, no simplification.",
+        "A1" => "Very short simple sentences in the present, the most common everyday words.",
+        "A2" => "Short sentences with common connectives (dan, tetapi, karena), past and future with sudah/akan.",
+        "B1" => "Connected paragraphs with subordinate clauses, the me-/di- verb forms and everyday vocabulary beyond basics.",
+        "B2" => "Written like a magazine or news feature: complex sentences, abstract and formal vocabulary.",
+        _ => "",
+    }
+}
+
+/// A random handful of grammar patterns at `level` (bundled originals and the learner's own),
+/// for the passage to use, so it is written at the level and not below it.
+fn pick_level_patterns(conn: &rusqlite::Connection, language: &str, level: &str) -> Vec<String> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT pattern FROM grammar_items
+         WHERE language = ?1 AND level = ?2 AND source_id IS NULL
+         GROUP BY pattern ORDER BY RANDOM() LIMIT ?3",
+    ) else { return Vec::new() };
+    stmt.query_map(params![language, level, READING_LEVEL_PATTERNS as i64], |r| r.get::<_, String>(0))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+}
+
 /// Writes a passage only, so the learner can start reading sooner; its questions come from
 /// `generate_reading_questions` while they read. Furigana is not asked for: Lindera adds it
 /// afterwards, and having the model write it roughly doubled the answer and the wait.
+#[allow(clippy::too_many_arguments)]
 async fn llm_generate_reading_text(
     api_host: &str, api_key: &str, model: &str,
     language: &str, level: &str,
     topic: &str,
     target_words: &[String],
+    level_patterns: &[String],
 ) -> Result<(String, String), String> {
     let lang_name = lang_name(language);
     let (min, max) = level_text_char_range(level);
+    let style = level_style(level);
+    let style_note = if style.is_empty() { String::new() } else { format!("Style for {level}: {style}\n") };
+    let grammar_note = if !level_patterns.is_empty() {
+        format!("Use each of these {level} grammar patterns at least once: {}.\n", level_patterns.join(", "))
+    } else { String::new() };
     let vocab_note = if !target_words.is_empty() {
         let words = target_words.join(", ");
         format!("The learner is studying these vocabulary words: {words}.\n\
@@ -268,7 +314,11 @@ async fn llm_generate_reading_text(
     } else { String::new() };
     let prompt = format!(
         "Write a {level}-level {lang_name} reading passage about {topic}.\n\
-        Length: {min}–{max} characters. Vocabulary and grammar must match {level}. Plain text, no furigana or markup.\n\
+        The learner is at {level}: the passage should stretch them at that level, not be easier. \
+        Vocabulary and grammar should be typical of {level}, without going above it.\n\
+        {style_note}\
+        {grammar_note}\
+        Length: {min}–{max} characters. Plain text, no furigana or markup.\n\
         {vocab_note}\
         Return ONLY valid JSON (no markdown fences): {{\"title\": \"...\", \"body\": \"...\"}}",
     );
@@ -305,9 +355,14 @@ pub async fn fetch_reading_text(
             (t, truncate_at_sentence_boundary(&b, max), src)
         }
         _ => {
-            let target_words = pick_reading_target_words(&open_db(&app)?, &language);
+            let (target_words, level_patterns) = {
+                let conn = open_db(&app)?;
+                (pick_reading_target_words(&conn, &language), pick_level_patterns(&conn, &language, &level))
+            };
             let topic = pick_reading_topic(&mut rand::thread_rng());
-            let (t, b) = llm_generate_reading_text(&api_host, &api_key, &model, &language, &level, topic, &target_words).await?;
+            let (t, b) = llm_generate_reading_text(
+                &api_host, &api_key, &model, &language, &level, topic, &target_words, &level_patterns,
+            ).await?;
             (t, b, "ai".to_string())
         }
     };
@@ -582,6 +637,21 @@ mod tests {
         assert!(first.iter().all(|w| w.starts_with("ja")), "{first:?}");
         let differs = (0..10).any(|_| pick_reading_target_words(&conn, "ja") != first);
         assert!(differs, "the same words came back every time");
+    }
+
+    #[test]
+    fn level_patterns_come_from_the_level_without_repeats() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::prepare_db(&conn).unwrap();
+        let n3: std::collections::HashSet<String> = conn
+            .prepare("SELECT pattern FROM grammar_items WHERE language = 'ja' AND level = 'N3'").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+
+        let picked = pick_level_patterns(&conn, "ja", "N3");
+        assert_eq!(picked.len(), READING_LEVEL_PATTERNS);
+        assert!(picked.iter().all(|p| n3.contains(p)), "{picked:?}");
+        assert_eq!(picked.iter().collect::<std::collections::HashSet<_>>().len(), picked.len());
+        assert!(pick_level_patterns(&conn, "ja", "N9").is_empty());
     }
 
     #[test]
