@@ -229,6 +229,19 @@ fn pick_reading_target_words(conn: &rusqlite::Connection, language: &str) -> Vec
         .unwrap_or_default()
 }
 
+/// How many recent passage titles the model is told to stay away from.
+const RECENT_TITLES: usize = 8;
+
+/// Titles of the learner's latest passages in `language`, newest first, so a new one is about something else.
+fn recent_reading_titles(conn: &rusqlite::Connection, language: &str) -> Vec<String> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT title FROM reading_sessions WHERE language = ?1 AND title != '' ORDER BY id DESC LIMIT ?2",
+    ) else { return Vec::new() };
+    stmt.query_map(params![language, RECENT_TITLES as i64], |r| r.get::<_, String>(0))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+}
+
 const PARAGRAPH_BREAK: &str = "\n\n";
 /// Sentences per paragraph when a passage arrives as one block.
 const SENTENCES_PER_PARAGRAPH: usize = 3;
@@ -258,17 +271,18 @@ fn paragraphize(text: &str, language: &str) -> String {
 const READING_LEVEL_PATTERNS: usize = 4;
 
 /// What a passage at `level` reads like. Told only "match N3", models write N5-style ます
-/// sentences, so this sets the floor as well as the ceiling.
+/// sentences, so this sets the floor as well as the ceiling. No example words: the model takes
+/// them as the subject and writes about them every time.
 fn level_style(level: &str) -> &'static str {
     match level {
         "N5" => "Polite です/ます form, short simple sentences, basic everyday words; kanji only for the most common N5 words.",
         "N4" => "Polite form, sentences joined with て-form, から, けど, たら and simple relative clauses; common N4 kanji words.",
         "N3" => "Written like a short blog post or column, in plain form (だ/である) or a mix with polite form. \
                  Most sentences join two or three clauses with relative clauses, ので, のに, ために, ように. \
-                 Use N3 vocabulary written in kanji (e.g. 経験, 将来, 関係, 習慣, 確認). \
+                 Use N3 vocabulary written in kanji. \
                  It must NOT read like a beginner text made of short です/ます sentences.",
         "N2" => "Written like a newspaper feature or opinion column, in plain form (だ/である). \
-                 Long sentences with embedded clauses, abstract vocabulary in kanji (e.g. 影響, 状況, 対策, 傾向, 維持), \
+                 Long sentences with embedded clauses, abstract N2 vocabulary in kanji, \
                  and connectives such as 一方で, にもかかわらず, ことから. It must NOT read like a beginner or N3 text.",
         "N1" => "Written like an editorial or essay, in plain form (である), with a clear line of argument, nuanced and abstract \
                  vocabulary, formal written connectives and advanced grammar. Native-level, no simplification.",
@@ -302,8 +316,14 @@ async fn llm_generate_reading_text(
     language: &str, level: &str,
     target_words: &[String],
     level_patterns: &[String],
+    recent_titles: &[String],
 ) -> Result<(String, String), String> {
     let lang_name = lang_name(language);
+    let recent_note = if !recent_titles.is_empty() {
+        format!("The learner recently read passages titled: {}. \
+                Write about a clearly different subject — not the same theme in other words.\n",
+                recent_titles.join(" / "))
+    } else { String::new() };
     let (min, max) = level_text_char_range(level);
     let style = level_style(level);
     let style_note = if style.is_empty() { String::new() } else { format!("Style for {level}: {style}\n") };
@@ -325,6 +345,7 @@ async fn llm_generate_reading_text(
         Length: {min}–{max} characters. Plain text, no furigana or markup.\n\
         Split the body into short paragraphs of 2–4 sentences, one idea each, separated by a blank line (\\n\\n).\n\
         {vocab_note}\
+        {recent_note}\
         Return ONLY valid JSON (no markdown fences): {{\"title\": \"...\", \"body\": \"...\"}}",
     );
     let raw = complete_prompt(api_host, api_key, model, prompt).await?;
@@ -360,12 +381,16 @@ pub async fn fetch_reading_text(
             (t, truncate_at_sentence_boundary(&b, max), src)
         }
         _ => {
-            let (target_words, level_patterns) = {
+            let (target_words, level_patterns, recent_titles) = {
                 let conn = open_db(&app)?;
-                (pick_reading_target_words(&conn, &language), pick_level_patterns(&conn, &language, &level))
+                (
+                    pick_reading_target_words(&conn, &language),
+                    pick_level_patterns(&conn, &language, &level),
+                    recent_reading_titles(&conn, &language),
+                )
             };
             let (t, b) = llm_generate_reading_text(
-                &api_host, &api_key, &model, &language, &level, &target_words, &level_patterns,
+                &api_host, &api_key, &model, &language, &level, &target_words, &level_patterns, &recent_titles,
             ).await?;
             (t, b, "ai".to_string())
         }
@@ -660,6 +685,24 @@ mod tests {
         assert_eq!(paragraphize("一。二。\n三。\n\n\n四。", "ja"), "一。二。\n\n三。\n\n四。");
         assert_eq!(paragraphize(" 一。二。三。四。 ", "ja"), "一。二。三。四。");
         assert_eq!(paragraphize("「行く。」と言った。二。三。四。五。", "ja"), "「行く。」と言った。二。三。\n\n四。五。");
+    }
+
+    #[test]
+    fn recent_titles_are_the_latest_in_the_language() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::prepare_db(&conn).unwrap();
+        let add = |title: &str, language: &str| {
+            conn.execute(
+                "INSERT INTO reading_sessions (language, level, title, body, plain_body, source) VALUES (?2, 'N3', ?1, '', '', 'ai')",
+                params![title, language],
+            ).unwrap();
+        };
+        for i in 0..10 { add(&format!("t{i}"), "ja"); }
+        add("judul", "id");
+        let titles = recent_reading_titles(&conn, "ja");
+        assert_eq!(titles.len(), RECENT_TITLES);
+        assert_eq!(titles.first().map(String::as_str), Some("t9"));
+        assert!(!titles.contains(&"judul".to_string()) && !titles.contains(&"t0".to_string()));
     }
 
     #[test]
