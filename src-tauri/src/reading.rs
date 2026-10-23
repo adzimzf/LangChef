@@ -249,6 +249,31 @@ fn pick_reading_target_words(conn: &rusqlite::Connection, language: &str) -> Vec
         .unwrap_or_default()
 }
 
+const PARAGRAPH_BREAK: &str = "\n\n";
+/// Sentences per paragraph when a passage arrives as one block.
+const SENTENCES_PER_PARAGRAPH: usize = 3;
+
+/// Splits a passage into short paragraphs, which is easier to read on a phone than one block.
+/// Keeps the paragraphs the text already has; a text in one block (a news article, or a model
+/// that ignored the instruction) is broken every few sentences, never leaving one sentence alone at the end.
+fn paragraphize(text: &str, language: &str) -> String {
+    let existing: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if existing.len() > 1 {
+        return existing.join(PARAGRAPH_BREAK);
+    }
+    let sentences = crate::breakdown::split_sentences(text);
+    if sentences.len() <= SENTENCES_PER_PARAGRAPH + 1 {
+        return text.trim().to_string();
+    }
+    let joiner = if language == "ja" { "" } else { " " };
+    let mut groups: Vec<Vec<String>> = sentences.chunks(SENTENCES_PER_PARAGRAPH).map(<[String]>::to_vec).collect();
+    if groups.len() > 1 && groups.last().is_some_and(|g| g.len() == 1) {
+        let last = groups.pop().unwrap_or_default();
+        if let Some(prev) = groups.last_mut() { prev.extend(last); }
+    }
+    groups.iter().map(|g| g.join(joiner)).collect::<Vec<_>>().join(PARAGRAPH_BREAK)
+}
+
 /// How many of the level's grammar patterns a passage must use.
 const READING_LEVEL_PATTERNS: usize = 4;
 
@@ -319,6 +344,7 @@ async fn llm_generate_reading_text(
         {style_note}\
         {grammar_note}\
         Length: {min}–{max} characters. Plain text, no furigana or markup.\n\
+        Split the body into short paragraphs of 2–4 sentences, one idea each, separated by a blank line (\\n\\n).\n\
         {vocab_note}\
         Return ONLY valid JSON (no markdown fences): {{\"title\": \"...\", \"body\": \"...\"}}",
     );
@@ -366,10 +392,14 @@ pub async fn fetch_reading_text(
             (t, b, "ai".to_string())
         }
     };
-    let plain_body = furigana::strip_existing_furigana(&raw_body);
+    let plain_body = paragraphize(&furigana::strip_existing_furigana(&raw_body), &language);
     let body = if language == "ja" {
         match state.lock() {
-            Ok(mut g) => g.as_mut().map(|a| a.annotate(&plain_body)).unwrap_or_else(|| plain_body.clone()),
+            Ok(mut g) => match g.as_mut() {
+                // Per paragraph, so the tokenizer can't lose the breaks between them.
+                Some(a) => plain_body.split(PARAGRAPH_BREAK).map(|p| a.annotate(p)).collect::<Vec<_>>().join(PARAGRAPH_BREAK),
+                None => plain_body.clone(),
+            },
             Err(_) => plain_body.clone(),
         }
     } else {
@@ -637,6 +667,21 @@ mod tests {
         assert!(first.iter().all(|w| w.starts_with("ja")), "{first:?}");
         let differs = (0..10).any(|_| pick_reading_target_words(&conn, "ja") != first);
         assert!(differs, "the same words came back every time");
+    }
+
+    #[test]
+    fn one_block_is_split_every_few_sentences() {
+        let text = "一。二。三。四。五。六。七。";
+        assert_eq!(paragraphize(text, "ja"), "一。二。三。\n\n四。五。六。七。");
+        assert_eq!(paragraphize("A satu. B dua. C tiga. D empat. E lima. F enam.", "id"),
+                   "A satu. B dua. C tiga.\n\nD empat. E lima. F enam.");
+    }
+
+    #[test]
+    fn existing_paragraphs_and_short_texts_are_kept() {
+        assert_eq!(paragraphize("一。二。\n三。\n\n\n四。", "ja"), "一。二。\n\n三。\n\n四。");
+        assert_eq!(paragraphize(" 一。二。三。四。 ", "ja"), "一。二。三。四。");
+        assert_eq!(paragraphize("「行く。」と言った。二。三。四。五。", "ja"), "「行く。」と言った。二。三。\n\n四。五。");
     }
 
     #[test]

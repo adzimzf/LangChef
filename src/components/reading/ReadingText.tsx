@@ -19,8 +19,8 @@ export type TextSize = 'sm' | 'md' | 'lg'
 
 const SIZE_CLASS: Record<TextSize, string> = {
   sm: 'text-[15px] leading-[1.9]',
-  md: 'text-[18px] leading-[2.05]',
-  lg: 'text-[21px] leading-[2.15]',
+  md: 'text-[18px] leading-[1.95]',
+  lg: 'text-[21px] leading-[2.05]',
 }
 
 type Token = { surface: string; base_form: string }
@@ -117,7 +117,7 @@ export default function ReadingText({ text, reviewItems, showFurigana, size = 'm
   }
 
   return (
-    <div className={`${SIZE_CLASS[size]} tracking-wide text-gray-800 space-y-4`}>
+    <div className={`${SIZE_CLASS[size]} tracking-wide text-gray-800 space-y-6`}>
       {paragraphs.map((p, pi) => <p key={pi} className="m-0">{renderParagraph(p, pi)}</p>)}
     </div>
   )
