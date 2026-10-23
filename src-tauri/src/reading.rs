@@ -205,12 +205,50 @@ async fn try_fetch_rss(language: &str) -> Option<(String, String)> {
     Some(articles[idx].clone())
 }
 
+/// What the questions ask at `level`, after the JLPT reading question types. Told only
+/// "who, what, why, how", models write questions whose answer is a phrase copied from the text.
+fn question_style(level: &str) -> &'static str {
+    match level {
+        "N5" | "N4" | "A1" | "A2" => "Ask about facts stated in the text (who, what, where, when, what someone did). \
+            Answers may be short phrases from the text.",
+        "N3" | "B1" => "At most half the questions may ask for a fact stated in one sentence. The others must need \
+            the reader to connect two parts of the text: a reason or cause, what led to something, how something changed, \
+            or what a word like これ/それ/その refers to. Their answer must be put together in the reader's own words, \
+            not copied from one sentence.",
+        "N2" | "N1" | "B2" => "No question may be answered by copying a phrase from the text. Ask about: the reason or \
+            cause behind something, what a demonstrative (これ/それ/その…) or an expression refers to, what is implied but \
+            not said, how the writer feels about something or what they want to say, and the main point of a paragraph \
+            or of the whole text. Answers must summarize or infer in the reader's own words.",
+        _ => "Ask about facts, reasons and the main idea of the text.",
+    }
+}
+
+/// How many questions may have an answer copied straight from the text.
+fn literal_question_limit(level: &str, n: usize) -> usize {
+    match level {
+        "N5" | "N4" | "A1" | "A2" => n,
+        "N3" | "B1" => n / 2,
+        _ => 0,
+    }
+}
+
 /// The rules for comprehension questions, for an AI passage and a news article alike.
-fn question_rules(lang_name: &str, n: usize) -> String {
+fn question_rules(lang_name: &str, level: &str, n: usize) -> String {
     format!(
-        "{n} comprehension questions: answerable from the text only; answers in {lang_name}; \
-        vary types (who, what, why, how)."
+        "{n} comprehension questions: answerable from the text only; questions and answers in {lang_name}, \
+        worded at {level} level. Word each question differently from the sentence it is about — do not \
+        reuse the text's own phrasing. {}",
+        question_style(level)
     )
+}
+
+/// Whether an answer can be found word for word in the passage, ignoring spaces and punctuation.
+fn is_copied_answer(answer: &str, passage: &str) -> bool {
+    let norm = |s: &str| s.chars()
+        .filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation() && !"。、！？「」『』（）・…".contains(*c))
+        .collect::<String>();
+    let answer = norm(answer);
+    answer.chars().count() >= 4 && norm(passage).contains(&answer)
 }
 
 /// How many of the learner's words a passage is asked to use.
@@ -422,18 +460,43 @@ pub async fn generate_reading_questions(
     session_id: Option<i64>,
 ) -> Result<Vec<ReadingQuestion>, String> {
     let lang_name = lang_name(&language);
-    let rules = question_rules(lang_name, reading_question_count(&level));
+    let n = reading_question_count(&level);
+    let rules = question_rules(lang_name, &level, n);
     let prompt = format!(
         "You are a {lang_name} teacher. For this {level}-level passage, write {rules}\n\
         Return ONLY a JSON array (no markdown): [{{\"question\": \"...\", \"answer_hint\": \"...\"}}]\n\n\
         Passage:\n{plain_body}",
     );
-    let raw = complete_prompt(&api_host, &api_key, &model, prompt).await?;
-    let cleaned = json_part(&raw);
-    let questions = serde_json::from_str::<Vec<ReadingQuestion>>(cleaned)
-        .map_err(|_| app_error("api_bad_response", cleaned))?;
-    if questions.is_empty() {
-        return Err(app_error("api_bad_response", "no questions"));
+    let ask = |prompt: String| {
+        let (api_host, api_key, model) = (&api_host, &api_key, &model);
+        async move {
+            let raw = complete_prompt(api_host, api_key, model, prompt).await?;
+            let cleaned = json_part(&raw);
+            let questions = serde_json::from_str::<Vec<ReadingQuestion>>(cleaned)
+                .map_err(|_| app_error("api_bad_response", cleaned))?;
+            if questions.is_empty() {
+                return Err(app_error("api_bad_response", "no questions"));
+            }
+            Ok(questions)
+        }
+    };
+    let copied = |qs: &[ReadingQuestion]| -> Vec<String> {
+        qs.iter().filter(|q| is_copied_answer(&q.answer_hint, &plain_body)).map(|q| q.question.clone()).collect()
+    };
+
+    let mut questions = ask(prompt.clone()).await?;
+    let literal = copied(&questions);
+    // Too many answers copied straight from the text: ask once more, naming them. Keep the
+    // first set if the retry fails or is no better.
+    if literal.len() > literal_question_limit(&level, n) {
+        let retry = format!(
+            "{prompt}\n\nYour previous questions were too easy for {level}: these can be answered by copying a phrase \
+            from the text: {}. Write a new set that follows the rules above.",
+            literal.join(" / ")
+        );
+        if let Ok(better) = ask(retry).await {
+            if copied(&better).len() < literal.len() { questions = better; }
+        }
     }
     if let Some(id) = session_id {
         let json = serde_json::to_string(&questions).map_err(|e| e.to_string())?;
@@ -685,6 +748,25 @@ mod tests {
         assert_eq!(paragraphize("一。二。\n三。\n\n\n四。", "ja"), "一。二。\n\n三。\n\n四。");
         assert_eq!(paragraphize(" 一。二。三。四。 ", "ja"), "一。二。三。四。");
         assert_eq!(paragraphize("「行く。」と言った。二。三。四。五。", "ja"), "「行く。」と言った。二。三。\n\n四。五。");
+    }
+
+    #[test]
+    fn copied_answers_are_found_ignoring_punctuation() {
+        let passage = "その人は半年かけて星を観察して、新しい星を発見しました。当時は懐中電灯もないから、夜の観察は大変でした。";
+        assert!(is_copied_answer("新しい星を発見しました。", passage));
+        assert!(!is_copied_answer("半年かけて星を観察して 新しい星を発見した", passage), "した ≠ しました");
+        assert!(is_copied_answer("観察して、新しい星を発見", passage));
+        assert!(!is_copied_answer("明かりがなくて暗かったから", passage));
+        assert!(!is_copied_answer("夜", passage), "too short to count");
+        assert!(is_copied_answer("went to the market", "Yesterday she went to the market."));
+    }
+
+    #[test]
+    fn higher_levels_allow_fewer_literal_questions() {
+        assert_eq!(literal_question_limit("N5", 3), 3);
+        assert_eq!(literal_question_limit("N3", 4), 2);
+        assert_eq!(literal_question_limit("N2", 5), 0);
+        assert_eq!(literal_question_limit("N1", 5), 0);
     }
 
     #[test]
