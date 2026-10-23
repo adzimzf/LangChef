@@ -213,31 +213,11 @@ fn question_rules(lang_name: &str, n: usize) -> String {
     )
 }
 
-/// Topics for an AI passage. The model is asked for one of these instead of "a random topic":
-/// left to choose, it picks the same one every time.
-const READING_TOPICS: &[&str] = &[
-    "a morning routine", "a weekend trip", "shopping at a market", "a birthday", "the weather this week",
-    "a new hobby", "a day at school", "a part-time job", "visiting a friend's home", "a local festival",
-    "riding the train", "a lost item", "cleaning the room", "a pet", "a visit to the doctor",
-    "sports day", "a letter to family", "moving to a new town", "a rainy day", "a library visit",
-    "a museum", "cooking dinner at home", "a picnic in the park", "a concert", "learning to swim",
-    "a bicycle ride", "a phone call with a friend", "a summer holiday", "a winter evening", "a garden",
-    "a job interview", "a hotel stay", "a restaurant menu", "a neighbor", "a movie night",
-    "a camping trip", "a hospital visit", "a train delay", "a gift for someone", "a mountain hike",
-    "the first day at work", "a beach day", "a broken phone", "an online video", "a cafe",
-    "planning a party", "a long walk", "a school club", "a souvenir", "a city map",
-];
-
-/// How many of the learner's words a passage is asked to use. A few, so they don't decide the topic.
+/// How many of the learner's words a passage is asked to use.
 const READING_TARGET_WORDS: usize = 12;
 
-fn pick_reading_topic(rng: &mut impl rand::Rng) -> &'static str {
-    use rand::seq::SliceRandom;
-    READING_TOPICS.choose(rng).copied().unwrap_or("daily life")
-}
-
-/// A fresh random sample of the learner's word cards in `language` for each passage, so the
-/// same oldest cards don't steer every passage to the same subject.
+/// A fresh random sample, in random order, of the learner's word cards in `language` for each
+/// passage. With no topic given, these and the level's patterns are what make passages differ.
 fn pick_reading_target_words(conn: &rusqlite::Connection, language: &str) -> Vec<String> {
     let Ok(mut stmt) = conn.prepare(
         "SELECT content FROM review_items
@@ -320,7 +300,6 @@ fn pick_level_patterns(conn: &rusqlite::Connection, language: &str, level: &str)
 async fn llm_generate_reading_text(
     api_host: &str, api_key: &str, model: &str,
     language: &str, level: &str,
-    topic: &str,
     target_words: &[String],
     level_patterns: &[String],
 ) -> Result<(String, String), String> {
@@ -334,11 +313,11 @@ async fn llm_generate_reading_text(
     let vocab_note = if !target_words.is_empty() {
         let words = target_words.join(", ");
         format!("The learner is studying these vocabulary words: {words}.\n\
-                Use the ones that fit the topic naturally — do not force words that don't fit, \
-                and do not change the topic to fit them.\n")
+                Choose the subject of the passage yourself, one that several of these words suggest, \
+                and use the ones that fit naturally — do not force words that don't fit.\n")
     } else { String::new() };
     let prompt = format!(
-        "Write a {level}-level {lang_name} reading passage about {topic}.\n\
+        "Write a {level}-level {lang_name} reading passage.\n\
         The learner is at {level}: the passage should stretch them at that level, not be easier. \
         Vocabulary and grammar should be typical of {level}, without going above it.\n\
         {style_note}\
@@ -385,9 +364,8 @@ pub async fn fetch_reading_text(
                 let conn = open_db(&app)?;
                 (pick_reading_target_words(&conn, &language), pick_level_patterns(&conn, &language, &level))
             };
-            let topic = pick_reading_topic(&mut rand::thread_rng());
             let (t, b) = llm_generate_reading_text(
-                &api_host, &api_key, &model, &language, &level, topic, &target_words, &level_patterns,
+                &api_host, &api_key, &model, &language, &level, &target_words, &level_patterns,
             ).await?;
             (t, b, "ai".to_string())
         }
@@ -639,13 +617,6 @@ mod tests {
     }
 
     #[test]
-    fn topics_vary_between_passages() {
-        let mut rng = rand::thread_rng();
-        let picked: std::collections::HashSet<_> = (0..50).map(|_| pick_reading_topic(&mut rng)).collect();
-        assert!(picked.len() > 10, "only {} distinct topics in 50 picks", picked.len());
-    }
-
-    #[test]
     fn target_words_are_a_random_sample_of_word_cards_in_the_language() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::prepare_db(&conn).unwrap();
@@ -667,6 +638,13 @@ mod tests {
         assert!(first.iter().all(|w| w.starts_with("ja")), "{first:?}");
         let differs = (0..10).any(|_| pick_reading_target_words(&conn, "ja") != first);
         assert!(differs, "the same words came back every time");
+
+        // With exactly as many cards as are asked for, all come back, in a different order.
+        conn.execute("DELETE FROM review_items WHERE CAST(substr(content, 3) AS INTEGER) >= ?1", params![READING_TARGET_WORDS as i64]).unwrap();
+        let all = pick_reading_target_words(&conn, "ja");
+        assert_eq!(all.len(), READING_TARGET_WORDS);
+        let reordered = (0..10).any(|_| pick_reading_target_words(&conn, "ja") != all);
+        assert!(reordered, "the words came back in the same order every time");
     }
 
     #[test]
