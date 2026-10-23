@@ -213,23 +213,61 @@ fn question_rules(lang_name: &str, n: usize) -> String {
     )
 }
 
+/// Topics for an AI passage. The model is asked for one of these instead of "a random topic":
+/// left to choose, it picks the same one every time.
+const READING_TOPICS: &[&str] = &[
+    "a morning routine", "a weekend trip", "shopping at a market", "a birthday", "the weather this week",
+    "a new hobby", "a day at school", "a part-time job", "visiting a friend's home", "a local festival",
+    "riding the train", "a lost item", "cleaning the room", "a pet", "a visit to the doctor",
+    "sports day", "a letter to family", "moving to a new town", "a rainy day", "a library visit",
+    "a museum", "cooking dinner at home", "a picnic in the park", "a concert", "learning to swim",
+    "a bicycle ride", "a phone call with a friend", "a summer holiday", "a winter evening", "a garden",
+    "a job interview", "a hotel stay", "a restaurant menu", "a neighbor", "a movie night",
+    "a camping trip", "a hospital visit", "a train delay", "a gift for someone", "a mountain hike",
+    "the first day at work", "a beach day", "a broken phone", "an online video", "a cafe",
+    "planning a party", "a long walk", "a school club", "a souvenir", "a city map",
+];
+
+/// How many of the learner's words a passage is asked to use. A few, so they don't decide the topic.
+const READING_TARGET_WORDS: usize = 12;
+
+fn pick_reading_topic(rng: &mut impl rand::Rng) -> &'static str {
+    use rand::seq::SliceRandom;
+    READING_TOPICS.choose(rng).copied().unwrap_or("daily life")
+}
+
+/// A fresh random sample of the learner's word cards in `language` for each passage, so the
+/// same oldest cards don't steer every passage to the same subject.
+fn pick_reading_target_words(conn: &rusqlite::Connection, language: &str) -> Vec<String> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT content FROM review_items
+         WHERE item_type = 'word' AND (language = ?1 OR language IS NULL OR language = '')
+         ORDER BY RANDOM() LIMIT ?2",
+    ) else { return Vec::new() };
+    stmt.query_map(params![language, READING_TARGET_WORDS as i64], |r| r.get::<_, String>(0))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+}
+
 /// Writes a passage only, so the learner can start reading sooner; its questions come from
 /// `generate_reading_questions` while they read. Furigana is not asked for: Lindera adds it
 /// afterwards, and having the model write it roughly doubled the answer and the wait.
 async fn llm_generate_reading_text(
     api_host: &str, api_key: &str, model: &str,
     language: &str, level: &str,
+    topic: &str,
     target_words: &[String],
 ) -> Result<(String, String), String> {
     let lang_name = lang_name(language);
     let (min, max) = level_text_char_range(level);
     let vocab_note = if !target_words.is_empty() {
-        let words = target_words.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
+        let words = target_words.join(", ");
         format!("The learner is studying these vocabulary words: {words}.\n\
-                Naturally incorporate as many as fit the passage — do not force words that don't fit.\n")
+                Use the ones that fit the topic naturally — do not force words that don't fit, \
+                and do not change the topic to fit them.\n")
     } else { String::new() };
     let prompt = format!(
-        "Write a {level}-level {lang_name} reading passage on a random everyday topic.\n\
+        "Write a {level}-level {lang_name} reading passage about {topic}.\n\
         Length: {min}–{max} characters. Vocabulary and grammar must match {level}. Plain text, no furigana or markup.\n\
         {vocab_note}\
         Return ONLY valid JSON (no markdown fences): {{\"title\": \"...\", \"body\": \"...\"}}",
@@ -251,10 +289,10 @@ async fn llm_generate_reading_text(
 
 #[tauri::command]
 pub async fn fetch_reading_text(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<Option<furigana::FuriganaAnnotator>>>,
     api_host: String, api_key: String, model: String,
     language: String, level: String,
-    target_words: Vec<String>,
 ) -> Result<ReadingText, String> {
     let (min, max) = level_text_char_range(&level);
     let (title, raw_body, source) = match try_fetch_rss(&language).await {
@@ -267,7 +305,9 @@ pub async fn fetch_reading_text(
             (t, truncate_at_sentence_boundary(&b, max), src)
         }
         _ => {
-            let (t, b) = llm_generate_reading_text(&api_host, &api_key, &model, &language, &level, &target_words).await?;
+            let target_words = pick_reading_target_words(&open_db(&app)?, &language);
+            let topic = pick_reading_topic(&mut rand::thread_rng());
+            let (t, b) = llm_generate_reading_text(&api_host, &api_key, &model, &language, &level, topic, &target_words).await?;
             (t, b, "ai".to_string())
         }
     };
@@ -511,6 +551,37 @@ mod tests {
 
     fn ans(result: &str, retries: u32) -> SavedAnswer {
         SavedAnswer { question_index: 0, user_answer: String::new(), result: result.into(), retries, feedback: String::new() }
+    }
+
+    #[test]
+    fn topics_vary_between_passages() {
+        let mut rng = rand::thread_rng();
+        let picked: std::collections::HashSet<_> = (0..50).map(|_| pick_reading_topic(&mut rng)).collect();
+        assert!(picked.len() > 10, "only {} distinct topics in 50 picks", picked.len());
+    }
+
+    #[test]
+    fn target_words_are_a_random_sample_of_word_cards_in_the_language() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::prepare_db(&conn).unwrap();
+        let add = |content: &str, language: &str, item_type: &str| {
+            conn.execute(
+                "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, language, item_type, created_at)
+                 VALUES (?1, ?1, -1.0, 0, 0, 'new', 0, 0, ?2, ?3, 0)",
+                params![content, language, item_type],
+            ).unwrap();
+        };
+        for i in 0..40 {
+            add(&format!("ja{i}"), "ja", "word");
+        }
+        add("kata", "id", "word");
+        add("〜ている", "ja", "grammar");
+
+        let first = pick_reading_target_words(&conn, "ja");
+        assert_eq!(first.len(), READING_TARGET_WORDS);
+        assert!(first.iter().all(|w| w.starts_with("ja")), "{first:?}");
+        let differs = (0..10).any(|_| pick_reading_target_words(&conn, "ja") != first);
+        assert!(differs, "the same words came back every time");
     }
 
     #[test]
