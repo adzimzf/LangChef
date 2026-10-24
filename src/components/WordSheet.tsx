@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { invoke } from '@tauri-apps/api/core'
 import { CloseOutlined, LoadingOutlined, PlusOutlined, CheckOutlined } from '@ant-design/icons'
-import type { CardDetail, ReviewItem } from '../lib/types'
+import type { CardDetail, ReviewItem, SavedWord } from '../lib/types'
 import { parseDetailJson } from '../lib/types'
 import { t, lang as explainLang, errorText, languageName, partOfSpeechLabel } from '../lib/i18n'
 import { readFlag, ROMAJI_KEY } from '../lib/prefs'
@@ -25,7 +25,7 @@ export default function WordSheet({ word, base, language, api, onAdd, onClose }:
   base: string
   language: string
   api: Api
-  onAdd: (content: string, detail: string | null) => Promise<void>
+  onAdd: (content: string, detail: string | null) => Promise<SavedWord>
   onClose: () => void
 }) {
   const [item, setItem] = useState<ReviewItem | null>(null)
@@ -36,6 +36,8 @@ export default function WordSheet({ word, base, language, api, onAdd, onClose }:
   const [error, setError] = useState<string | null>(null)
   const [adding, setAdding] = useState(false)
   const [added, setAdded] = useState(false)
+  /** Already in the deck as another form of the word. */
+  const [savedAs, setSavedAs] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -70,7 +72,8 @@ export default function WordSheet({ word, base, language, api, onAdd, onClose }:
   async function add() {
     setAdding(true)
     try {
-      await onAdd(base, rawDetail)
+      const saved = await onAdd(base, rawDetail)
+      if (saved.existed && saved.content !== base) setSavedAs(saved.content)
       setAdded(true)
     } catch (e) {
       setError(errorText(e))
@@ -125,6 +128,7 @@ export default function WordSheet({ word, base, language, api, onAdd, onClose }:
           </div>
         )}
         {error && <div className="text-xs text-red-500">{error}</div>}
+        {savedAs && <div className="text-xs text-gray-500">{t('chat.alreadyInCardsAs', { word: savedAs })}</div>}
 
         <button
           type="button"

@@ -1,6 +1,7 @@
 use lindera::mode::Mode;
 use lindera::tokenizer::{Tokenizer, TokenizerBuilder};
 use std::path::Path;
+use std::sync::Mutex;
 
 const IPADIC_SOURCE_URL: &str =
     "https://Lindera.dev/mecab-ipadic-2.7.0-20250920.tar.gz";
@@ -78,6 +79,35 @@ impl FuriganaAnnotator {
         }
     }
 
+    /// Dictionary form of a word saved in a polite or past form (下がります → 下がる, 高かった → 高い).
+    /// Anything else (nouns, phrases, negatives, て-forms) comes back unchanged.
+    pub fn lemma(&mut self, text: &str) -> String {
+        let plain = strip_existing_furigana(text).trim().to_string();
+        let Ok(tokens) = self.tokenizer.tokenize(&plain) else { return plain };
+        let parts: Vec<(String, String)> = tokens
+            .into_iter()
+            .map(|mut token| {
+                let surface = token.surface.to_string();
+                let pos = token.get("part_of_speech").unwrap_or("").to_string();
+                let base = token
+                    .get("base_form")
+                    .filter(|b| *b != "*" && !b.is_empty())
+                    .map(str::to_string)
+                    .unwrap_or(surface);
+                (pos, base)
+            })
+            .collect();
+        match parts.split_first() {
+            Some(((pos, base), rest))
+                if (pos == "動詞" || pos == "形容詞")
+                    && rest.iter().all(|(p, b)| p == "助動詞" && (b == "ます" || b == "た")) =>
+            {
+                base.clone()
+            }
+            _ => plain,
+        }
+    }
+
     pub fn tokenize(&mut self, text: &str) -> Vec<(String, String)> {
         let plain = strip_existing_furigana(text);
         match self.tokenizer.tokenize(&plain) {
@@ -96,6 +126,11 @@ impl FuriganaAnnotator {
             Err(_) => vec![],
         }
     }
+}
+
+/// Dictionary form of a Japanese word; None while the dictionary isn't loaded.
+pub fn lemma_of(state: &Mutex<Option<FuriganaAnnotator>>, text: &str) -> Option<String> {
+    state.lock().ok()?.as_mut().map(|annotator| annotator.lemma(text))
 }
 
 /// Returns true if the dict binary files already exist at `dir`.

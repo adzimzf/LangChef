@@ -123,6 +123,7 @@
   "cardState.relearning": "Dipelajari ulang",
   "cardState.review": "Ulasan",
   "chat.addToCards": "Tambah ke kartu",
+  "chat.alreadyInCardsAs": "Sudah ada di kartu sebagai {word}",
   "chat.analysisFailed": "Gagal menganalisis tata bahasa:",
   "chat.analyzeGrammar": "Analisis tata bahasa",
   "chat.analyzing": "menganalisis…",
