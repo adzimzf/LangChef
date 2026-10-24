@@ -78,6 +78,8 @@ No test framework configured.
 
 **Sentence breakdown:** user pastes text on `/breakdown` → `breakdown_split_sentences` → picks one if several → `db_start_sentence_breakdown` returns the cached sections and the `missing` ones → the page requests every missing section at once with `llm_breakdown_section` and shows each as it arrives: `chunks` (role codes, colored by `ROLE_STYLE` in `src/pages/Breakdown.tsx`), `core`, `layers`, `order`, `notes`, `gloss`, `check`. A failed section gets its own retry. Spec: `PRDs/Sentence Breakdown.md`.
 
+**One card per word (Japanese):** `db_upsert_review_item` saves the dictionary form (`FuriganaAnnotator::lemma`: 下がります → 下がる) and returns the existing card when another form is already in the deck. `db_merge_duplicate_words` (run from `Layout` once the dictionary is ready) fills `review_items.lemma` and folds duplicates into the strongest card. `load_candidates` in `quiz.rs` never offers a card with the same lemma or reading as a wrong option.
+
 **Message branching:** Messages support `parent_message_id` and `is_active_path` for branching conversations. `db_deactivate_message_branch` + `db_get_message_siblings` manage tree traversal.
 
 **Grammar seeding:** `grammar/` markdown files embedded via `include_str!()` at Rust compile time, auto-seeded into `grammar_items` table on first DB open via `seed_bundled_grammar_if_empty()`.
@@ -122,7 +124,7 @@ DB path: `~/.app-data/langchef/langchef.db`. Schema created in `open_db()` in `s
 |-------|------------|
 | `messages` | id, role, content, session_id, parent_message_id, is_active_path |
 | `chat_sessions` | id, title, language, level, selected_grammar |
-| `review_items` | id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, draft_detail, mnemonic, stability, difficulty, item_type (`word`/`grammar`), grammar_id, level, placement |
+| `review_items` | id, content, EF, I, R, state, step, lapse_count, next_review, tags, language, detail, draft_detail, mnemonic, stability, difficulty, item_type (`word`/`grammar`), grammar_id, level, placement, lemma (Japanese dictionary form) |
 | `known_words` | word (PK) |
 | `grammar_items` | id, pattern, detail, language, level, is_default, source_id (translated row → original) |
 | `user_activity` | date, activity_type, count |

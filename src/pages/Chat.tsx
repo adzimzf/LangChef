@@ -4,7 +4,7 @@ import { splitTappable, isWordSegment } from '../lib/unknown'
 import { renderFurigana, hasFuriganaAnnotations, stripFurigana, sliceAnnotated } from '../lib/furigana'
 import { JLPT_LEVELS, DEFAULT_JLPT_LEVEL, JLPT_LEVEL_STORAGE_KEY } from '../lib/jlpt'
 import type { JLPTLevel } from '../lib/jlpt'
-import type { ReviewItem } from '../lib/types'
+import type { ReviewItem, SavedWord } from '../lib/types'
 import { parseDetailJson } from '../lib/types'
 import UserMessageFeedback, { type UserFeedback } from '../components/UserMessageFeedback'
 import WordSheet, { keepSheetMeaning } from '../components/WordSheet'
@@ -658,9 +658,10 @@ export default function Chat() {
   }
 
   // Adds a tapped word to the deck, keeping a meaning the sheet already looked up.
-  async function addWordFromSheet(content: string, detail: string | null) {
-    await markWordDifficult(content)
-    await keepSheetMeaning(content, detail)
+  async function addWordFromSheet(content: string, detail: string | null): Promise<SavedWord> {
+    const saved = await markWordDifficult(content)
+    await keepSheetMeaning(saved.content, detail)
+    return saved
   }
 
   // Auto-scroll
@@ -710,13 +711,13 @@ export default function Chat() {
     return () => el.removeEventListener('scroll', onScroll)
   }, [])
 
-  async function markWordDifficult(word: string) {
+  async function markWordDifficult(word: string): Promise<SavedWord> {
     const w = word.toLowerCase()
     const next = new Map(difficult)
     next.set(w, { EF: 2.5, R: 0, isNew: true, difficulty_bg_class: 'bg-red-500' })
     setDifficult(next)
     try {
-      await invoke('db_upsert_review_item', { content: w, language: lang || null })
+      const saved = await invoke<SavedWord>('db_upsert_review_item', { content: w, language: lang || null })
       // Write-through to cache so the new word survives within the 18h TTL.
       const cached = readWordCache()
       const cacheLang = lang || ''
@@ -726,12 +727,14 @@ export default function Chat() {
           writeWordCache(cached)
         }
       }
+      return saved
     } catch (e) {
       console.error('Failed to save difficult word to DB:', e)
       // Roll back local state if DB write fails
       const reverted = new Map(difficult)
       reverted.delete(w)
       setDifficult(reverted)
+      throw e
     }
   }
 

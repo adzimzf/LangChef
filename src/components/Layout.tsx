@@ -56,7 +56,8 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     })
 
     // Trigger init — no-op if dict already cached; otherwise starts download
-    invoke<string>('init_lindera_dict').catch((err) => {
+    // Once Japanese can be split into words, fold cards that are forms of the same word (下がります → 下がる).
+    invoke<string>('init_lindera_dict').then(() => { invoke('db_merge_duplicate_words').catch(() => {}) }).catch((err) => {
       setLinderaStage('error')
       setLinderaMessage(`${t('lindera.error')} ${String(err)}`)
     })

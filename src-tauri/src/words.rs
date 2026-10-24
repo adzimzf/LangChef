@@ -1,11 +1,13 @@
 use crate::chat::{complete_explained, json_part};
 use crate::db::open_db;
+use crate::furigana::{lemma_of, FuriganaAnnotator};
 use crate::grammar_review::generate_card_back;
 use crate::locale::{app_error, effective_detail_sql, explain_lang, lang_name};
 use crate::quiz::{parse_detail, CardDetail};
 use crate::srs::{review_cols, row_to_review_item, ReviewItem};
-use rusqlite::params;
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
+use std::sync::Mutex;
 
 struct KnownWord {
     word: String,
@@ -577,19 +579,103 @@ pub fn db_get_difficult_and_known_words(
 #[tauri::command]
 pub fn db_delete_review_item(app: tauri::AppHandle, id: String) -> Result<(), String> {
     let mut conn = open_db(&app)?;
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    delete_card(&tx, &id)?;
+    tx.commit().map_err(|e| e.to_string())
+}
+
+fn delete_card(conn: &Connection, id: &str) -> Result<(), String> {
     // study_card references review_items (foreign keys are on in bundled SQLite),
     // so a card that was ever in a daily queue has to leave it first.
-    let tx = conn.transaction().map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM study_card WHERE review_item_id=?1", params![id])
+    conn.execute("DELETE FROM study_card WHERE review_item_id=?1", params![id])
         .map_err(|e| e.to_string())?;
-    tx.execute(
+    conn.execute(
         "DELETE FROM review_confusions WHERE review_item_id=?1 OR confused_with_id=?1",
         params![id],
     )
     .map_err(|e| e.to_string())?;
-    tx.execute("DELETE FROM review_items WHERE id=?1", params![id])
+    conn.execute("DELETE FROM review_items WHERE id=?1", params![id])
         .map_err(|e| e.to_string())?;
-    tx.commit().map_err(|e| e.to_string())
+    Ok(())
+}
+
+/// Folds Japanese word cards that are forms of the same word (下がる, 下がります) into one:
+/// fills in missing dictionary forms, keeps the card with the strongest memory, moves the other
+/// cards' answers and mix-ups onto it and deletes them. Returns how many cards were removed.
+#[tauri::command]
+pub fn db_merge_duplicate_words(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Option<FuriganaAnnotator>>>,
+) -> Result<usize, String> {
+    if !state.lock().map(|g| g.is_some()).unwrap_or(false) {
+        return Ok(0);
+    }
+    let mut conn = open_db(&app)?;
+    merge_duplicate_words(&mut conn, |w| lemma_of(&state, w).unwrap_or_else(|| w.to_string()))
+}
+
+fn merge_duplicate_words(conn: &mut Connection, mut lemma: impl FnMut(&str) -> String) -> Result<usize, String> {
+    const JA_WORDS: &str = "language = 'ja' AND COALESCE(item_type, 'word') = 'word'";
+    let tx = conn.transaction().map_err(|e| e.to_string())?;
+    let missing: Vec<(String, String)> = {
+        let mut stmt = tx
+            .prepare(&format!("SELECT id, content FROM review_items WHERE lemma IS NULL AND {JA_WORDS}"))
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?))).map_err(|e| e.to_string())?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    for (id, content) in missing {
+        tx.execute("UPDATE review_items SET lemma=?1 WHERE id=?2", params![lemma(&content), id])
+            .map_err(|e| e.to_string())?;
+    }
+    let groups: Vec<String> = {
+        let mut stmt = tx
+            .prepare(&format!("SELECT lemma FROM review_items WHERE {JA_WORDS} GROUP BY lemma HAVING COUNT(*) > 1"))
+            .map_err(|e| e.to_string())?;
+        let rows = stmt.query_map([], |r| r.get(0)).map_err(|e| e.to_string())?;
+        rows.filter_map(|r| r.ok()).collect()
+    };
+    let mut removed = 0;
+    for group in groups {
+        // Strongest memory first; among equals the card already in dictionary form, then the oldest.
+        let ids: Vec<String> = {
+            let mut stmt = tx
+                .prepare(&format!(
+                    "SELECT id FROM review_items WHERE lemma = ?1 AND {JA_WORDS}
+                     ORDER BY COALESCE(fsrs_stability, 0) DESC, state != 'new' DESC, content = lemma DESC, created_at"
+                ))
+                .map_err(|e| e.to_string())?;
+            let rows = stmt.query_map(params![group], |r| r.get(0)).map_err(|e| e.to_string())?;
+            rows.filter_map(|r| r.ok()).collect()
+        };
+        let Some((keep, rest)) = ids.split_first() else { continue };
+        for drop in rest {
+            fold_card(&tx, keep, drop)?;
+            removed += 1;
+        }
+    }
+    tx.commit().map_err(|e| e.to_string())?;
+    Ok(removed)
+}
+
+/// Moves what `drop` has that `keep` lacks (meaning, mnemonic, answers, mix-ups) onto `keep`, then deletes `drop`.
+fn fold_card(conn: &Connection, keep: &str, drop: &str) -> Result<(), String> {
+    let run = |sql: &str| conn.execute(sql, params![keep, drop]).map(|_| ()).map_err(|e| e.to_string());
+    run("UPDATE review_items SET
+           detail = (SELECT detail FROM review_items WHERE id = ?2),
+           meaning_lang = (SELECT meaning_lang FROM review_items WHERE id = ?2)
+         WHERE id = ?1 AND COALESCE(detail, '') = ''")?;
+    run("UPDATE review_items SET mnemonic = (SELECT mnemonic FROM review_items WHERE id = ?2)
+         WHERE id = ?1 AND COALESCE(mnemonic, '') = ''")?;
+    run("UPDATE review_answers SET review_item_id = ?1 WHERE review_item_id = ?2")?;
+    run("UPDATE review_answers SET chosen_item_id = ?1 WHERE chosen_item_id = ?2")?;
+    run("INSERT INTO review_confusions(review_item_id, confused_with_id, count, last_at)
+         SELECT ?1, confused_with_id, count, last_at FROM review_confusions WHERE review_item_id = ?2 AND confused_with_id != ?1
+         ON CONFLICT(review_item_id, confused_with_id) DO UPDATE SET count = count + excluded.count, last_at = MAX(last_at, excluded.last_at)")?;
+    run("INSERT INTO review_confusions(review_item_id, confused_with_id, count, last_at)
+         SELECT review_item_id, ?1, count, last_at FROM review_confusions WHERE confused_with_id = ?2 AND review_item_id != ?1
+         ON CONFLICT(review_item_id, confused_with_id) DO UPDATE SET count = count + excluded.count, last_at = MAX(last_at, excluded.last_at)")?;
+    delete_card(conn, drop)
 }
 
 #[tauri::command]
@@ -604,7 +690,7 @@ pub fn db_update_review_item(app: tauri::AppHandle, item: UpdateReviewItem) -> R
         if existing_id.is_some() {
             return Err(app_error("word_exists", content));
         }
-        conn.execute("UPDATE review_items SET content=?1 WHERE id=?2", params![content, item.id])
+        conn.execute("UPDATE review_items SET content=?1, lemma=NULL WHERE id=?2", params![content, item.id])
             .map_err(|e| e.to_string())?;
     }
     if let Some(language) = item.language {
@@ -654,11 +740,17 @@ pub(crate) async fn generate_detail_text(api_host: &str, api_key: &str, model: &
         "id" => "short Indonesian meaning, the way an Indonesian dictionary glosses it (e.g. 食べる → makan, 駅 → stasiun)".to_string(),
         _ => format!("short {} translation", explain_name),
     };
+    // 下げる and 下がる read almost alike in translation; the particle tells them apart.
+    let pair_rule = if language == "ja" {
+        "If it is a verb with a transitive/intransitive partner (下げる/下がる, 開ける/開く), start the meaning with its particle: (〜を) when transitive, (〜が) when intransitive.\n"
+    } else {
+        ""
+    };
     let prompt = format!(
         "You are a language learning assistant. For the {lang_name} word/phrase \"{content}\", provide a vocabulary card in this exact JSON format:\n\
         {{\"reading\": \"hiragana reading for Japanese (e.g., たべる for 食べる, しょくどう for 食堂), or IPA/romaji for non-Japanese\", \"meaning\": \"{meaning_hint}\", \"part_of_speech\": \"one of: {pos}\", \"example\": \"a natural example sentence in {lang_name}\", \"example_meaning\": \"{explain_name} translation of the example\"}}\n\
         Translate directly from {lang_name} into {explain_name}, not via another language.\n\
-        Return ONLY the JSON object, nothing else.",
+        {pair_rule}Return ONLY the JSON object, nothing else.",
         pos = PART_OF_SPEECH_CODES.join(", "),
     );
     let meaning_of = |raw: &str| {
@@ -698,4 +790,46 @@ pub async fn db_generate_detail(
     }
     .map_err(|e| e.to_string())?;
     Ok(text)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn forms_of_one_word_fold_into_the_strongest_card() {
+        let mut conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE review_items(id TEXT PRIMARY KEY, content TEXT UNIQUE, language TEXT, item_type TEXT, lemma TEXT,
+               fsrs_stability REAL, state TEXT, created_at INTEGER, detail TEXT, meaning_lang TEXT, mnemonic TEXT);
+             CREATE TABLE review_answers(review_item_id TEXT, chosen_item_id TEXT);
+             CREATE TABLE review_confusions(review_item_id TEXT, confused_with_id TEXT, count INTEGER, last_at INTEGER,
+               PRIMARY KEY (review_item_id, confused_with_id));
+             CREATE TABLE study_card(review_item_id TEXT);
+             INSERT INTO review_items(id, content, language, state, fsrs_stability, created_at, detail, meaning_lang) VALUES
+               ('a', '下がる', 'ja', 'new', NULL, 1, NULL, NULL),
+               ('b', '下がります', 'ja', 'review', 30.0, 2, 'to go down', 'en'),
+               ('c', '下げる', 'ja', 'review', 10.0, 3, 'to lower', 'en'),
+               ('d', 'x', 'ja', 'review', 5.0, 4, 'x', 'en');
+             INSERT INTO review_answers VALUES ('a', NULL), ('c', 'a');
+             INSERT INTO review_confusions VALUES ('c', 'a', 2, 5), ('c', 'b', 1, 9), ('a', 'd', 1, 1);
+             INSERT INTO study_card VALUES ('a');",
+        )
+        .unwrap();
+        let lemma = |w: &str| if w == "下がります" { "下がる".to_string() } else { w.to_string() };
+        assert_eq!(merge_duplicate_words(&mut conn, lemma).unwrap(), 1);
+        let ids: Vec<String> = conn
+            .prepare("SELECT id FROM review_items ORDER BY id").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().map(|r| r.unwrap()).collect();
+        assert_eq!(ids, vec!["b", "c", "d"], "the reviewed card stays, 下げる is another word");
+        let answers: i64 = conn.query_row("SELECT COUNT(*) FROM review_answers WHERE review_item_id = 'b' OR chosen_item_id = 'b'", [], |r| r.get(0)).unwrap();
+        assert_eq!(answers, 2);
+        let (count, last): (i64, i64) = conn
+            .query_row("SELECT count, last_at FROM review_confusions WHERE review_item_id = 'c' AND confused_with_id = 'b'", [], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap();
+        assert_eq!((count, last), (3, 9));
+        let moved: i64 = conn.query_row("SELECT count FROM review_confusions WHERE review_item_id = 'b' AND confused_with_id = 'd'", [], |r| r.get(0)).unwrap();
+        assert_eq!(moved, 1);
+        assert_eq!(conn.query_row("SELECT COUNT(*) FROM study_card", [], |r| r.get::<_, i64>(0)).unwrap(), 0);
+    }
 }

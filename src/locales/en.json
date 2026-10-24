@@ -123,6 +123,7 @@
   "cardState.relearning": "Relearning",
   "cardState.review": "Review",
   "chat.addToCards": "Add to cards",
+  "chat.alreadyInCardsAs": "Already in your cards as {word}",
   "chat.analysisFailed": "Couldn't analyze the grammar:",
   "chat.analyzeGrammar": "Analyze grammar",
   "chat.analyzing": "analyzing…",

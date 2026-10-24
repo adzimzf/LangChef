@@ -200,13 +200,16 @@ struct Candidate {
 fn load_candidates(conn: &Connection, card: &ReviewItem) -> Result<Vec<Candidate>, String> {
     // Only meanings in the learner's language: options in one question never mix languages.
     // Words get wrong options from words, grammar from grammar.
+    // Another form or spelling of the same word (下がります for 下がる, さげる for 下げる) is never a wrong option.
     let mut stmt = conn
         .prepare(&format!(
             "SELECT id, content, {}, level FROM review_items
-             WHERE COALESCE(language, '') = COALESCE(?1, '') AND id != ?2 AND COALESCE(item_type, 'word') = ?3",
+             WHERE COALESCE(language, '') = COALESCE(?1, '') AND id != ?2 AND COALESCE(item_type, 'word') = ?3
+               AND COALESCE(lemma, content) != COALESCE((SELECT COALESCE(lemma, content) FROM review_items WHERE id = ?2), '')",
             effective_detail_sql("")
         ))
         .map_err(|e| e.to_string())?;
+    let reading = if card.is_grammar() { String::new() } else { parse_detail(card.detail.as_deref()).reading };
     let rows = stmt
         .query_map(params![card.language, card.id, card.item_type], |row| {
             let raw: Option<String> = row.get(2)?;
@@ -219,7 +222,10 @@ fn load_candidates(conn: &Connection, card: &ReviewItem) -> Result<Vec<Candidate
             })
         })
         .map_err(|e| e.to_string())?;
-    Ok(rows.filter_map(|r| r.ok()).collect())
+    Ok(rows
+        .filter_map(|r| r.ok())
+        .filter(|c| reading.is_empty() || (c.detail.reading != reading && c.content != reading))
+        .collect())
 }
 
 /// How often each other card was mixed up with this one, in either direction.
@@ -1566,7 +1572,7 @@ mod tests {
         conn.execute_batch(
             "CREATE TABLE app_settings(key TEXT PRIMARY KEY, value TEXT);
              CREATE TABLE review_items(id TEXT PRIMARY KEY, content TEXT, language TEXT, detail TEXT, draft_detail TEXT, meaning_lang TEXT DEFAULT 'en',
-               item_type TEXT DEFAULT 'word', level TEXT);
+               item_type TEXT DEFAULT 'word', level TEXT, lemma TEXT);
              CREATE TABLE review_confusions(review_item_id TEXT, confused_with_id TEXT, count INTEGER, last_at INTEGER);
              INSERT INTO review_items(id, content, language, detail, draft_detail) VALUES
                ('a', '散歩', 'ja', NULL, '{\"reading\":\"さんぽ\",\"meaning\":\"walk\"}'),
@@ -1611,6 +1617,23 @@ mod tests {
         let mut meanings: Vec<String> = cands.iter().map(|x| x.detail.meaning.clone()).filter(|m| !m.is_empty()).collect();
         meanings.sort();
         assert_eq!(meanings, vec!["air".to_string(), "buku".to_string()]);
+    }
+
+    #[test]
+    fn other_forms_of_the_word_are_never_options() {
+        let conn = deck();
+        conn.execute_batch(
+            "INSERT INTO review_items(id, content, language, detail, lemma) VALUES
+               ('f', '下がる', 'ja', 'to go down', '下がる'),
+               ('g', '下がります', 'ja', 'to drop', '下がる'),
+               ('h', 'さがる', 'ja', 'to decrease', 'さがる');",
+        )
+        .unwrap();
+        let c = card("f", "下がる", "review", Some(r#"{"reading":"さがる","meaning":"to go down"}"#));
+        let ids: Vec<String> = load_candidates(&conn, &c).unwrap().into_iter().map(|x| x.id).collect();
+        assert!(!ids.contains(&"g".to_string()), "another form of the word");
+        assert!(!ids.contains(&"h".to_string()), "the word in kana");
+        assert!(ids.contains(&"b".to_string()));
     }
 
     #[test]
