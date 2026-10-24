@@ -275,15 +275,10 @@ export default function Reading() {
     setError('')
     setPhase('loading')
 
-    const targetWords = reviewItems
-      .filter(item => !item.language || item.language === language)
-      .slice(0, 20)
-      .map(item => item.content)
-
     let readingText: ReadingText
     try {
       readingText = await invoke<ReadingText>('fetch_reading_text', {
-        apiHost, apiKey, model, language, level, targetWords,
+        apiHost, apiKey, model, language, level,
       })
     } catch (e) {
       setError(errorWithDetail(e))

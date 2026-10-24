@@ -205,33 +205,185 @@ async fn try_fetch_rss(language: &str) -> Option<(String, String)> {
     Some(articles[idx].clone())
 }
 
+/// What the questions ask at `level`, after the JLPT reading question types. Told only
+/// "who, what, why, how", models write questions whose answer is a phrase copied from the text.
+fn question_style(level: &str) -> &'static str {
+    match level {
+        "N5" | "N4" | "A1" | "A2" => "Ask about facts stated in the text (who, what, where, when, what someone did). \
+            Answers may be short phrases from the text.",
+        "N3" | "B1" => "At most half the questions may ask for a fact stated in one sentence. The others must need \
+            the reader to connect two parts of the text: a reason or cause, what led to something, how something changed, \
+            or what a word like これ/それ/その refers to. Their answer must be put together in the reader's own words, \
+            not copied from one sentence.",
+        "N2" | "N1" | "B2" => "No question may be answered by copying a phrase from the text. Ask about: the reason or \
+            cause behind something, what a demonstrative (これ/それ/その…) or an expression refers to, what is implied but \
+            not said, how the writer feels about something or what they want to say, and the main point of a paragraph \
+            or of the whole text. Answers must summarize or infer in the reader's own words.",
+        _ => "Ask about facts, reasons and the main idea of the text.",
+    }
+}
+
+/// How many questions may have an answer copied straight from the text.
+fn literal_question_limit(level: &str, n: usize) -> usize {
+    match level {
+        "N5" | "N4" | "A1" | "A2" => n,
+        "N3" | "B1" => n / 2,
+        _ => 0,
+    }
+}
+
 /// The rules for comprehension questions, for an AI passage and a news article alike.
-fn question_rules(lang_name: &str, n: usize) -> String {
+fn question_rules(lang_name: &str, level: &str, n: usize) -> String {
     format!(
-        "{n} comprehension questions: answerable from the text only; answers in {lang_name}; \
-        vary types (who, what, why, how)."
+        "{n} comprehension questions: answerable from the text only; questions and answers in {lang_name}, \
+        worded at {level} level. Word each question differently from the sentence it is about — do not \
+        reuse the text's own phrasing. {}",
+        question_style(level)
     )
+}
+
+/// Whether an answer can be found word for word in the passage, ignoring spaces and punctuation.
+fn is_copied_answer(answer: &str, passage: &str) -> bool {
+    let norm = |s: &str| s.chars()
+        .filter(|c| !c.is_whitespace() && !c.is_ascii_punctuation() && !"。、！？「」『』（）・…".contains(*c))
+        .collect::<String>();
+    let answer = norm(answer);
+    answer.chars().count() >= 4 && norm(passage).contains(&answer)
+}
+
+/// How many of the learner's words a passage is asked to use.
+const READING_TARGET_WORDS: usize = 12;
+
+/// A fresh random sample, in random order, of the learner's word cards in `language` for each
+/// passage. With no topic given, these and the level's patterns are what make passages differ.
+fn pick_reading_target_words(conn: &rusqlite::Connection, language: &str) -> Vec<String> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT content FROM review_items
+         WHERE item_type = 'word' AND (language = ?1 OR language IS NULL OR language = '')
+         ORDER BY RANDOM() LIMIT ?2",
+    ) else { return Vec::new() };
+    stmt.query_map(params![language, READING_TARGET_WORDS as i64], |r| r.get::<_, String>(0))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+}
+
+/// How many recent passage titles the model is told to stay away from.
+const RECENT_TITLES: usize = 8;
+
+/// Titles of the learner's latest passages in `language`, newest first, so a new one is about something else.
+fn recent_reading_titles(conn: &rusqlite::Connection, language: &str) -> Vec<String> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT title FROM reading_sessions WHERE language = ?1 AND title != '' ORDER BY id DESC LIMIT ?2",
+    ) else { return Vec::new() };
+    stmt.query_map(params![language, RECENT_TITLES as i64], |r| r.get::<_, String>(0))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
+}
+
+const PARAGRAPH_BREAK: &str = "\n\n";
+/// Sentences per paragraph when a passage arrives as one block.
+const SENTENCES_PER_PARAGRAPH: usize = 3;
+
+/// Splits a passage into short paragraphs, which is easier to read on a phone than one block.
+/// Keeps the paragraphs the text already has; a text in one block (a news article, or a model
+/// that ignored the instruction) is broken every few sentences, never leaving one sentence alone at the end.
+fn paragraphize(text: &str, language: &str) -> String {
+    let existing: Vec<&str> = text.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+    if existing.len() > 1 {
+        return existing.join(PARAGRAPH_BREAK);
+    }
+    let sentences = crate::breakdown::split_sentences(text);
+    if sentences.len() <= SENTENCES_PER_PARAGRAPH + 1 {
+        return text.trim().to_string();
+    }
+    let joiner = if language == "ja" { "" } else { " " };
+    let mut groups: Vec<Vec<String>> = sentences.chunks(SENTENCES_PER_PARAGRAPH).map(<[String]>::to_vec).collect();
+    if groups.len() > 1 && groups.last().is_some_and(|g| g.len() == 1) {
+        let last = groups.pop().unwrap_or_default();
+        if let Some(prev) = groups.last_mut() { prev.extend(last); }
+    }
+    groups.iter().map(|g| g.join(joiner)).collect::<Vec<_>>().join(PARAGRAPH_BREAK)
+}
+
+/// How many of the level's grammar patterns a passage must use.
+const READING_LEVEL_PATTERNS: usize = 4;
+
+/// What a passage at `level` reads like. Told only "match N3", models write N5-style ます
+/// sentences, so this sets the floor as well as the ceiling. No example words: the model takes
+/// them as the subject and writes about them every time.
+fn level_style(level: &str) -> &'static str {
+    match level {
+        "N5" => "Polite です/ます form, short simple sentences, basic everyday words; kanji only for the most common N5 words.",
+        "N4" => "Polite form, sentences joined with て-form, から, けど, たら and simple relative clauses; common N4 kanji words.",
+        "N3" => "Written like a short blog post or column, in plain form (だ/である) or a mix with polite form. \
+                 Most sentences join two or three clauses with relative clauses, ので, のに, ために, ように. \
+                 Use N3 vocabulary written in kanji. \
+                 It must NOT read like a beginner text made of short です/ます sentences.",
+        "N2" => "Written like a newspaper feature or opinion column, in plain form (だ/である). \
+                 Long sentences with embedded clauses, abstract N2 vocabulary in kanji, \
+                 and connectives such as 一方で, にもかかわらず, ことから. It must NOT read like a beginner or N3 text.",
+        "N1" => "Written like an editorial or essay, in plain form (である), with a clear line of argument, nuanced and abstract \
+                 vocabulary, formal written connectives and advanced grammar. Native-level, no simplification.",
+        "A1" => "Very short simple sentences in the present, the most common everyday words.",
+        "A2" => "Short sentences with common connectives (dan, tetapi, karena), past and future with sudah/akan.",
+        "B1" => "Connected paragraphs with subordinate clauses, the me-/di- verb forms and everyday vocabulary beyond basics.",
+        "B2" => "Written like a magazine or news feature: complex sentences, abstract and formal vocabulary.",
+        _ => "",
+    }
+}
+
+/// A random handful of grammar patterns at `level` (bundled originals and the learner's own),
+/// for the passage to use, so it is written at the level and not below it.
+fn pick_level_patterns(conn: &rusqlite::Connection, language: &str, level: &str) -> Vec<String> {
+    let Ok(mut stmt) = conn.prepare(
+        "SELECT pattern FROM grammar_items
+         WHERE language = ?1 AND level = ?2 AND source_id IS NULL
+         GROUP BY pattern ORDER BY RANDOM() LIMIT ?3",
+    ) else { return Vec::new() };
+    stmt.query_map(params![language, level, READING_LEVEL_PATTERNS as i64], |r| r.get::<_, String>(0))
+        .map(|rows| rows.filter_map(Result::ok).collect())
+        .unwrap_or_default()
 }
 
 /// Writes a passage only, so the learner can start reading sooner; its questions come from
 /// `generate_reading_questions` while they read. Furigana is not asked for: Lindera adds it
 /// afterwards, and having the model write it roughly doubled the answer and the wait.
+#[allow(clippy::too_many_arguments)]
 async fn llm_generate_reading_text(
     api_host: &str, api_key: &str, model: &str,
     language: &str, level: &str,
     target_words: &[String],
+    level_patterns: &[String],
+    recent_titles: &[String],
 ) -> Result<(String, String), String> {
     let lang_name = lang_name(language);
+    let recent_note = if !recent_titles.is_empty() {
+        format!("The learner recently read passages titled: {}. \
+                Write about a clearly different subject — not the same theme in other words.\n",
+                recent_titles.join(" / "))
+    } else { String::new() };
     let (min, max) = level_text_char_range(level);
+    let style = level_style(level);
+    let style_note = if style.is_empty() { String::new() } else { format!("Style for {level}: {style}\n") };
+    let grammar_note = if !level_patterns.is_empty() {
+        format!("Use each of these {level} grammar patterns at least once: {}.\n", level_patterns.join(", "))
+    } else { String::new() };
     let vocab_note = if !target_words.is_empty() {
-        let words = target_words.iter().take(20).cloned().collect::<Vec<_>>().join(", ");
+        let words = target_words.join(", ");
         format!("The learner is studying these vocabulary words: {words}.\n\
-                Naturally incorporate as many as fit the passage — do not force words that don't fit.\n")
+                Choose the subject of the passage yourself, one that several of these words suggest, \
+                and use the ones that fit naturally — do not force words that don't fit.\n")
     } else { String::new() };
     let prompt = format!(
-        "Write a {level}-level {lang_name} reading passage on a random everyday topic.\n\
-        Length: {min}–{max} characters. Vocabulary and grammar must match {level}. Plain text, no furigana or markup.\n\
+        "Write a {level}-level {lang_name} reading passage.\n\
+        The learner is at {level}: the passage should stretch them at that level, not be easier. \
+        Vocabulary and grammar should be typical of {level}, without going above it.\n\
+        {style_note}\
+        {grammar_note}\
+        Length: {min}–{max} characters. Plain text, no furigana or markup.\n\
+        Split the body into short paragraphs of 2–4 sentences, one idea each, separated by a blank line (\\n\\n).\n\
         {vocab_note}\
+        {recent_note}\
         Return ONLY valid JSON (no markdown fences): {{\"title\": \"...\", \"body\": \"...\"}}",
     );
     let raw = complete_prompt(api_host, api_key, model, prompt).await?;
@@ -251,10 +403,10 @@ async fn llm_generate_reading_text(
 
 #[tauri::command]
 pub async fn fetch_reading_text(
+    app: tauri::AppHandle,
     state: tauri::State<'_, Mutex<Option<furigana::FuriganaAnnotator>>>,
     api_host: String, api_key: String, model: String,
     language: String, level: String,
-    target_words: Vec<String>,
 ) -> Result<ReadingText, String> {
     let (min, max) = level_text_char_range(&level);
     let (title, raw_body, source) = match try_fetch_rss(&language).await {
@@ -267,14 +419,28 @@ pub async fn fetch_reading_text(
             (t, truncate_at_sentence_boundary(&b, max), src)
         }
         _ => {
-            let (t, b) = llm_generate_reading_text(&api_host, &api_key, &model, &language, &level, &target_words).await?;
+            let (target_words, level_patterns, recent_titles) = {
+                let conn = open_db(&app)?;
+                (
+                    pick_reading_target_words(&conn, &language),
+                    pick_level_patterns(&conn, &language, &level),
+                    recent_reading_titles(&conn, &language),
+                )
+            };
+            let (t, b) = llm_generate_reading_text(
+                &api_host, &api_key, &model, &language, &level, &target_words, &level_patterns, &recent_titles,
+            ).await?;
             (t, b, "ai".to_string())
         }
     };
-    let plain_body = furigana::strip_existing_furigana(&raw_body);
+    let plain_body = paragraphize(&furigana::strip_existing_furigana(&raw_body), &language);
     let body = if language == "ja" {
         match state.lock() {
-            Ok(mut g) => g.as_mut().map(|a| a.annotate(&plain_body)).unwrap_or_else(|| plain_body.clone()),
+            Ok(mut g) => match g.as_mut() {
+                // Per paragraph, so the tokenizer can't lose the breaks between them.
+                Some(a) => plain_body.split(PARAGRAPH_BREAK).map(|p| a.annotate(p)).collect::<Vec<_>>().join(PARAGRAPH_BREAK),
+                None => plain_body.clone(),
+            },
             Err(_) => plain_body.clone(),
         }
     } else {
@@ -294,18 +460,43 @@ pub async fn generate_reading_questions(
     session_id: Option<i64>,
 ) -> Result<Vec<ReadingQuestion>, String> {
     let lang_name = lang_name(&language);
-    let rules = question_rules(lang_name, reading_question_count(&level));
+    let n = reading_question_count(&level);
+    let rules = question_rules(lang_name, &level, n);
     let prompt = format!(
         "You are a {lang_name} teacher. For this {level}-level passage, write {rules}\n\
         Return ONLY a JSON array (no markdown): [{{\"question\": \"...\", \"answer_hint\": \"...\"}}]\n\n\
         Passage:\n{plain_body}",
     );
-    let raw = complete_prompt(&api_host, &api_key, &model, prompt).await?;
-    let cleaned = json_part(&raw);
-    let questions = serde_json::from_str::<Vec<ReadingQuestion>>(cleaned)
-        .map_err(|_| app_error("api_bad_response", cleaned))?;
-    if questions.is_empty() {
-        return Err(app_error("api_bad_response", "no questions"));
+    let ask = |prompt: String| {
+        let (api_host, api_key, model) = (&api_host, &api_key, &model);
+        async move {
+            let raw = complete_prompt(api_host, api_key, model, prompt).await?;
+            let cleaned = json_part(&raw);
+            let questions = serde_json::from_str::<Vec<ReadingQuestion>>(cleaned)
+                .map_err(|_| app_error("api_bad_response", cleaned))?;
+            if questions.is_empty() {
+                return Err(app_error("api_bad_response", "no questions"));
+            }
+            Ok(questions)
+        }
+    };
+    let copied = |qs: &[ReadingQuestion]| -> Vec<String> {
+        qs.iter().filter(|q| is_copied_answer(&q.answer_hint, &plain_body)).map(|q| q.question.clone()).collect()
+    };
+
+    let mut questions = ask(prompt.clone()).await?;
+    let literal = copied(&questions);
+    // Too many answers copied straight from the text: ask once more, naming them. Keep the
+    // first set if the retry fails or is no better.
+    if literal.len() > literal_question_limit(&level, n) {
+        let retry = format!(
+            "{prompt}\n\nYour previous questions were too easy for {level}: these can be answered by copying a phrase \
+            from the text: {}. Write a new set that follows the rules above.",
+            literal.join(" / ")
+        );
+        if let Ok(better) = ask(retry).await {
+            if copied(&better).len() < literal.len() { questions = better; }
+        }
     }
     if let Some(id) = session_id {
         let json = serde_json::to_string(&questions).map_err(|e| e.to_string())?;
@@ -511,6 +702,104 @@ mod tests {
 
     fn ans(result: &str, retries: u32) -> SavedAnswer {
         SavedAnswer { question_index: 0, user_answer: String::new(), result: result.into(), retries, feedback: String::new() }
+    }
+
+    #[test]
+    fn target_words_are_a_random_sample_of_word_cards_in_the_language() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::prepare_db(&conn).unwrap();
+        let add = |content: &str, language: &str, item_type: &str| {
+            conn.execute(
+                "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, language, item_type, created_at)
+                 VALUES (?1, ?1, -1.0, 0, 0, 'new', 0, 0, ?2, ?3, 0)",
+                params![content, language, item_type],
+            ).unwrap();
+        };
+        for i in 0..40 {
+            add(&format!("ja{i}"), "ja", "word");
+        }
+        add("kata", "id", "word");
+        add("〜ている", "ja", "grammar");
+
+        let first = pick_reading_target_words(&conn, "ja");
+        assert_eq!(first.len(), READING_TARGET_WORDS);
+        assert!(first.iter().all(|w| w.starts_with("ja")), "{first:?}");
+        let differs = (0..10).any(|_| pick_reading_target_words(&conn, "ja") != first);
+        assert!(differs, "the same words came back every time");
+
+        // With exactly as many cards as are asked for, all come back, in a different order.
+        conn.execute("DELETE FROM review_items WHERE CAST(substr(content, 3) AS INTEGER) >= ?1", params![READING_TARGET_WORDS as i64]).unwrap();
+        let all = pick_reading_target_words(&conn, "ja");
+        assert_eq!(all.len(), READING_TARGET_WORDS);
+        let reordered = (0..10).any(|_| pick_reading_target_words(&conn, "ja") != all);
+        assert!(reordered, "the words came back in the same order every time");
+    }
+
+    #[test]
+    fn one_block_is_split_every_few_sentences() {
+        let text = "一。二。三。四。五。六。七。";
+        assert_eq!(paragraphize(text, "ja"), "一。二。三。\n\n四。五。六。七。");
+        assert_eq!(paragraphize("A satu. B dua. C tiga. D empat. E lima. F enam.", "id"),
+                   "A satu. B dua. C tiga.\n\nD empat. E lima. F enam.");
+    }
+
+    #[test]
+    fn existing_paragraphs_and_short_texts_are_kept() {
+        assert_eq!(paragraphize("一。二。\n三。\n\n\n四。", "ja"), "一。二。\n\n三。\n\n四。");
+        assert_eq!(paragraphize(" 一。二。三。四。 ", "ja"), "一。二。三。四。");
+        assert_eq!(paragraphize("「行く。」と言った。二。三。四。五。", "ja"), "「行く。」と言った。二。三。\n\n四。五。");
+    }
+
+    #[test]
+    fn copied_answers_are_found_ignoring_punctuation() {
+        let passage = "その人は半年かけて星を観察して、新しい星を発見しました。当時は懐中電灯もないから、夜の観察は大変でした。";
+        assert!(is_copied_answer("新しい星を発見しました。", passage));
+        assert!(!is_copied_answer("半年かけて星を観察して 新しい星を発見した", passage), "した ≠ しました");
+        assert!(is_copied_answer("観察して、新しい星を発見", passage));
+        assert!(!is_copied_answer("明かりがなくて暗かったから", passage));
+        assert!(!is_copied_answer("夜", passage), "too short to count");
+        assert!(is_copied_answer("went to the market", "Yesterday she went to the market."));
+    }
+
+    #[test]
+    fn higher_levels_allow_fewer_literal_questions() {
+        assert_eq!(literal_question_limit("N5", 3), 3);
+        assert_eq!(literal_question_limit("N3", 4), 2);
+        assert_eq!(literal_question_limit("N2", 5), 0);
+        assert_eq!(literal_question_limit("N1", 5), 0);
+    }
+
+    #[test]
+    fn recent_titles_are_the_latest_in_the_language() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::prepare_db(&conn).unwrap();
+        let add = |title: &str, language: &str| {
+            conn.execute(
+                "INSERT INTO reading_sessions (language, level, title, body, plain_body, source) VALUES (?2, 'N3', ?1, '', '', 'ai')",
+                params![title, language],
+            ).unwrap();
+        };
+        for i in 0..10 { add(&format!("t{i}"), "ja"); }
+        add("judul", "id");
+        let titles = recent_reading_titles(&conn, "ja");
+        assert_eq!(titles.len(), RECENT_TITLES);
+        assert_eq!(titles.first().map(String::as_str), Some("t9"));
+        assert!(!titles.contains(&"judul".to_string()) && !titles.contains(&"t0".to_string()));
+    }
+
+    #[test]
+    fn level_patterns_come_from_the_level_without_repeats() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::prepare_db(&conn).unwrap();
+        let n3: std::collections::HashSet<String> = conn
+            .prepare("SELECT pattern FROM grammar_items WHERE language = 'ja' AND level = 'N3'").unwrap()
+            .query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+
+        let picked = pick_level_patterns(&conn, "ja", "N3");
+        assert_eq!(picked.len(), READING_LEVEL_PATTERNS);
+        assert!(picked.iter().all(|p| n3.contains(p)), "{picked:?}");
+        assert_eq!(picked.iter().collect::<std::collections::HashSet<_>>().len(), picked.len());
+        assert!(pick_level_patterns(&conn, "ja", "N9").is_empty());
     }
 
     #[test]
