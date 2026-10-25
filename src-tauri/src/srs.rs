@@ -1,6 +1,6 @@
 use crate::db::open_db;
 use crate::furigana::{lemma_of, FuriganaAnnotator};
-use crate::grammar_review::{enroll_for_today, grammar_slots, new_grammar_kind, ITEM_GRAMMAR};
+use crate::grammar_review::{enroll_for_today, grammar_slots, new_grammar_kind, GRAMMAR_REVIEWS_PER_DAY, ITEM_GRAMMAR};
 use crate::locale::effective_detail_sql;
 use crate::quiz::{cards_missing_meaning, clear_task, issue_task, QuizTask};
 use rusqlite::params;
@@ -959,14 +959,16 @@ pub(crate) fn top_up_queue(
     max_review: i64,
     max_new: i64,
 ) -> Result<(), String> {
-    let (n_review, n_new): (i64, i64) = conn.query_row(
+    let (n_review, n_new, n_grammar_review): (i64, i64, i64) = conn.query_row(
         "SELECT
-            COALESCE(SUM(CASE WHEN kind='review' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN kind='new'    THEN 1 ELSE 0 END), 0)
-         FROM study_card WHERE study_id = ?1",
+            COALESCE(SUM(CASE WHEN sc.kind='review' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN sc.kind='new'    THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN sc.kind='review' AND r.item_type = 'grammar' THEN 1 ELSE 0 END), 0)
+         FROM study_card sc LEFT JOIN review_items r ON r.id = sc.review_item_id
+         WHERE sc.study_id = ?1",
         params![study_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).unwrap_or((0, 0));
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap_or((0, 0, 0));
 
     let mut review_slots = (max_review - n_review).max(0);
     let mut new_slots = (max_new - n_new).max(0);
@@ -995,6 +997,14 @@ pub(crate) fn top_up_queue(
         .filter_map(|r| r.ok())
         .collect();
 
+    // Due grammar gets up to GRAMMAR_REVIEWS_PER_DAY of the review slots before words take the rest.
+    let due_grammar = candidates
+        .iter()
+        .filter(|(_, state, item_type, _)| item_type == ITEM_GRAMMAR && classify_kind(state) == "review")
+        .count() as i64;
+    let mut grammar_review_slots = (GRAMMAR_REVIEWS_PER_DAY - n_grammar_review).max(0).min(due_grammar).min(review_slots);
+    review_slots -= grammar_review_slots;
+
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut insert_stmt = conn.prepare(
         "INSERT INTO study_card (study_id, review_item_id, kind, status, create_time, update_time)
@@ -1010,6 +1020,7 @@ pub(crate) fn top_up_queue(
             kind = new_grammar_kind(placement);
         }
         let slots = match kind {
+            "review" if item_type == ITEM_GRAMMAR => &mut grammar_review_slots,
             "review" => &mut review_slots,
             "new" => &mut new_slots,
             "grammar_new" => &mut grammar_new_slots,
