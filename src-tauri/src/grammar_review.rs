@@ -710,7 +710,7 @@ mod tests {
              CREATE TABLE review_items(id TEXT PRIMARY KEY, content TEXT UNIQUE NOT NULL, EF REAL, I INTEGER, R INTEGER,
                state TEXT, step INTEGER, lapse_count INTEGER, next_review INTEGER, language TEXT, fsrs_stability REAL,
                fsrs_difficulty REAL, created_at INTEGER, item_type TEXT NOT NULL DEFAULT 'word', grammar_id TEXT, level TEXT,
-               placement INTEGER NOT NULL DEFAULT 0);
+               placement INTEGER NOT NULL DEFAULT 0, lemma TEXT);
              CREATE TABLE study_card(study_id INTEGER, review_item_id TEXT, kind TEXT);
              CREATE TABLE review_answers(language TEXT, placement INTEGER, correct INTEGER, answered_at INTEGER);",
         )

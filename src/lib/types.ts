@@ -1,3 +1,6 @@
+/** The card a word was saved as: an existing card for the same word, or a new one in dictionary form. */
+export type SavedWord = { content: string; existed: boolean }
+
 export type ReviewItem = {
   id: string
   content: string

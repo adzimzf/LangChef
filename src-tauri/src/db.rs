@@ -211,6 +211,8 @@ pub fn prepare_db(conn: &Connection) -> Result<(), String> {
     );
     // Language of the meaning in `detail`; a meaning in another language than the learner's counts as empty.
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN meaning_lang TEXT NOT NULL DEFAULT 'en'", []);
+    // Dictionary form of a Japanese word (下がります → 下がる): one card per word, and never a wrong option for itself.
+    let _ = conn.execute("ALTER TABLE review_items ADD COLUMN lemma TEXT", []);
     // Language grammar explanations are written in, and whether an AI translated them.
     let _ = conn.execute("ALTER TABLE grammar_items ADD COLUMN explain_lang TEXT NOT NULL DEFAULT 'en'", []);
     let _ = conn.execute("ALTER TABLE grammar_items ADD COLUMN ai_translated INTEGER NOT NULL DEFAULT 0", []);

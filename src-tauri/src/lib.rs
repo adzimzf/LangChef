@@ -208,6 +208,7 @@ pub fn run() {
             words::db_get_due_review_items,
             words::db_get_difficult_and_known_words,
             words::db_delete_review_item,
+            words::db_merge_duplicate_words,
             words::db_update_review_item,
             words::db_import_review_items,
             words::db_generate_detail,

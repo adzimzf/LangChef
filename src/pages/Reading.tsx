@@ -19,6 +19,7 @@ import type {
   ReadingSessionSummary,
   ReadingOverview,
   ReviewItem,
+  SavedWord,
 } from '../lib/types'
 import { t, lang as explainLang, errorText, errorWithDetail, formatDay, languageName } from '../lib/i18n'
 import { TARGET_LANGUAGES } from '../lib/languages'
@@ -409,10 +410,11 @@ export default function Reading() {
     loadHome()
   }
 
-  async function addWordFromSheet(content: string, detail: string | null) {
-    await invoke('db_upsert_review_item', { content: content.toLowerCase(), language: text?.language ?? null })
-    await keepSheetMeaning(content, detail)
+  async function addWordFromSheet(content: string, detail: string | null): Promise<SavedWord> {
+    const saved = await invoke<SavedWord>('db_upsert_review_item', { content: content.toLowerCase(), language: text?.language ?? null })
+    await keepSheetMeaning(saved.content, detail)
     loadReviewItems()
+    return saved
   }
 
   function tapWord(word: string, base: string) {

@@ -1,4 +1,5 @@
 use crate::db::open_db;
+use crate::furigana::{lemma_of, FuriganaAnnotator};
 use crate::grammar_review::{enroll_for_today, grammar_slots, new_grammar_kind, ITEM_GRAMMAR};
 use crate::locale::effective_detail_sql;
 use crate::quiz::{cards_missing_meaning, clear_task, issue_task, QuizTask};
@@ -671,17 +672,49 @@ fn schedule_fsrs(
     }
 }
 
+/// The card a word was saved as: an existing card for the same word, or a new one in dictionary form.
+#[derive(Serialize)]
+pub struct SavedWord {
+    pub content: String,
+    pub existed: bool,
+}
+
 #[tauri::command]
-pub fn db_upsert_review_item(app: tauri::AppHandle, content: String, language: Option<String>) -> Result<(), String> {
+pub fn db_upsert_review_item(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<Option<FuriganaAnnotator>>>,
+    content: String,
+    language: Option<String>,
+) -> Result<SavedWord, String> {
     let conn = open_db(&app)?;
+    // Left empty while the dictionary isn't loaded; db_merge_duplicate_words fills it in later.
+    let lemma = if language.as_deref() == Some("ja") { lemma_of(&state, &content) } else { None };
+    let content = lemma.clone().unwrap_or_else(|| content.trim().to_string());
+    // Same word already in the deck: the exact text, or another form of it (下がります for 下がる).
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT content FROM review_items
+             WHERE content = ?1 OR (lemma = ?1 AND language = 'ja' AND ?2 = 'ja' AND COALESCE(item_type, 'word') = 'word')
+             ORDER BY content = ?1 DESC LIMIT 1",
+            params![content, language],
+            |r| r.get(0),
+        )
+        .ok();
+    if let Some(existing) = existing {
+        conn.execute(
+            "UPDATE review_items SET language = COALESCE(?2, language) WHERE content = ?1",
+            params![existing, language],
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(SavedWord { content: existing, existed: true });
+    }
     let id = uuid::Uuid::new_v4().to_string();
     conn.execute(
-        "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, language, fsrs_stability, fsrs_difficulty, created_at)
-         VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, NULL, NULL, CAST(strftime('%s', 'now') * 1000 AS INTEGER))
-         ON CONFLICT(content) DO UPDATE SET language=COALESCE(excluded.language, review_items.language)",
-        params![id, content, language],
+        "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, language, fsrs_stability, fsrs_difficulty, created_at, lemma)
+         VALUES (?1, ?2, -1.0, 0, 0, 'new', 0, 0, NULL, ?3, NULL, NULL, CAST(strftime('%s', 'now') * 1000 AS INTEGER), ?4)",
+        params![id, content, language, lemma],
     ).map_err(|e| e.to_string())?;
-    Ok(())
+    Ok(SavedWord { content, existed: false })
 }
 
 #[tauri::command]
