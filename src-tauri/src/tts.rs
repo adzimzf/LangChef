@@ -1,48 +1,48 @@
-//! Offline Japanese voice: speech made on the device with piper-plus (VITS model, ONNX Runtime), so the JLPT
-//! listening section has real audio on every platform, including Android where the webview has no Japanese voice.
+//! Offline Japanese voice: speech made on the device with VOICEVOX CORE, so the JLPT listening section has real audio
+//! on every platform, including Android where the webview has no Japanese voice.
 //!
 //! Nothing is bundled and nothing loads at start-up. "Download" (`tts_install`) fetches, into `<app data>/tts`:
-//! - the voice model (Tsukuyomi-chan, piper-plus `zs-v1`, pinned Hugging Face commit);
-//! - the NAIST-JDIC source, compiled on the device into the dictionary jpreprocess reads (like the furigana dictionary);
-//! - on desktop, ONNX Runtime from Microsoft's release. Android has it in the APK (`onnxruntime-android` in Gradle).
+//! - the voice model: VOICEVOX Nemo (`n0.vvm`), plain adult voices made for reading aloud, men and women;
+//! - the Open JTalk dictionary (reading and pitch accent);
+//! - VOICEVOX's build of ONNX Runtime. VOICEVOX models are encrypted and only this build can open them, so it is
+//!   downloaded on Android too, not taken from the APK.
 //!
-//! ONNX Runtime is always loaded at run time (`ort` `load-dynamic`): a missing or broken runtime is an error code, never a
+//! ONNX Runtime is always loaded at run time (`load-onnxruntime`): a missing or broken runtime is an error code, never a
 //! crash, and the page falls back to the device voice or the script.
 
 use crate::locale::app_error;
-use piper_plus::{PiperVoice, SynthesisParams};
 use serde::Serialize;
 use std::fs;
 use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::Mutex;
 use tauri::{Emitter, Manager};
+use voicevox_core::blocking::{Onnxruntime, OpenJtalk, Synthesizer, VoiceModelFile};
+use voicevox_core::StyleId;
 
-// The zs-v1 export: it sounded better than `tsukuyomi-chan-6lang-fp16` (piper-plus's registry pick), which was tried.
-const MODEL_URL: &str = "https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan/resolve/93c1fb6d67c29accc9ddf52326bb4582b1b52a3d/releases/zs-v1/tsukuyomi.onnx";
-const CONFIG_URL: &str = "https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan/resolve/93c1fb6d67c29accc9ddf52326bb4582b1b52a3d/releases/zs-v1/tsukuyomi.onnx.json";
-const DICT_URL: &str = "https://github.com/jpreprocess/naist-jdic/archive/refs/tags/v0.1.3.tar.gz";
-/// Matches the ONNX Runtime API that `ort` 2.0.0-rc.15 is built against, and `onnxruntime-android` in Gradle.
-const ORT_VERSION: &str = "1.31.1";
+/// Release of `VOICEVOX/voicevox_vvm` the model comes from (VOICEVOX CORE 0.17 reads models 0.16–0.17).
+const MODEL_URL: &str = "https://github.com/VOICEVOX/voicevox_vvm/releases/download/0.17.0/n0.vvm";
+const DICT_URL: &str = "https://github.com/r9y9/open_jtalk/releases/download/v1.11.1/open_jtalk_dic_utf_8-1.11.tar.gz";
+/// VOICEVOX ONNX Runtime release; must match `Onnxruntime::LIB_RECOMMENDED_VERSION` of the `voicevox_core` tag in Cargo.toml.
+const ORT_VERSION: &str = "1.23.2";
 
-const MODEL_FILE: &str = "tsukuyomi.onnx";
-const CONFIG_FILE: &str = "tsukuyomi.onnx.json";
-/// The 6-language voice briefly used instead, deleted when this one is downloaded.
-const OLD_MODEL_FILES: [&str; 2] = ["tsukuyomi-6lang.onnx", "tsukuyomi-6lang.onnx.json"];
-const DICT_DIR: &str = "naist-jdic";
-/// Written last when the dictionary is complete, so a half-built one is never used.
-const DICT_DONE: &str = ".built";
+const MODEL_FILE: &str = "n0.vvm";
+const DICT_DIR: &str = "open_jtalk_dic_utf_8-1.11";
 const ORT_DIR: &str = "onnxruntime";
+/// What earlier versions (piper-plus) downloaded, deleted on install.
+const OLD_FILES: [&str; 5] = ["tsukuyomi.onnx", "tsukuyomi.onnx.json", "tsukuyomi-6lang.onnx", "tsukuyomi-6lang.onnx.json", "naist-jdic"];
+
+/// VOICEVOX Nemo styles (`voicevox_vvm` README): 女声1, 男声1, and 女声2 for lines without a speaker mark.
+const WOMAN: u32 = 10005;
+const MAN: u32 = 10001;
+const NARRATOR: u32 = 10007;
 
 /// Pause between the lines of a recording.
 const LINE_GAP_SECONDS: f32 = 0.55;
-/// Male lines are played slower than they were made, which lowers the pitch: the voice has one (female) speaker.
-/// Kept small (about 1.4 semitones): a bigger shift moves the formants too and sounds like a slowed-down tape.
-const MALE_PITCH: f32 = 0.92;
 
-/// The loaded voice, kept between recordings (loading takes a moment and ~200 MB).
+/// The loaded voice, kept between recordings (loading takes a moment).
 #[derive(Default)]
-pub struct TtsState(Mutex<Option<PiperVoice>>);
+pub struct TtsState(Mutex<Option<Synthesizer<OpenJtalk>>>);
 
 fn tts_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     Ok(app.path().app_data_dir().map_err(|e| e.to_string())?.join("tts"))
@@ -52,43 +52,38 @@ fn tts_dir(app: &tauri::AppHandle) -> Result<PathBuf, String> {
 // ONNX Runtime
 // ---------------------------------------------------------------------------
 
-/// Where Microsoft publishes ONNX Runtime for this desktop platform, and the library inside the archive.
-/// None on Android (it's in the APK) and where no build exists (Intel Macs since 1.2x, Windows not shipped).
-fn ort_download() -> Option<(String, &'static str)> {
-    let (platform, lib) = match (std::env::consts::OS, std::env::consts::ARCH) {
-        ("macos", "aarch64") => ("osx-arm64", "libonnxruntime.dylib"),
-        ("linux", "x86_64") => ("linux-x64", "libonnxruntime.so"),
-        ("linux", "aarch64") => ("linux-aarch64", "libonnxruntime.so"),
+/// VOICEVOX's ONNX Runtime archive for this platform. None where VOICEVOX publishes no build.
+fn ort_download() -> Option<String> {
+    let platform = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("android", "aarch64") => "android-arm64",
+        ("android", "x86_64") => "android-x64",
+        ("macos", "aarch64") => "osx-arm64",
+        ("macos", "x86_64") => "osx-x86_64",
+        ("linux", "x86_64") => "linux-x64",
+        ("linux", "aarch64") => "linux-arm64",
+        ("windows", "x86_64") => "win-x64",
         _ => return None,
     };
-    Some((
-        format!("https://github.com/microsoft/onnxruntime/releases/download/v{ORT_VERSION}/onnxruntime-{platform}-{ORT_VERSION}.tgz"),
-        lib,
+    Some(format!(
+        "https://github.com/VOICEVOX/onnxruntime-builder/releases/download/voicevox_onnxruntime-{ORT_VERSION}/voicevox_onnxruntime-{platform}-{ORT_VERSION}.tgz"
     ))
 }
 
 fn supported() -> bool {
-    cfg!(target_os = "android") || ort_download().is_some()
+    ort_download().is_some()
 }
 
-/// The ONNX Runtime library to load: by name on Android (found in the APK), else the downloaded copy.
-fn ort_library(dir: &Path) -> Option<PathBuf> {
-    if cfg!(target_os = "android") {
-        return Some(PathBuf::from("libonnxruntime.so"));
-    }
-    ort_download().map(|(_, lib)| dir.join(ORT_DIR).join(lib))
+/// The library file, named as VOICEVOX CORE expects it (`libvoicevox_onnxruntime.so.1.23.2`, `….so` on Android, …).
+fn ort_library(dir: &Path) -> PathBuf {
+    dir.join(ORT_DIR).join(Onnxruntime::LIB_RECOMMENDED_VERSIONED_FILENAME)
 }
 
-static ORT_LOADED: OnceLock<Result<(), String>> = OnceLock::new();
-
-/// Loads ONNX Runtime once. Must succeed before any piper-plus call: without it `ort` panics on first use.
-fn load_ort(dir: &Path) -> Result<(), String> {
-    ORT_LOADED
-        .get_or_init(|| {
-            let lib = ort_library(dir).ok_or_else(|| app_error("tts_unsupported", std::env::consts::OS))?;
-            ort::init_from(&lib).map(|_| ()).map_err(|e| app_error("tts_runtime_missing", e.to_string()))
-        })
-        .clone()
+/// Loads ONNX Runtime once per process (later calls return the loaded one).
+fn load_ort(dir: &Path) -> Result<&'static Onnxruntime, String> {
+    Onnxruntime::load_once()
+        .filename(ort_library(dir))
+        .perform()
+        .map_err(|e| app_error("tts_runtime_missing", e.to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -96,15 +91,19 @@ fn load_ort(dir: &Path) -> Result<(), String> {
 // ---------------------------------------------------------------------------
 
 fn model_ready(dir: &Path) -> bool {
-    dir.join(MODEL_FILE).is_file() && dir.join(CONFIG_FILE).is_file()
+    dir.join(MODEL_FILE).is_file()
 }
 
 fn dict_ready(dir: &Path) -> bool {
-    dir.join(DICT_DIR).join(DICT_DONE).is_file()
+    dir.join(DICT_DIR).join("sys.dic").is_file()
 }
 
 fn runtime_ready(dir: &Path) -> bool {
-    cfg!(target_os = "android") || ort_library(dir).is_some_and(|p| p.is_file())
+    ort_library(dir).is_file()
+}
+
+fn installed(dir: &Path) -> bool {
+    supported() && model_ready(dir) && dict_ready(dir) && runtime_ready(dir)
 }
 
 fn dir_size(dir: &Path) -> u64 {
@@ -134,11 +133,7 @@ pub struct TtsStatus {
 #[tauri::command]
 pub fn tts_status(app: tauri::AppHandle) -> Result<TtsStatus, String> {
     let dir = tts_dir(&app)?;
-    Ok(TtsStatus {
-        supported: supported(),
-        installed: supported() && model_ready(&dir) && dict_ready(&dir) && runtime_ready(&dir),
-        bytes: dir_size(&dir),
-    })
+    Ok(TtsStatus { supported: supported(), installed: installed(&dir), bytes: dir_size(&dir) })
 }
 
 /// Progress of `tts_install`, sent as the `tts-progress` event. `stage`: voice, dictionary, building, runtime, checking.
@@ -179,59 +174,34 @@ fn download(url: &str, dest: &Path, progress: &dyn Fn(u8)) -> Result<(), String>
     fs::rename(&part, dest).map_err(|e| e.to_string())
 }
 
-/// Compiles the NAIST-JDIC source (MeCab CSV) into the dictionary jpreprocess reads.
-fn build_dictionary(source_tgz: &Path, dir: &Path) -> Result<(), String> {
-    use lindera_core::dictionary_builder::DictionaryBuilder;
-    let work = dir.join("naist-jdic-src");
-    let _ = fs::remove_dir_all(&work);
-    fs::create_dir_all(&work).map_err(|e| e.to_string())?;
-    let tgz = fs::File::open(source_tgz).map_err(|e| e.to_string())?;
-    tar::Archive::new(flate2::read::GzDecoder::new(tgz))
-        .unpack(&work)
+/// Unpacks the dictionary archive (one `open_jtalk_dic_utf_8-1.11/` folder) into `dir`.
+fn extract_dictionary(tgz: &Path, dir: &Path) -> Result<(), String> {
+    let _ = fs::remove_dir_all(dir.join(DICT_DIR));
+    let file = fs::File::open(tgz).map_err(|e| e.to_string())?;
+    tar::Archive::new(flate2::read::GzDecoder::new(file))
+        .unpack(dir)
         .map_err(|e| app_error("tts_dictionary_failed", format!("extract: {e}")))?;
-    let source = fs::read_dir(&work)
-        .map_err(|e| e.to_string())?
-        .flatten()
-        .map(|e| e.path())
-        .find(|p| p.join("char.def").is_file())
-        .ok_or_else(|| app_error("tts_dictionary_failed", "char.def not found in the archive"))?;
-    let out = dir.join(DICT_DIR);
-    let _ = fs::remove_dir_all(&out);
-    let builder = jpreprocess_dictionary_builder::ipadic_builder::IpadicBuilder::new(Box::new(
-        jpreprocess_dictionary::serializer::jpreprocess::JPreprocessSerializer,
-    ));
-    builder
-        .build_dictionary(&source, &out)
-        .map_err(|e| app_error("tts_dictionary_failed", e.to_string()))?;
-    let _ = fs::remove_dir_all(&work);
-    let _ = fs::remove_file(source_tgz);
-    fs::write(out.join(DICT_DONE), b"ok").map_err(|e| e.to_string())
+    let _ = fs::remove_file(tgz);
+    if dict_ready(dir) { Ok(()) } else { Err(app_error("tts_dictionary_failed", "sys.dic not found in the archive")) }
 }
 
-/// The real ONNX Runtime library in Microsoft's archive: `<root>/lib/libonnxruntime.so.1.31.1` or
-/// `<root>/lib/libonnxruntime.1.31.1.dylib`. Not the version symlinks, `libonnxruntime_providers_shared.so`, the
-/// pkg-config file or the same-named debug copy inside `.dSYM/`.
+/// The library in VOICEVOX's archive: `<root>/lib/<name>` as a real file (not a version symlink).
 fn is_runtime_file(path: &Path, lib: &str) -> bool {
-    let wanted = match lib.strip_suffix(".dylib") {
-        Some(stem) => format!("{stem}.{ORT_VERSION}.dylib"),
-        None => format!("{lib}.{ORT_VERSION}"),
-    };
     let parent_is_lib = path.parent().and_then(|p| p.file_name()).is_some_and(|n| n == "lib");
-    let in_root_lib = path.components().count() == 3;
-    parent_is_lib && in_root_lib && path.file_name().is_some_and(|n| n.to_string_lossy() == wanted)
+    parent_is_lib && path.components().count() == 3 && path.file_name().is_some_and(|n| n.to_string_lossy() == lib)
 }
 
-/// Takes the ONNX Runtime library out of Microsoft's release archive.
-fn extract_runtime(tgz: &Path, dir: &Path, lib: &str) -> Result<(), String> {
+/// Takes the ONNX Runtime library out of VOICEVOX's release archive.
+fn extract_runtime(tgz: &Path, dir: &Path) -> Result<(), String> {
+    let lib = Onnxruntime::LIB_RECOMMENDED_VERSIONED_FILENAME;
     let file = fs::File::open(tgz).map_err(|e| e.to_string())?;
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
-    let out_dir = dir.join(ORT_DIR);
-    fs::create_dir_all(&out_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(dir.join(ORT_DIR)).map_err(|e| e.to_string())?;
     for entry in archive.entries().map_err(|e| e.to_string())? {
         let mut entry = entry.map_err(|e| e.to_string())?;
         let path = entry.path().map_err(|e| e.to_string())?.into_owned();
         if entry.header().entry_type().is_file() && is_runtime_file(&path, lib) {
-            entry.unpack(out_dir.join(lib)).map_err(|e| e.to_string())?;
+            entry.unpack(ort_library(dir)).map_err(|e| e.to_string())?;
             let _ = fs::remove_file(tgz);
             return Ok(());
         }
@@ -239,103 +209,57 @@ fn extract_runtime(tgz: &Path, dir: &Path, lib: &str) -> Result<(), String> {
     Err(app_error("tts_runtime_missing", format!("{lib} not found in the ONNX Runtime archive")))
 }
 
-/// Keeps only Japanese in the multilingual voice's `language_id_map`. piper-plus then reads every line with the
-/// Japanese phonemizer: a line of kanji only (何曜日ですか without kana would be one) is never read as Chinese, and
-/// Latin letters are read by Open JTalk. The model still gets Japanese's language id.
-fn japanese_only_config(path: &Path) -> Result<(), String> {
-    let mut config: serde_json::Value =
-        serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?).map_err(|e| app_error("tts_load_failed", e.to_string()))?;
-    if let Some(map) = config.get_mut("language_id_map").and_then(|m| m.as_object_mut()) {
-        let ja = map.get("ja").cloned().ok_or_else(|| app_error("tts_load_failed", "no ja in language_id_map"))?;
-        map.clear();
-        map.insert("ja".into(), ja);
-    }
-    fs::write(path, serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+fn load_voice(dir: &Path) -> Result<Synthesizer<OpenJtalk>, String> {
+    let ort = load_ort(dir)?;
+    let dict = dir.join(DICT_DIR);
+    let dict = dict.to_str().ok_or_else(|| app_error("tts_dictionary_failed", "path is not UTF-8"))?;
+    let open_jtalk = OpenJtalk::new(dict).map_err(|e| app_error("tts_dictionary_failed", e.to_string()))?;
+    let synth = Synthesizer::builder(ort)
+        .text_analyzer(open_jtalk)
+        .build()
+        .map_err(|e| app_error("tts_load_failed", e.to_string()))?;
+    let model = VoiceModelFile::open(dir.join(MODEL_FILE)).map_err(|e| app_error("tts_load_failed", e.to_string()))?;
+    synth.load_voice_model(&model).perform().map_err(|e| app_error("tts_load_failed", e.to_string()))?;
+    Ok(synth)
 }
 
-/// Takes out the spaces JLPT scripts put between words for beginners (飲みものを 買いましょうか): Open JTalk reads
-/// each space as a break, which chops a sentence into flat, separate pieces. Spaces next to Latin text stay.
-fn join_words(text: &str) -> String {
-    let chars: Vec<char> = text.chars().collect();
-    let latin = |c: Option<&char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
-    chars
-        .iter()
-        .enumerate()
-        .filter(|(i, c)| !(c.is_whitespace() && !latin(chars.get(i.wrapping_sub(1))) && !latin(chars.get(i + 1))))
-        .map(|(_, c)| *c)
-        .collect()
-}
-
-fn set_dictionary_env(dir: &Path) {
-    // piper-plus finds the jpreprocess dictionary through this variable, and must never fetch one itself.
-    std::env::set_var("JPREPROCESS_DICT", dir.join(DICT_DIR));
-    std::env::set_var("PIPER_PLUS_OFFLINE_MODE", "1");
-}
-
-/// The compiled dictionary really reads Japanese: a missing one would otherwise turn into a silent pass-through.
-fn check_dictionary(dir: &Path) -> Result<(), String> {
-    set_dictionary_env(dir);
-    let config: piper_plus::VoiceConfig = serde_json::from_value(serde_json::json!({
-        "audio": { "sample_rate": 22050 }, "phoneme_type": "openjtalk", "phoneme_id_map": { "_": [0] }, "num_symbols": 1, "num_speakers": 1
-    }))
-    .map_err(|e| e.to_string())?;
-    let phonemizer = PiperVoice::create_phonemizer(&config, None).map_err(|e| app_error("tts_dictionary_failed", e.to_string()))?;
-    let (tokens, _) = phonemizer
-        .phonemize_with_prosody("こんにちは")
-        .map_err(|e| app_error("tts_dictionary_failed", e.to_string()))?;
-    if tokens.iter().any(|t| t == "k") { Ok(()) } else { Err(app_error("tts_dictionary_failed", format!("{tokens:?}"))) }
-}
-
-fn load_voice(dir: &Path) -> Result<PiperVoice, String> {
-    load_ort(dir)?;
-    set_dictionary_env(dir);
-    let model = dir.join(MODEL_FILE);
-    let config = dir.join(CONFIG_FILE);
-    // piper-plus may panic on a broken model; that must not take the app down.
-    std::panic::catch_unwind(|| PiperVoice::load(&model, Some(&config), "cpu"))
-        .map_err(|_| app_error("tts_load_failed", "panic while loading the voice"))?
-        .map_err(|e| app_error("tts_load_failed", e.to_string()))
-}
-
-/// Downloads whatever is missing, compiles the dictionary and checks the voice loads. Progress: `tts-progress`.
+/// Downloads whatever is missing and checks the voice really speaks. Progress: `tts-progress`.
 #[tauri::command]
 pub async fn tts_install(app: tauri::AppHandle) -> Result<TtsStatus, String> {
-    if !supported() {
+    let Some(ort_url) = ort_download() else {
         return Err(app_error("tts_unsupported", std::env::consts::OS));
-    }
+    };
     let dir = tts_dir(&app)?;
     let handle = app.clone();
     tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+        for old in OLD_FILES {
+            let old = dir.join(old);
+            let _ = if old.is_dir() { fs::remove_dir_all(old) } else { fs::remove_file(old) };
+        }
         let emit = |stage: &'static str, percent: u8| {
             let _ = handle.emit("tts-progress", Progress { stage, percent });
         };
         if !model_ready(&dir) {
-            for old in OLD_MODEL_FILES {
-                let _ = fs::remove_file(dir.join(old));
-            }
-            download(CONFIG_URL, &dir.join(CONFIG_FILE), &|_| {})?;
-            japanese_only_config(&dir.join(CONFIG_FILE))?;
             download(MODEL_URL, &dir.join(MODEL_FILE), &|p| emit("voice", p))?;
         }
         if !dict_ready(&dir) {
-            let tgz = dir.join("naist-jdic.tar.gz");
+            let tgz = dir.join("open_jtalk_dic.tar.gz");
             download(DICT_URL, &tgz, &|p| emit("dictionary", p))?;
             emit("building", 0);
-            build_dictionary(&tgz, &dir)?;
+            extract_dictionary(&tgz, &dir)?;
         }
         if !runtime_ready(&dir) {
-            if let (Some((url, lib)), false) = (ort_download(), cfg!(target_os = "android")) {
-                let tgz = dir.join("onnxruntime.tgz");
-                download(&url, &tgz, &|p| emit("runtime", p))?;
-                extract_runtime(&tgz, &dir, lib)?;
-            }
+            let tgz = dir.join("onnxruntime.tgz");
+            download(&ort_url, &tgz, &|p| emit("runtime", p))?;
+            extract_runtime(&tgz, &dir)?;
         }
         emit("checking", 0);
-        check_dictionary(&dir)?;
-        let voice = load_voice(&dir)?;
+        let synth = load_voice(&dir)?;
+        // Speaking once proves the runtime can open the (encrypted) model and the dictionary reads Japanese.
+        speak(&synth, &["はい。".to_string()])?;
         if let Ok(mut slot) = handle.state::<TtsState>().0.lock() {
-            *slot = Some(voice);
+            *slot = Some(synth);
         }
         Ok(())
     })
@@ -368,6 +292,16 @@ enum Speaker {
     Narrator,
 }
 
+impl Speaker {
+    fn style(self) -> StyleId {
+        StyleId::new(match self {
+            Speaker::Male => MAN,
+            Speaker::Female => WOMAN,
+            Speaker::Narrator => NARRATOR,
+        })
+    }
+}
+
 /// Splits the 男：/女： (or 男:) speaker mark off a script line.
 fn speaker_of(line: &str) -> (Speaker, &str) {
     let line = line.trim();
@@ -381,22 +315,26 @@ fn speaker_of(line: &str) -> (Speaker, &str) {
     (Speaker::Narrator, line)
 }
 
-/// Plays `samples` slower by `factor` (< 1): lower pitch and longer, by linear interpolation.
-fn lower_pitch(samples: &[i16], factor: f32) -> Vec<i16> {
-    if samples.len() < 2 || !(0.1..1.0).contains(&factor) {
-        return samples.to_vec();
-    }
-    let out_len = (samples.len() as f32 / factor) as usize;
-    (0..out_len)
-        .map(|i| {
-            let pos = i as f32 * factor;
-            let j = pos.floor() as usize;
-            let frac = pos - j as f32;
-            let a = samples[j.min(samples.len() - 1)] as f32;
-            let b = samples[(j + 1).min(samples.len() - 1)] as f32;
-            (a + (b - a) * frac).round() as i16
-        })
+/// Takes out the spaces JLPT scripts put between words for beginners (飲みものを 買いましょうか): Open JTalk reads
+/// each space as a break, which chops a sentence into separate pieces. Spaces next to Latin text stay.
+fn join_words(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let latin = |c: Option<&char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    chars
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| !(c.is_whitespace() && !latin(chars.get(i.wrapping_sub(1))) && !latin(chars.get(i + 1))))
+        .map(|(_, c)| *c)
         .collect()
+}
+
+/// Sample rate and samples of a mono 16-bit WAV as VOICEVOX writes it (44-byte header).
+fn wav_samples(wav: &[u8]) -> Option<(u32, Vec<i16>)> {
+    if wav.len() < 44 || &wav[0..4] != b"RIFF" || &wav[36..40] != b"data" {
+        return None;
+    }
+    let rate = u32::from_le_bytes(wav[24..28].try_into().ok()?);
+    Some((rate, wav[44..].chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect()))
 }
 
 /// A mono 16-bit PCM WAV file.
@@ -421,46 +359,32 @@ fn wav_bytes(sample_rate: u32, samples: &[i16]) -> Vec<u8> {
     out
 }
 
-/// Speaks the lines one after another with a pause between them, men a little lower. Returns (sample rate, samples).
-fn speak(voice: &mut PiperVoice, lines: &[String]) -> Result<(u32, Vec<i16>), String> {
+/// Speaks the lines one after another with a pause between them, each in its speaker's voice. Returns a WAV file.
+fn speak(synth: &Synthesizer<OpenJtalk>, lines: &[String]) -> Result<Vec<u8>, String> {
     let mut audio: Vec<i16> = Vec::new();
-    let mut rate = 22050;
+    let mut rate = 24000;
     for line in lines {
         let (who, text) = speaker_of(line);
         let text = join_words(text);
         if text.is_empty() {
             continue;
         }
-        let params = SynthesisParams {
-            language_override: Some("ja".to_string()),
-            // Men are slowed afterwards to lower the pitch, so they're made that much faster here: same speed in the end.
-            length_scale: if who == Speaker::Male { MALE_PITCH } else { 1.0 },
-            // The classic VITS values: piper-plus's defaults (0.4 / 0.5) keep pitch and rhythm too even, which sounds robotic.
-            noise_scale: 0.667,
-            noise_w: 0.8,
-            ..Default::default()
-        };
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| voice.synthesize_with_params(&text, &params)))
-            .map_err(|_| app_error("tts_failed", "panic while speaking"))?
-            .map_err(|e| app_error("tts_failed", e.to_string()))?;
-        rate = result.sample_rate;
+        let wav = synth.tts(&text, who.style()).perform().map_err(|e| app_error("tts_failed", e.to_string()))?;
+        let (line_rate, samples) = wav_samples(&wav).ok_or_else(|| app_error("tts_failed", "unexpected WAV"))?;
+        rate = line_rate;
         if !audio.is_empty() {
             audio.extend(std::iter::repeat_n(0, (rate as f32 * LINE_GAP_SECONDS) as usize));
         }
-        if who == Speaker::Male {
-            audio.extend(lower_pitch(&result.audio, MALE_PITCH));
-        } else {
-            audio.extend(result.audio);
-        }
+        audio.extend(samples);
     }
-    Ok((rate, audio))
+    Ok(wav_bytes(rate, &audio))
 }
 
 /// Speaks a recording's lines with the offline voice and returns a WAV file.
 #[tauri::command]
 pub async fn tts_speak(app: tauri::AppHandle, lines: Vec<String>) -> Result<tauri::ipc::Response, String> {
     let dir = tts_dir(&app)?;
-    if !(supported() && model_ready(&dir) && dict_ready(&dir) && runtime_ready(&dir)) {
+    if !installed(&dir) {
         return Err(app_error("tts_not_installed", ""));
     }
     let handle = app.clone();
@@ -470,9 +394,7 @@ pub async fn tts_speak(app: tauri::AppHandle, lines: Vec<String>) -> Result<taur
         if slot.is_none() {
             *slot = Some(load_voice(&dir)?);
         }
-        let voice = slot.as_mut().expect("loaded above");
-        let (rate, samples) = speak(voice, &lines)?;
-        Ok(wav_bytes(rate, &samples))
+        speak(slot.as_ref().expect("loaded above"), &lines)
     })
     .await
     .map_err(|e| e.to_string())??;
@@ -499,87 +421,56 @@ mod tests {
     }
 
     #[test]
-    fn config_keeps_only_japanese() {
-        let dir = std::env::temp_dir().join(format!("langchef-tts-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("c.json");
-        fs::write(&path, r#"{"num_languages":6,"language_id_map":{"ja":0,"en":1,"zh":2},"audio":{"sample_rate":22050}}"#).unwrap();
-        japanese_only_config(&path).unwrap();
-        let c: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-        assert_eq!(c["language_id_map"], serde_json::json!({"ja": 0}));
-        assert_eq!(c["num_languages"], 6, "the model still has 6 language ids");
-        let _ = fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn lower_pitch_stretches_and_keeps_the_shape() {
-        let s: Vec<i16> = (0..100).map(|i| (i * 10) as i16).collect();
-        let out = lower_pitch(&s, 0.5);
-        assert_eq!(out.len(), 200);
-        assert_eq!(out[0], 0);
-        assert_eq!(out[2], 10);
-        assert_eq!(out[1], 5, "interpolated between samples");
-        assert_eq!(lower_pitch(&s, 1.0), s, "no change at factor 1");
-    }
-
-    #[test]
-    fn wav_header_is_valid() {
-        let wav = wav_bytes(22050, &[0, 1, -1]);
+    fn wav_round_trip() {
+        let wav = wav_bytes(24000, &[0, 1, -1]);
         assert_eq!(&wav[0..4], b"RIFF");
         assert_eq!(u32::from_le_bytes(wav[4..8].try_into().unwrap()), 36 + 6);
         assert_eq!(&wav[8..16], b"WAVEfmt ");
-        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 22050);
-        assert_eq!(&wav[36..40], b"data");
         assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 6);
-        assert_eq!(wav.len(), 44 + 6);
-        assert_eq!(i16::from_le_bytes([wav[48], wav[49]]), -1);
+        assert_eq!(wav_samples(&wav), Some((24000, vec![0, 1, -1])));
+        assert_eq!(wav_samples(b"not a wav"), None);
     }
 
     #[test]
     fn runtime_download_matches_the_platform() {
-        match (std::env::consts::OS, std::env::consts::ARCH) {
-            ("linux", "x86_64") => {
-                let (url, lib) = ort_download().unwrap();
-                assert!(url.ends_with(&format!("onnxruntime-linux-x64-{ORT_VERSION}.tgz")));
-                assert_eq!(lib, "libonnxruntime.so");
-            }
-            ("macos", "x86_64") => assert!(ort_download().is_none(), "no Intel Mac build of ONNX Runtime"),
-            _ => {}
+        if let ("linux", "x86_64") = (std::env::consts::OS, std::env::consts::ARCH) {
+            let url = ort_download().unwrap();
+            assert!(url.ends_with(&format!("/voicevox_onnxruntime-{ORT_VERSION}/voicevox_onnxruntime-linux-x64-{ORT_VERSION}.tgz")));
+            assert_eq!(Onnxruntime::LIB_RECOMMENDED_VERSIONED_FILENAME, format!("libvoicevox_onnxruntime.so.{ORT_VERSION}"));
         }
+        assert_eq!(Onnxruntime::LIB_RECOMMENDED_VERSION, ORT_VERSION, "ORT_VERSION follows voicevox_core");
     }
 
     #[test]
     fn picks_the_real_runtime_library_from_the_archive() {
         let v = ORT_VERSION;
-        let linux = |p: &str| is_runtime_file(Path::new(p), "libonnxruntime.so");
-        assert!(linux(&format!("onnxruntime-linux-x64-{v}/lib/libonnxruntime.so.{v}")));
-        assert!(!linux(&format!("onnxruntime-linux-x64-{v}/lib/libonnxruntime_providers_shared.so")));
-        assert!(!linux(&format!("onnxruntime-linux-x64-{v}/lib/libonnxruntime.so")));
-        assert!(!linux(&format!("onnxruntime-linux-x64-{v}/lib/pkgconfig/libonnxruntime.pc")));
-        let mac = |p: &str| is_runtime_file(Path::new(p), "libonnxruntime.dylib");
-        assert!(mac(&format!("onnxruntime-osx-arm64-{v}/lib/libonnxruntime.{v}.dylib")));
-        assert!(!mac(&format!("onnxruntime-osx-arm64-{v}/lib/libonnxruntime.{v}.dylib.dSYM/Contents/Resources/DWARF/libonnxruntime.{v}.dylib")));
-        assert!(!mac(&format!("onnxruntime-osx-arm64-{v}/lib/pkgconfig/libonnxruntime.pc")));
+        let pick = |p: &str, lib: &str| is_runtime_file(Path::new(p), lib);
+        let so = format!("libvoicevox_onnxruntime.so.{v}");
+        assert!(pick(&format!("voicevox_onnxruntime-linux-x64-{v}/lib/{so}"), &so));
+        assert!(!pick(&format!("voicevox_onnxruntime-linux-x64-{v}/lib/libvoicevox_onnxruntime.so"), &so));
+        assert!(!pick(&format!("voicevox_onnxruntime-linux-x64-{v}/lib/pkgconfig/{so}"), &so));
+        assert!(pick(&format!("voicevox_onnxruntime-android-arm64-{v}/lib/libvoicevox_onnxruntime.so"), "libvoicevox_onnxruntime.so"));
     }
 
     /// End to end with real files, run by hand:
-    /// `TTS_TEST_DIR=<dir with tsukuyomi.onnx(.json), naist-jdic/ and onnxruntime/> cargo test --lib tts -- --ignored`
-    /// (`naist-jdic.tar.gz` / `onnxruntime.tgz` there are compiled / extracted first when missing).
+    /// `TTS_TEST_DIR=<dir with n0.vvm, open_jtalk_dic_utf_8-1.11/ and onnxruntime/<lib>> cargo test --lib tts -- --ignored`
+    /// (`onnxruntime.tgz` there is extracted first when the library is missing). Writes `test.wav`.
     #[test]
     #[ignore]
     fn speaks_with_real_files() {
         let dir = PathBuf::from(std::env::var("TTS_TEST_DIR").expect("TTS_TEST_DIR"));
-        if !dict_ready(&dir) {
-            build_dictionary(&dir.join("naist-jdic.tar.gz"), &dir).unwrap();
+        if !runtime_ready(&dir) {
+            extract_runtime(&dir.join("onnxruntime.tgz"), &dir).unwrap();
         }
-        if let (false, Some((_, lib))) = (runtime_ready(&dir), ort_download()) {
-            extract_runtime(&dir.join("onnxruntime.tgz"), &dir, lib).unwrap();
-        }
-        check_dictionary(&dir).unwrap();
-        let mut voice = load_voice(&dir).unwrap();
-        let lines = vec!["男：あしたの ピクニック、何を 持って いきますか。".to_string(), "女：くだものを おねがいします。".to_string()];
-        let (rate, audio) = speak(&mut voice, &lines).unwrap();
-        assert!(rate > 0 && audio.len() > rate as usize, "at least a second of audio");
-        fs::write(dir.join("test.wav"), wav_bytes(rate, &audio)).unwrap();
+        let synth = load_voice(&dir).unwrap();
+        let lines = vec![
+            "男の 人と 女の 人が 話して います。".to_string(),
+            "男：あしたの ピクニック、何を 持って いきますか。".to_string(),
+            "女：くだものを おねがいします。".to_string(),
+        ];
+        let wav = speak(&synth, &lines).unwrap();
+        let (rate, audio) = wav_samples(&wav).unwrap();
+        assert!(rate > 0 && audio.len() > rate as usize * 3, "at least three seconds of audio");
+        fs::write(dir.join("test.wav"), wav).unwrap();
     }
 }

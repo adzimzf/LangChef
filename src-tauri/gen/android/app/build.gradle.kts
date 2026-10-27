@@ -84,17 +84,6 @@ android {
     buildFeatures {
         buildConfig = true
     }
-    packaging {
-        jniLibs {
-            // Only the arm64 runtime is used (the app is built for arm64); the Java bindings are not used at all.
-            excludes += listOf(
-                "lib/armeabi-v7a/libonnxruntime*.so",
-                "lib/x86/libonnxruntime*.so",
-                "lib/x86_64/libonnxruntime*.so",
-                "lib/*/libonnxruntime4j_jni.so",
-            )
-        }
-    }
 }
 
 rust {
@@ -103,9 +92,6 @@ rust {
 
 dependencies {
     implementation("androidx.webkit:webkit:1.14.0")
-    // ONNX Runtime for the offline Japanese voice (tts.rs loads libonnxruntime.so at run time).
-    // Keep the version in step with ORT_VERSION in tts.rs and the `ort` crate in Cargo.toml.
-    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.31.1")
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("androidx.activity:activity-ktx:1.10.1")
     implementation("com.google.android.material:material:1.12.0")

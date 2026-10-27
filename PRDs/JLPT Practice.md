@@ -31,7 +31,7 @@ N5/N4: 文字・語彙 → 文法 → 読解 → 聴解 → repeat. From N3 up r
 - Amber at 1:00, red at 0:30, the timer shakes in the last 10 s. At 0:00 「時間です。やめてください。」 and the session is handed in.
 - No feedback until the end. Questions can be skipped, flagged and revisited from the answer sheet.
 - Leaving ends the session and scores what was answered. A session left by closing the app shows as unfinished with Resume.
-- Listening: each recording plays once. With the **offline Japanese voice** downloaded (Settings, about 60–110 MB once) it is spoken on the device by piper-plus (Tsukuyomi-chan voice; 男 lines pitched lower, a pause between lines); otherwise the device's `speechSynthesis`, otherwise the script is shown. The listening briefing links to the download when it's missing. In 発話表現 and 即時応答 the choices are spoken only; just their numbers are printed.
+- Listening: each recording plays once. With the **offline Japanese voice** downloaded (Settings, about 110 MB once) it is spoken on the device by VOICEVOX (VOICEVOX Nemo: a man's voice for 男 lines, a woman's for 女 lines, another woman's for narration; a pause between lines); otherwise the device's `speechSynthesis`, otherwise the script is shown. The listening briefing links to the download when it's missing. In 発話表現 and 即時応答 the choices are spoken only; just their numbers are printed.
 
 ## Questions
 

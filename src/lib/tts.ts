@@ -1,5 +1,5 @@
 /**
- * Offline Japanese voice (src-tauri/src/tts.rs): speech made on the device with piper-plus, used by the JLPT
+ * Offline Japanese voice (src-tauri/src/tts.rs): speech made on the device with VOICEVOX, used by the JLPT
  * listening section. Downloaded from Settings; until then the device voice or the script is used instead.
  */
 import { invoke } from '@tauri-apps/api/core'
@@ -17,7 +17,7 @@ export type TtsStatus = {
 export type TtsProgress = { stage: 'voice' | 'dictionary' | 'building' | 'runtime' | 'checking'; percent: number }
 
 /** Credit the voice's terms ask for; names, so the same in every language. */
-export const TTS_CREDIT = 'つくよみちゃんコーパス（CV.夢前黎） · piper-plus (ayousanz)'
+export const TTS_CREDIT = 'VOICEVOX Nemo'
 
 export const ttsStatus = () => invoke<TtsStatus>('tts_status')
 
