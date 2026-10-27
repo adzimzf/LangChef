@@ -6,6 +6,7 @@ import { JLPT_LEVELS, JLPT_LEVEL_ORDER, DEFAULT_JLPT_LEVEL, JLPT_LEVEL_STORAGE_K
 import type { JLPTLevel } from '../lib/jlpt'
 import { t, formatAgo } from '../lib/i18n'
 import { TARGET_LANGUAGES, languageLabel } from '../lib/languages'
+import { useBackHandler } from '../lib/backNav'
 
 type GrammarLevelInfo = { level: string; count: number }
 
@@ -45,6 +46,9 @@ export default function Chats() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editTitle, setEditTitle] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  useBackHandler(showLangPicker, () => setShowLangPicker(false))
+  useBackHandler(showJlptPicker, () => setShowJlptPicker(false))
+  useBackHandler(deletingId !== null, () => setDeletingId(null))
   const [dbLevels, setDbLevels] = useState<string[]>(JLPT_LEVEL_ORDER)
   const navigate = useNavigate()
 

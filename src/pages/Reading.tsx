@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useBackHandler } from '../lib/backNav'
 import { invoke } from '@tauri-apps/api/core'
 import {
   ArrowLeftOutlined, LoadingOutlined, PlusOutlined, CheckCircleFilled, CloseOutlined,
@@ -435,6 +436,9 @@ export default function Reading() {
     setPhase('init')
     loadHome()
   }
+  // Back: an open sheet closes first, then a text goes back to the list.
+  useBackHandler(phase === 'loading' || phase === 'reading' || phase === 'qa' || phase === 'summary', goHome)
+  useBackHandler(showPassage, () => setShowPassage(false))
 
   // Sheets go to <body> so they cover the bottom navigation.
   const wordSheetEl = wordSheet && text && createPortal(

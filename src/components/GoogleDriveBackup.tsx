@@ -20,6 +20,7 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons'
 import { t, errorWithDetail, formatAgo, formatDate, formatNumber } from '../lib/i18n'
+import { useBackHandler } from '../lib/backNav'
 
 type AuthStatus = {
   signed_in: boolean
@@ -69,6 +70,7 @@ export default function GoogleDriveBackup() {
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null)
   const [backupAction, setBackupAction] = useState<'idle' | 'backing_up' | 'restoring'>('idle')
   const [showRestoreConfirm, setShowRestoreConfirm] = useState(false)
+  useBackHandler(showRestoreConfirm, () => setShowRestoreConfirm(false))
 
   // Auto-sync state
   const [syncConfig, setSyncConfig] = useState<SyncConfig>({

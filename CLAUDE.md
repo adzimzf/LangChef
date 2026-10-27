@@ -117,6 +117,8 @@ All wrapped in `Layout` (bottom tab nav). Chat page hides bottom nav.
 | `/stats` | UserStats | Stats dashboard (charts: activity, mastery, proficiency) |
 | `/settings` | Settings | Your language, learning aids, API provider (OpenRouter preset), review limits, grammar review (level, daily limits) |
 
+**Back (Android gesture/button)** — `src/lib/backNav.ts`, plain browser history (Tauri's Android shell goes back in the webview and leaves the app at the first entry): tabs keep the history at [Home, tab] (`openTab` in `Layout`, `goHome`), so back from a tab is Home and back from Home leaves the app. Anything that should catch back — a sheet or dialog, a step inside a page (JLPT phases, Reading, Breakdown), the JLPT exam (asks before ending) — calls `useBackHandler(open, close)`; the newest open handler runs first. New sheets and in-page steps must use it.
+
 First run (no API key, `onboarding_done` unset) shows `Onboarding` instead of the routes: language → target & level → connect AI.
 
 `/telemetry` redirects to `/stats`.

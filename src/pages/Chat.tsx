@@ -17,6 +17,7 @@ const { TextArea } = Input
 import { ArrowLeftOutlined, SendOutlined, InfoCircleOutlined, CloseOutlined, PlusOutlined, EditOutlined, LeftOutlined, RightOutlined, DownOutlined, UpOutlined, TranslationOutlined, LoadingOutlined, BulbOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
+import { useBackHandler } from '../lib/backNav'
 
 type Msg = { id: number | null, role: 'user' | 'assistant' | 'system', content: string, parentMessageId?: number | null, isActivePath?: boolean }
 
@@ -268,6 +269,8 @@ export default function Chat() {
   const [grammarInfoItem, setGrammarInfoItem] = useState<GrammarDBItem | null>(null)
   const [grammarAnalysis, setGrammarAnalysis] = useState<string | null>(null)
   const [grammarAnalysisLoading, setGrammarAnalysisLoading] = useState<number | null>(null)
+  useBackHandler(grammarInfoItem !== null, () => setGrammarInfoItem(null))
+  useBackHandler(grammarAnalysis !== null, () => setGrammarAnalysis(null))
   const [feedbackMap, setFeedbackMap] = useState<Map<number, UserFeedback>>(new Map())
   const [wordColorsByMessage, setWordColorsByMessage] = useState<Map<number, { tokens: Array<{surface: string, base_form: string}>, colors: Map<string, WordColorInfo> }>>(new Map())
   const logRef = useRef<HTMLDivElement | null>(null)
@@ -331,6 +334,7 @@ export default function Chat() {
       detailCloseTimer.current = null
     }, 220)
   }
+  useBackHandler(detailIndex !== null, closeDetail)
 
   const openDetail = async (idx: number) => {
     if (detailCloseTimer.current) {

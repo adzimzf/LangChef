@@ -7,6 +7,7 @@ import {
 import type { JlptOverview, JlptPart, JlptResult, JlptSection, JlptSessionView } from '../lib/types'
 import { t, errorText } from '../lib/i18n'
 import { CountUp, burstConfetti, reducedMotion } from '../components/Motion'
+import { goHome, useBackHandler } from '../lib/backNav'
 import { JLPT_LEVEL_ORDER, JLPT_PRACTICE_LEVEL_KEY, PART_INSTRUCTION, SECTION_JA, SPOKEN_CHOICE_PARTS, practiceLevel, type JLPTLevel } from '../lib/jlpt'
 
 type Phase = 'hub' | 'brief' | 'exam' | 'result'
@@ -299,6 +300,17 @@ export default function JlptPractice() {
     setCardsAdded(true)
   }
 
+  // Back: an open sheet closes first; in the exam it asks before ending the session; otherwise back to the hub.
+  useBackHandler(phase !== 'hub', () => {
+    if (call) return
+    if (phase === 'exam') setSheet('quit')
+    else {
+      if (phase === 'brief') { prepareFor.current = ''; setPreparing(false) }
+      go('hub', 'back')
+    }
+  })
+  useBackHandler(sheet !== '', () => setSheet(''))
+
   const enterClass = enter === 'fwd' ? 'anim-enter-fwd' : 'anim-enter-back'
 
   // ---------------------------------------------------------------- hub
@@ -308,7 +320,7 @@ export default function JlptPractice() {
     return (
       <div key="hub" className={`flex flex-col gap-5 pb-6 ${enterClass}`}>
         <div className="sticky top-0 z-10 pt-4 pb-2 bg-gray-50 flex items-center justify-between gap-2">
-          <button onClick={() => navigate('/')} className="flex items-center gap-1 text-gray-500 text-sm">
+          <button onClick={() => goHome(navigate)} className="flex items-center gap-1 text-gray-500 text-sm">
             <ArrowLeftOutlined /> {t('nav.home')}
           </button>
           <div className="flex gap-1">
@@ -761,7 +773,7 @@ export default function JlptPractice() {
             <span className="text-xs text-gray-400">{t('jlpt.nextInRotation')}</span>
             <b>{SECTION_JA[nextPlan.section]} · {t(`jlpt.section.${nextPlan.section}`)} · {t('jlpt.questions', { count: nextPlan.questions })} · {clock(nextPlan.time_limit)}</b>
             <div className="grid grid-cols-2 gap-2">
-              <button className={secondaryBtn} onClick={() => navigate('/')}>{t('jlpt.doneForToday')}</button>
+              <button className={secondaryBtn} onClick={() => goHome(navigate)}>{t('jlpt.doneForToday')}</button>
               <button className={primaryBtn} onClick={() => openBrief(nextPlan.section)}>{t('jlpt.startNext')}</button>
             </div>
             <button className="text-sm text-gray-500" onClick={() => go('hub', 'back')}>{t('jlpt.backToPractice')}</button>

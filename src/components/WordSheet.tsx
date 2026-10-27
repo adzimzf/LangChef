@@ -5,6 +5,7 @@ import type { CardDetail, ReviewItem, SavedWord } from '../lib/types'
 import { parseDetailJson } from '../lib/types'
 import { t, lang as explainLang, errorText, languageName, partOfSpeechLabel } from '../lib/i18n'
 import { readFlag, ROMAJI_KEY } from '../lib/prefs'
+import { useBackHandler } from '../lib/backNav'
 
 type Api = { apiHost: string; apiKey: string; model: string }
 
@@ -28,6 +29,7 @@ export default function WordSheet({ word, base, language, api, onAdd, onClose }:
   onAdd: (content: string, detail: string | null) => Promise<SavedWord>
   onClose: () => void
 }) {
+  useBackHandler(true, onClose)
   const [item, setItem] = useState<ReviewItem | null>(null)
   const [detail, setDetail] = useState<Partial<CardDetail> | null>(null)
   const [rawDetail, setRawDetail] = useState<string | null>(null)

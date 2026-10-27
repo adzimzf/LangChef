@@ -4,6 +4,7 @@ import { CloseOutlined, LoadingOutlined } from '@ant-design/icons'
 import { renderFurigana } from '../lib/furigana'
 import { t, lang as explainLang, errorText, languageName } from '../lib/i18n'
 import { readFlag, ROMAJI_KEY } from '../lib/prefs'
+import { useBackHandler } from '../lib/backNav'
 
 type Api = { apiHost: string; apiKey: string; model: string }
 type Suggestion = { reply: string; gloss: string; annotated: string; romaji: string }
@@ -20,6 +21,7 @@ export default function HelpReplySheet({ language, levelRule, context, api, onUs
   onUse: (text: string) => void
   onClose: () => void
 }) {
+  useBackHandler(true, onClose)
   const [intent, setIntent] = useState('')
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)

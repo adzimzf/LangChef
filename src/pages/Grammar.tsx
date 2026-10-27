@@ -8,6 +8,7 @@ import type { GrammarItem, GrammarPlan, GrammarReviewStatus } from '../lib/types
 import { t, lang as explainLang, errorText, languageName } from '../lib/i18n'
 import { TARGET_LANGUAGES } from '../lib/languages'
 import { TRANSLATION_REPORT_URL } from '../lib/providers'
+import { useBackHandler } from '../lib/backNav'
 
 function getApiConfig() {
   const apiHost = localStorage.getItem('api_host') || ''
@@ -50,6 +51,7 @@ export default function Grammar() {
   const [addPattern, setAddPattern] = useState('')
   const [addDetail, setAddDetail] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  useBackHandler(deletingId !== null, () => setDeletingId(null))
   const [dbLevels, setDbLevels] = useState<string[]>(FALLBACK_LEVELS['ja'])
   const [showImport, setShowImport] = useState(false)
   const [importText, setImportText] = useState('')

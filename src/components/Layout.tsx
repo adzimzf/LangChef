@@ -16,6 +16,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useActiveTimeHeartbeat } from '../hooks/useActiveTimeHeartbeat'
 import { t } from '../lib/i18n'
+import { afterHome, openTab } from '../lib/backNav'
 
 type LinderaStage = 'idle' | 'downloading' | 'extracting' | 'building' | 'ready' | 'error'
 
@@ -88,8 +89,13 @@ export default function Layout({ children }: { children: React.ReactNode }) {
   const pageIndex = NAV_ITEMS.some((n) => n.path === location.pathname)
     ? NAV_ITEMS.findIndex((n) => n.key === activeKey)
     : NAV_ITEMS.length
+  // A tab opened from another tab goes through Home first (see openTab); the page waits until it's there.
+  const pendingTab = useRef<string | null>(null)
+  const switchingTab = pendingTab.current !== null
+  useEffect(() => { afterHome(navigate, location.pathname, pendingTab) }, [location.pathname])
+
   const page = useRef({ path: location.pathname, index: pageIndex, dir: '' })
-  if (page.current.path !== location.pathname) {
+  if (page.current.path !== location.pathname && !switchingTab) {
     const dir = pageIndex >= page.current.index ? 'anim-enter-fwd' : 'anim-enter-back'
     page.current = { path: location.pathname, index: pageIndex, dir }
   }
@@ -98,7 +104,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     <div className="h-dvh bg-gray-50 flex flex-col">
       {/* Content */}
       <main className={`flex-1 overflow-hidden ${isChatPage ? '' : 'px-4 pb-[50px]'}`}>
-        <div key={location.pathname} className={`h-full ${page.current.dir}`}>{children}</div>
+        {!switchingTab && <div key={location.pathname} className={`h-full ${page.current.dir}`}>{children}</div>}
       </main>
 
       {/* Lindera dict download/build progress banner */}
@@ -129,7 +135,7 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               return (
                 <button
                   key={item.key}
-                  onClick={() => navigate(item.path)}
+                  onClick={() => item.path !== location.pathname && openTab(navigate, item.path, pendingTab)}
                   className={`
                     flex flex-col items-center justify-center gap-0.5 flex-1 h-full transition-colors
                     ${isActive ? 'text-blue-500' : 'text-gray-400 active:text-gray-600'}

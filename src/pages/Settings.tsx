@@ -21,6 +21,7 @@ import { t, lang, switchExplainLang, errorText, type ExplainLang } from '../lib/
 import { PROVIDER_PRESETS, TRANSLATION_REPORT_URL, type ProviderPreset } from '../lib/providers'
 import { readFlag, writeFlag, CHAT_HINTS_KEY, ROMAJI_KEY, ROMAJI_INPUT_KEY } from '../lib/prefs'
 import GrammarPlanSettings from '../components/GrammarPlanSettings'
+import { useBackHandler } from '../lib/backNav'
 
 const MAX_REVIEWS_DEFAULT = 100
 const MAX_REVIEWS_KEY = 'max_reviews_per_day'
@@ -48,6 +49,7 @@ export default function Settings() {
   const [testError, setTestError] = useState('')
   const [confirmLang, setConfirmLang] = useState<ExplainLang | null>(null)
   const [switching, setSwitching] = useState(false)
+  useBackHandler(confirmLang !== null, () => { if (!switching) setConfirmLang(null) })
   const [chatHints, setChatHints] = useState(() => readFlag(CHAT_HINTS_KEY))
   const [romaji, setRomaji] = useState(() => readFlag(ROMAJI_KEY))
   const [romajiInput, setRomajiInput] = useState(() => readFlag(ROMAJI_INPUT_KEY))
