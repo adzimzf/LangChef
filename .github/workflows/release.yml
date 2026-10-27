@@ -1,0 +1,216 @@
+name: 'release'
+
+# Builds a signed release and publishes it as a GitHub Release:
+#   macOS Apple Silicon + Intel (DMG, unsigned), Android universal APK (signed with the release key).
+#
+# Start it by pushing a version tag:   git tag v0.2.0 && git push origin v0.2.0
+# or from the Actions tab (workflow_dispatch) with the tag to create.
+# The version comes from the tag (v0.2.0 → 0.2.0) and overrides tauri.conf.json for the build,
+# so the Android versionCode follows it too. The release stays a draft until every build passes.
+#
+# Required secrets:
+#   GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET            compile-time env!() values for Google sign-in
+#   ANDROID_KEYSTORE_BASE64                           release keystore, base64-encoded
+#   ANDROID_KEYSTORE_PASSWORD, ANDROID_KEY_ALIAS      keystore password and key alias
+#   ANDROID_KEY_PASSWORD                              optional, defaults to the keystore password
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to release, e.g. v0.2.0 (created on the selected branch if it does not exist)'
+        required: true
+
+concurrency:
+  group: release-${{ github.event.inputs.tag || github.ref_name }}
+  cancel-in-progress: false
+
+jobs:
+  create-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.version.outputs.tag }}
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - name: Resolve version
+        id: version
+        env:
+          TAG: ${{ github.event.inputs.tag || github.ref_name }}
+        run: |
+          if ! [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$ ]]; then
+            echo "::error::Tag '$TAG' is not a version tag like v1.2.3"
+            exit 1
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; assets will be replaced"
+            exit 0
+          fi
+          PRERELEASE=""
+          [[ "$TAG" == *-* ]] && PRERELEASE="--prerelease"
+          gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
+            --title "LangChef $TAG" --generate-notes --draft $PRERELEASE
+
+  build-tauri:
+    needs: create-release
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: 'macos-latest' # Arm based macs (M1 and above).
+            rust-target: aarch64-apple-darwin
+          - platform: 'macos-15-intel' # Intel based macs.
+            rust-target: x86_64-apple-darwin
+          - platform: 'ubuntu-22.04'
+            target: 'android'
+            rust-target: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+
+    runs-on: ${{ matrix.platform }}
+    env:
+      GOOGLE_CLIENT_ID: ${{ secrets.GOOGLE_CLIENT_ID }}
+      GOOGLE_CLIENT_SECRET: ${{ secrets.GOOGLE_CLIENT_SECRET }}
+      TAG: ${{ needs.create-release.outputs.tag }}
+      VERSION: ${{ needs.create-release.outputs.version }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Check secrets
+        run: |
+          if [ -z "$GOOGLE_CLIENT_ID" ] || [ -z "$GOOGLE_CLIENT_SECRET" ]; then
+            echo "::error::GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET secrets are required for a release"
+            exit 1
+          fi
+
+      - name: setup node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.rust-target }}
+
+      - name: Setup Java
+        if: matrix.target == 'android'
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'zulu'
+          java-version: '21'
+
+      - name: Setup Android SDK
+        if: matrix.target == 'android'
+        uses: android-actions/setup-android@v3
+        with:
+          # The default also installs the removed 'tools' package, which now fails.
+          packages: 'platform-tools'
+
+      - name: Install NDK
+        if: matrix.target == 'android'
+        run: sdkmanager "ndk;27.0.11902837"
+
+      - name: Prepare android signing key
+        if: matrix.target == 'android'
+        env:
+          KEYSTORE_BASE64: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+        run: |
+          # A release APK must always be signed with the same key, or it can't update the installed app.
+          if [ -z "$KEYSTORE_BASE64" ] || [ -z "$KEYSTORE_PASSWORD" ] || [ -z "$KEY_ALIAS" ]; then
+            echo "::error::ANDROID_KEYSTORE_BASE64, ANDROID_KEYSTORE_PASSWORD and ANDROID_KEY_ALIAS secrets are required for a release"
+            exit 1
+          fi
+          KEYSTORE="$RUNNER_TEMP/release.jks"
+          echo "$KEYSTORE_BASE64" | base64 -d > "$KEYSTORE"
+          {
+            echo "LANGCHEF_KEYSTORE_FILE=$KEYSTORE"
+            echo "LANGCHEF_KEYSTORE_PASSWORD=$KEYSTORE_PASSWORD"
+            echo "LANGCHEF_KEY_ALIAS=$KEY_ALIAS"
+            echo "LANGCHEF_KEY_PASSWORD=${KEY_PASSWORD:-$KEYSTORE_PASSWORD}"
+          } >> "$GITHUB_ENV"
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Type check
+        run: npx tsc --noEmit
+
+      - name: i18n check
+        run: npm run i18n:check
+
+      - name: Rust cache
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './src-tauri -> target'
+          key: release-${{ matrix.target || matrix.rust-target }}
+
+      - name: Set version from tag
+        run: |
+          echo "{ \"version\": \"$VERSION\" }" > "$RUNNER_TEMP/tauri.release.conf.json"
+
+      - name: Build app (macOS)
+        if: matrix.target != 'android'
+        run: npm run tauri -- build --target ${{ matrix.rust-target }} --config "$RUNNER_TEMP/tauri.release.conf.json"
+
+      - name: Build app (Android)
+        if: matrix.target == 'android'
+        env:
+          NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.11902837
+        run: npm run tauri -- android build --apk --config "$RUNNER_TEMP/tauri.release.conf.json"
+
+      - name: Collect artifacts
+        run: |
+          mkdir -p ./release-assets
+          if [ "${{ matrix.target }}" = "android" ]; then
+            APK=$(find src-tauri/gen/android/app/build/outputs/apk -name '*-release.apk' | head -n 1)
+            if [ -z "$APK" ]; then
+              echo "::error::No release APK found"
+              exit 1
+            fi
+            cp "$APK" "./release-assets/LangChef_${VERSION}_android_universal.apk"
+          else
+            case "${{ matrix.rust-target }}" in
+              aarch64-apple-darwin) ARCH=aarch64 ;;
+              x86_64-apple-darwin) ARCH=x64 ;;
+            esac
+            for f in src-tauri/target/${{ matrix.rust-target }}/release/bundle/dmg/*.dmg; do
+              cp "$f" "./release-assets/LangChef_${VERSION}_macos_${ARCH}.dmg"
+            done
+          fi
+          ls -la ./release-assets
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$TAG" ./release-assets/* --repo "$GITHUB_REPOSITORY" --clobber
+
+  publish-release:
+    needs: [create-release, build-tauri]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.create-release.outputs.tag }}
+        run: gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
