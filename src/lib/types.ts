@@ -403,9 +403,34 @@ export type JlptResult = {
   time_used: number
   time_limit: number
   timed_out: boolean
+  /** Milliseconds since the epoch */
+  finished_at: number
   prev: JlptScore | null
   parts: { part: string; passage: string; correct: number; total: number; questions: JlptReviewedQuestion[] }[]
   missed_words: string[]
   next_section: JlptSection
   cycle: number
+}
+
+export type JlptHistoryItem = {
+  id: number
+  level: string
+  section: JlptSection
+  correct: number
+  total: number
+  time_used: number
+  time_limit: number
+  timed_out: boolean
+  /** Milliseconds since the epoch */
+  finished_at: number
+}
+
+export type JlptStats = {
+  sessions: number
+  /** Share of sessions handed in before time ran out, 0-100 */
+  in_time: number | null
+  sections: { section: JlptSection; sessions: number; accuracy: number | null }[]
+  /** Accuracy per section per day, 0-100 */
+  days: { date: string; vocab: number | null; grammar: number | null; reading: number | null; listening: number | null }[]
+  estimates: { level: string; estimate: JlptEstimate }[]
 }

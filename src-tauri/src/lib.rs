@@ -270,6 +270,9 @@ pub fn run() {
             jlpt::db_jlpt_get_session,
             jlpt::db_jlpt_save_answers,
             jlpt::db_jlpt_submit,
+            jlpt::db_jlpt_result,
+            jlpt::db_jlpt_history,
+            jlpt::db_jlpt_stats,
             // Google Auth
             google_auth::google_sign_in,
             google_auth::google_sign_out,

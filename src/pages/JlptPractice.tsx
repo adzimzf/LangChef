@@ -4,13 +4,13 @@ import { invoke } from '@tauri-apps/api/core'
 import {
   ArrowLeftOutlined, CaretRightFilled, CheckOutlined, CloseOutlined, FlagFilled, LeftOutlined, LoadingOutlined, RightOutlined,
 } from '@ant-design/icons'
-import type { JlptOverview, JlptPart, JlptResult, JlptSection, JlptSessionView } from '../lib/types'
-import { t, errorText } from '../lib/i18n'
+import type { JlptHistoryItem, JlptOverview, JlptPart, JlptResult, JlptSection, JlptSessionView } from '../lib/types'
+import { t, errorText, formatDay, formatDate } from '../lib/i18n'
 import { CountUp, burstConfetti, reducedMotion } from '../components/Motion'
 import { goHome, useBackHandler } from '../lib/backNav'
 import { JLPT_LEVEL_ORDER, JLPT_PRACTICE_LEVEL_KEY, PART_INSTRUCTION, SECTION_JA, SPOKEN_CHOICE_PARTS, practiceLevel, type JLPTLevel } from '../lib/jlpt'
 
-type Phase = 'hub' | 'brief' | 'exam' | 'result'
+type Phase = 'hub' | 'brief' | 'exam' | 'result' | 'history'
 
 
 function clock(seconds: number): string {
@@ -111,6 +111,10 @@ export default function JlptPractice() {
   const [scriptShown, setScriptShown] = useState<Record<number, boolean>>({})
   const [result, setResult] = useState<JlptResult | null>(null)
   const [justDone, setJustDone] = useState<JlptSection | null>(null)
+  /** Finished sessions at this level, newest first (the hub shows the latest few). */
+  const [history, setHistory] = useState<JlptHistoryItem[]>([])
+  /** Where the result on screen came from: a session just handed in, or the history. */
+  const [resultFrom, setResultFrom] = useState<'session' | 'history' | 'hub'>('session')
   const [cardsAdded, setCardsAdded] = useState(false)
   const [showGloss, setShowGloss] = useState(false)
   const submitting = useRef(false)
@@ -134,7 +138,12 @@ export default function JlptPractice() {
 
   async function loadOverview(lv = level) {
     try {
-      setOverview(await invoke<JlptOverview>('db_jlpt_overview', { level: lv }))
+      const [o, h] = await Promise.all([
+        invoke<JlptOverview>('db_jlpt_overview', { level: lv }),
+        invoke<JlptHistoryItem[]>('db_jlpt_history', { level: lv, limit: 200 }),
+      ])
+      setOverview(o)
+      setHistory(h)
     } catch (e) {
       setError(errorText(e))
     }
@@ -153,6 +162,19 @@ export default function JlptPractice() {
   function pickLevel(lv: JLPTLevel) {
     setLevel(lv)
     try { localStorage.setItem(JLPT_PRACTICE_LEVEL_KEY, lv) } catch { /* storage blocked */ }
+  }
+
+  /** Opens a past session's full review. */
+  async function openResult(id: number, from: 'history' | 'hub') {
+    try {
+      setResult(await invoke<JlptResult>('db_jlpt_result', { id }))
+      setCardsAdded(false)
+      setJustDone(null)
+      setResultFrom(from)
+      go('result')
+    } catch (e) {
+      setError(errorText(e))
+    }
   }
 
   /** Opens a section's briefing and starts writing its questions, so they're ready by the time the learner taps Begin. */
@@ -230,6 +252,7 @@ export default function JlptPractice() {
     try {
       const r = await invoke<JlptResult>('db_jlpt_submit', { id: session.id, answers: answersRef.current, timedOut })
       setResult(r)
+      setResultFrom('session')
       setCardsAdded(false)
       setJustDone(overview?.next_section === r.section ? r.section : null)
       go('result')
@@ -306,12 +329,52 @@ export default function JlptPractice() {
     if (phase === 'exam') setSheet('quit')
     else {
       if (phase === 'brief') { prepareFor.current = ''; setPreparing(false) }
-      go('hub', 'back')
+      go(phase === 'result' && resultFrom === 'history' ? 'history' : 'hub', 'back')
     }
   })
   useBackHandler(sheet !== '', () => setSheet(''))
 
   const enterClass = enter === 'fwd' ? 'anim-enter-fwd' : 'anim-enter-back'
+
+  // ---------------------------------------------------------------- history
+  function historyRow(h: JlptHistoryItem, from: 'history' | 'hub') {
+    const pct = h.total ? h.correct / h.total : 0
+    return (
+      <button key={h.id} onClick={() => openResult(h.id, from)} className="w-full text-left bg-white rounded-xl shadow-sm px-4 py-3 flex items-center gap-3 transition-transform active:scale-[.98]">
+        <div className="flex-1 min-w-0 flex flex-col gap-1">
+          <div className="flex items-center gap-1.5 text-sm">
+            <b>{SECTION_JA[h.section]}</b>
+            <span className="text-gray-400 truncate">{t(`jlpt.section.${h.section}`)}</span>
+            {h.timed_out && <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-600 shrink-0">{t('jlpt.timedOutBadge')}</span>}
+          </div>
+          <div className="h-1.5 rounded-full bg-gray-100 overflow-hidden">
+            <div className={`h-full rounded-full anim-grow ${pct >= 0.7 ? 'bg-green-500' : pct >= 0.5 ? 'bg-blue-500' : 'bg-red-400'}`} style={{ width: `${pct * 100}%` }} />
+          </div>
+          <span className="text-[11px] text-gray-400">{formatDay(h.finished_at)} · {formatDate(h.finished_at, { hour: 'numeric', minute: '2-digit' })} · {clock(h.time_used)} / {clock(h.time_limit)}</span>
+        </div>
+        <b className="tabular-nums text-base shrink-0">{h.correct}/{h.total}</b>
+        <RightOutlined className="text-gray-300 shrink-0" />
+      </button>
+    )
+  }
+
+  function renderHistory() {
+    return (
+      <div key="history" className={`flex flex-col gap-3 pb-6 ${enterClass}`}>
+        <div className="sticky top-0 z-10 pt-4 pb-2 bg-gray-50 flex items-center justify-between">
+          <button onClick={() => go('hub', 'back')} className="flex items-center gap-1 text-gray-500 text-sm">
+            <ArrowLeftOutlined /> {t('common.back')}
+          </button>
+          <span className="text-xs px-2.5 py-1 rounded-full bg-blue-50 text-blue-600 font-medium">{level}</span>
+        </div>
+        <h2 className="text-xl font-bold -mt-2">{t('jlpt.history')}</h2>
+        {history.length === 0
+          ? <p className="text-sm text-gray-500">{t('jlpt.historyEmpty')}</p>
+          : <div className="flex flex-col gap-2 anim-stagger">{history.map((h) => historyRow(h, 'history'))}</div>}
+        {error && <p className="text-sm text-red-500">{error}</p>}
+      </div>
+    )
+  }
 
   // ---------------------------------------------------------------- hub
   function renderHub() {
@@ -434,6 +497,18 @@ export default function JlptPractice() {
               ))}
             </div>
             <p className="text-xs text-gray-400">{t('jlpt.weekHint')}</p>
+          </div>
+        )}
+
+        {o && (
+          <div className="flex flex-col gap-2 anim-stag" style={{ ['--i' as string]: 5 }}>
+            <div className="flex items-center justify-between px-1">
+              <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wide">{t('jlpt.history')}</h3>
+              {history.length > 3 && <button className="text-xs text-blue-500" onClick={() => go('history')}>{t('jlpt.seeAll', { count: history.length })}</button>}
+            </div>
+            {history.length === 0
+              ? <p className="text-sm text-gray-400 px-1">{t('jlpt.historyEmpty')}</p>
+              : history.slice(0, 3).map((h) => historyRow(h, 'hub'))}
           </div>
         )}
 
@@ -668,7 +743,10 @@ export default function JlptPractice() {
     return (
       <div key={`result-${r.id}`} className={`flex flex-col gap-4 pb-6 ${enterClass}`}>
         <div className="pt-4 flex items-center justify-between">
-          <h2 className="text-xl font-bold">{r.timed_out ? t('jlpt.callTimeUp') : t('jlpt.done')}</h2>
+          <div className="flex flex-col">
+            <h2 className="text-xl font-bold">{resultFrom !== 'session' ? t('jlpt.pastSession') : r.timed_out ? t('jlpt.callTimeUp') : t('jlpt.done')}</h2>
+            {resultFrom !== 'session' && <span className="text-xs text-gray-400">{formatDay(r.finished_at)} · {formatDate(r.finished_at, { hour: 'numeric', minute: '2-digit' })}</span>}
+          </div>
           <span className="text-xs px-2.5 py-1 rounded-full bg-blue-50 text-blue-600 font-medium">{r.level} · {t(`jlpt.section.${r.section}`)}</span>
         </div>
 
@@ -683,7 +761,7 @@ export default function JlptPractice() {
             <text x="60" y="64" textAnchor="middle" fontSize="26" fontWeight="700" fill="#111827"><CountUp value={r.correct} />/{r.total}</text>
           </svg>
           <div className="flex flex-col gap-1 min-w-0 text-sm">
-            <b>{SECTION_JA[r.section]} · {t('jlpt.rotation', { n: r.cycle })}</b>
+            <b>{SECTION_JA[r.section]}{resultFrom === 'session' ? ` · ${t('jlpt.rotation', { n: r.cycle })}` : ''}</b>
             <span className="text-gray-500 text-xs">{r.timed_out ? t('jlpt.timedOutNote') : t('jlpt.handedInWith', { time: clock(r.time_limit - r.time_used) })}</span>
             <span className="text-xs">{t('jlpt.lastTime', { score: r.prev ? `${r.prev.correct}/${r.prev.total}` : '—' })}</span>
           </div>
@@ -768,7 +846,12 @@ export default function JlptPractice() {
           </div>
         ))}
 
-        {nextPlan && (
+        {resultFrom !== 'session' && (
+          <button className={secondaryBtn} onClick={() => go(resultFrom === 'history' ? 'history' : 'hub', 'back')}>
+            {resultFrom === 'history' ? t('jlpt.backToHistory') : t('jlpt.backToPractice')}
+          </button>
+        )}
+        {resultFrom === 'session' && nextPlan && (
           <div className="bg-white rounded-xl shadow-sm p-4 flex flex-col gap-3">
             <span className="text-xs text-gray-400">{t('jlpt.nextInRotation')}</span>
             <b>{SECTION_JA[nextPlan.section]} · {t(`jlpt.section.${nextPlan.section}`)} · {t('jlpt.questions', { count: nextPlan.questions })} · {clock(nextPlan.time_limit)}</b>
@@ -789,6 +872,7 @@ export default function JlptPractice() {
       {phase === 'brief' && renderBrief()}
       {phase === 'exam' && renderExam()}
       {phase === 'result' && renderResult()}
+      {phase === 'history' && renderHistory()}
       {call && <Call {...call} />}
     </div>
   )

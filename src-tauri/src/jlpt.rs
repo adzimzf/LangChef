@@ -786,6 +786,8 @@ pub struct JlptResult {
     pub time_used: i64,
     pub time_limit: i64,
     pub timed_out: bool,
+    /// Milliseconds since the epoch.
+    pub finished_at: i64,
     /// The section's previous result at this level.
     pub prev: Option<Score>,
     pub parts: Vec<ReviewedPart>,
@@ -800,25 +802,26 @@ pub struct JlptResult {
 #[tauri::command]
 pub fn db_jlpt_submit(app: tauri::AppHandle, id: i64, answers: Vec<Option<usize>>, timed_out: bool) -> Result<JlptResult, String> {
     let conn = open_db(&app)?;
-    let Loaded { level, section, time_limit, parts, answers: saved, started_at: started, finished_at: finished } = load_session(&conn, id)?;
-    let prev = last_scores(&conn, &level)?.get(&section).copied();
-    let answers = if finished.is_some() { saved } else { answers };
-    let scores = grade(&parts, &answers);
-    let correct: i64 = scores.iter().map(|s| s.correct).sum();
-    let total: i64 = scores.iter().map(|s| s.total).sum();
-    let answered = answers.iter().filter(|a| a.is_some()).count() as i64;
-    let (time_used, timed_out) = if finished.is_some() {
-        conn.query_row("SELECT time_used, timed_out FROM jlpt_sessions WHERE id = ?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))
-            .map_err(|e| e.to_string())?
-    } else {
+    let Loaded { level, section, time_limit, parts, started_at, finished_at, .. } = load_session(&conn, id)?;
+    if finished_at.is_none() {
+        let scores = grade(&parts, &answers);
         let now = now_ms();
-        let elapsed = (now - started.unwrap_or(now)) / 1000;
+        let elapsed = ((now - started_at.unwrap_or(now)) / 1000).max(0);
         let late = elapsed > time_limit + GRACE_SECONDS;
         let json = serde_json::to_string(&answers).map_err(|e| e.to_string())?;
         conn.execute(
             "UPDATE jlpt_sessions SET answers = ?2, finished_at = ?3, finished_on = ?4, correct = ?5, total = ?6, time_used = ?7, timed_out = ?8
              WHERE id = ?1",
-            params![id, json, now, today(), correct, total, elapsed.min(time_limit), timed_out || late],
+            params![
+                id,
+                json,
+                now,
+                today(),
+                scores.iter().map(|s| s.correct).sum::<i64>(),
+                scores.iter().map(|s| s.total).sum::<i64>(),
+                elapsed.min(time_limit),
+                timed_out || late
+            ],
         )
         .map_err(|e| e.to_string())?;
         let rot = rotation(&level);
@@ -836,8 +839,31 @@ pub fn db_jlpt_submit(app: tauri::AppHandle, id: i64, answers: Vec<Option<usize>
             params![today()],
         )
         .map_err(|e| e.to_string())?;
-        (elapsed.min(time_limit), timed_out || late)
-    };
+    }
+    result_of(&conn, id)
+}
+
+/// A finished session as the results screen shows it: every question with its answer and explanation.
+fn result_of(conn: &Connection, id: i64) -> Result<JlptResult, String> {
+    let Loaded { level, section, time_limit, parts, answers, finished_at, .. } = load_session(conn, id)?;
+    let finished_at = finished_at.ok_or_else(|| app_error("jlpt_not_finished", id.to_string()))?;
+    let (time_used, timed_out): (i64, bool) = conn
+        .query_row("SELECT time_used, timed_out FROM jlpt_sessions WHERE id = ?1", params![id], |r| Ok((r.get(0)?, r.get(1)?)))
+        .map_err(|e| e.to_string())?;
+    // The same section's result before this one.
+    let prev = conn
+        .query_row(
+            "SELECT correct, total FROM jlpt_sessions
+             WHERE level = ?1 AND section = ?2 AND finished_at < ?3 ORDER BY finished_at DESC LIMIT 1",
+            params![level, section, finished_at],
+            |r| Ok(Score { correct: r.get(0)?, total: r.get(1)? }),
+        )
+        .optional()
+        .map_err(|e| e.to_string())?;
+    let scores = grade(&parts, &answers);
+    let correct: i64 = scores.iter().map(|s| s.correct).sum();
+    let total: i64 = scores.iter().map(|s| s.total).sum();
+    let answered = answers.iter().filter(|a| a.is_some()).count() as i64;
     let mut i = 0;
     let mut missed_words = Vec::new();
     let reviewed = parts
@@ -862,7 +888,7 @@ pub fn db_jlpt_submit(app: tauri::AppHandle, id: i64, answers: Vec<Option<usize>
                 .collect(),
         })
         .collect();
-    let (next, cycle) = rotation_state(&conn, &level);
+    let (next, cycle) = rotation_state(conn, &level);
     Ok(JlptResult {
         id,
         next_section: rotation(&level)[next],
@@ -875,10 +901,181 @@ pub fn db_jlpt_submit(app: tauri::AppHandle, id: i64, answers: Vec<Option<usize>
         time_used,
         time_limit,
         timed_out,
+        finished_at,
         prev,
         parts: reviewed,
         missed_words,
     })
+}
+
+/// A past session's full review, for the history list.
+#[tauri::command]
+pub fn db_jlpt_result(app: tauri::AppHandle, id: i64) -> Result<JlptResult, String> {
+    result_of(&open_db(&app)?, id)
+}
+
+// ---------------------------------------------------------------------------
+// History and stats
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct HistoryItem {
+    pub id: i64,
+    pub level: String,
+    pub section: String,
+    pub correct: i64,
+    pub total: i64,
+    pub time_used: i64,
+    pub time_limit: i64,
+    pub timed_out: bool,
+    /// Milliseconds since the epoch.
+    pub finished_at: i64,
+}
+
+fn history(conn: &Connection, level: Option<&str>, limit: i64) -> Result<Vec<HistoryItem>, String> {
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, level, section, correct, total, time_used, time_limit, timed_out, finished_at FROM jlpt_sessions
+             WHERE finished_at IS NOT NULL AND (?1 IS NULL OR level = ?1)
+             ORDER BY finished_at DESC, id DESC LIMIT ?2",
+        )
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map(params![level, limit], |r| {
+            Ok(HistoryItem {
+                id: r.get(0)?,
+                level: r.get(1)?,
+                section: r.get(2)?,
+                correct: r.get(3)?,
+                total: r.get(4)?,
+                time_used: r.get(5)?,
+                time_limit: r.get(6)?,
+                timed_out: r.get(7)?,
+                finished_at: r.get(8)?,
+            })
+        })
+        .map_err(|e| e.to_string())?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(|e| e.to_string())
+}
+
+/// Finished sessions, newest first; all levels when `level` is None.
+#[tauri::command]
+pub fn db_jlpt_history(app: tauri::AppHandle, level: Option<String>, limit: Option<i64>) -> Result<Vec<HistoryItem>, String> {
+    history(&open_db(&app)?, level.as_deref(), limit.unwrap_or(200).clamp(1, 500))
+}
+
+#[derive(Serialize, Debug, PartialEq)]
+pub struct SectionStats {
+    pub section: &'static str,
+    pub sessions: i64,
+    /// Share of right answers over the period, 0-100; None without sessions.
+    pub accuracy: Option<i64>,
+}
+
+/// Accuracy per section on one day (0-100), for the trend chart; None where that section wasn't practised.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct DayStats {
+    pub date: String,
+    pub vocab: Option<i64>,
+    pub grammar: Option<i64>,
+    pub reading: Option<i64>,
+    pub listening: Option<i64>,
+}
+
+#[derive(Serialize, Debug)]
+pub struct LevelEstimate {
+    pub level: String,
+    pub estimate: Estimate,
+}
+
+#[derive(Serialize, Debug)]
+pub struct JlptStats {
+    pub sessions: i64,
+    /// Share of sessions handed in before the time ran out, 0-100.
+    pub in_time: Option<i64>,
+    pub sections: Vec<SectionStats>,
+    pub days: Vec<DayStats>,
+    /// Estimated score per level, for levels with a result in every section (all time, not just the period).
+    pub estimates: Vec<LevelEstimate>,
+}
+
+fn pct(correct: i64, total: i64) -> Option<i64> {
+    (total > 0).then(|| ((correct as f64 / total as f64) * 100.0).round() as i64)
+}
+
+fn stats(conn: &Connection, date_from: &str, date_to: &str) -> Result<JlptStats, String> {
+    let range = "finished_at IS NOT NULL AND finished_on >= ?1 AND finished_on <= ?2";
+    let (sessions, timed_out): (i64, i64) = conn
+        .query_row(
+            &format!("SELECT COUNT(*), COALESCE(SUM(timed_out), 0) FROM jlpt_sessions WHERE {range}"),
+            params![date_from, date_to],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let mut per_section: HashMap<String, (i64, i64, i64)> = HashMap::new();
+    let mut per_day: Vec<(String, String, i64, i64)> = Vec::new();
+    {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT finished_on, section, COUNT(*), SUM(correct), SUM(total) FROM jlpt_sessions WHERE {range}
+                 GROUP BY finished_on, section ORDER BY finished_on"
+            ))
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![date_from, date_to], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, i64>(2)?, r.get::<_, i64>(3)?, r.get::<_, i64>(4)?))
+            })
+            .map_err(|e| e.to_string())?;
+        for row in rows {
+            let (day, section, n, correct, total) = row.map_err(|e| e.to_string())?;
+            let e = per_section.entry(section.clone()).or_default();
+            e.0 += n;
+            e.1 += correct;
+            e.2 += total;
+            per_day.push((day, section, correct, total));
+        }
+    }
+    let sections = SECTIONS
+        .iter()
+        .map(|&section| {
+            let (n, correct, total) = per_section.get(section).copied().unwrap_or_default();
+            SectionStats { section, sessions: n, accuracy: pct(correct, total) }
+        })
+        .collect();
+    let mut days: Vec<DayStats> = Vec::new();
+    for (day, section, correct, total) in per_day {
+        if days.last().map(|d| d.date != day).unwrap_or(true) {
+            days.push(DayStats { date: day.clone(), vocab: None, grammar: None, reading: None, listening: None });
+        }
+        let d = days.last_mut().expect("pushed above");
+        let value = pct(correct, total);
+        match section.as_str() {
+            "vocab" => d.vocab = value,
+            "grammar" => d.grammar = value,
+            "reading" => d.reading = value,
+            "listening" => d.listening = value,
+            _ => {}
+        }
+    }
+    let mut estimates = Vec::new();
+    for level in LEVELS {
+        if let Some(estimate) = estimate(level, &last_scores(conn, level)?) {
+            estimates.push(LevelEstimate { level: level.to_string(), estimate });
+        }
+    }
+    Ok(JlptStats {
+        sessions,
+        in_time: pct(sessions - timed_out, sessions),
+        sections,
+        days,
+        estimates,
+    })
+}
+
+/// JLPT practice for the stats dashboard: sessions, accuracy per section and per day in the period.
+#[tauri::command]
+pub fn db_jlpt_stats(app: tauri::AppHandle, date_from: String, date_to: String) -> Result<JlptStats, String> {
+    stats(&open_db(&app)?, &date_from, &date_to)
 }
 
 #[cfg(test)]
@@ -1006,5 +1203,81 @@ mod tests {
         assert_eq!(n3.pass_mark, 95);
         last.insert("listening".to_string(), Score { correct: 1, total: 5 });
         assert!(!estimate("N5", &last).unwrap().passed, "listening below its minimum fails");
+    }
+
+    fn db() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::prepare_db(&conn).unwrap();
+        conn
+    }
+
+    /// A finished session with one 4-option question per answer, `right` of them answered right.
+    fn finished(conn: &Connection, level: &str, section: &str, day: &str, at: i64, right: usize, of: usize, timed_out: bool) -> i64 {
+        let parts = vec![part(&vec![0; of])];
+        let answers: Vec<Option<usize>> = (0..of).map(|i| Some(if i < right { 0 } else { 1 })).collect();
+        conn.execute(
+            "INSERT INTO jlpt_sessions(level, section, explain_lang, data, time_limit, answers, started_at, finished_at, finished_on, correct, total, time_used, timed_out)
+             VALUES (?1, ?2, 'en', ?3, 360, ?4, ?5, ?5, ?6, ?7, ?8, 100, ?9)",
+            params![level, section, serde_json::to_string(&parts).unwrap(), serde_json::to_string(&answers).unwrap(), at, day, right as i64, of as i64, timed_out],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn history_is_newest_first_and_filters_by_level() {
+        let conn = db();
+        finished(&conn, "N5", "vocab", "2026-10-20", 1_000, 7, 10, false);
+        finished(&conn, "N4", "grammar", "2026-10-21", 2_000, 5, 10, false);
+        let newest = finished(&conn, "N5", "reading", "2026-10-22", 3_000, 3, 4, true);
+        conn.execute("INSERT INTO jlpt_sessions(level, section, explain_lang, data, time_limit) VALUES ('N5', 'vocab', 'en', '[]', 360)", []).unwrap();
+        let all = history(&conn, None, 50).unwrap();
+        assert_eq!(all.len(), 3, "unfinished sessions are left out");
+        assert_eq!(all[0].id, newest);
+        assert!(all[0].timed_out);
+        assert_eq!(history(&conn, Some("N5"), 50).unwrap().len(), 2);
+        assert_eq!(history(&conn, Some("N5"), 1).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn result_of_compares_with_the_same_sections_previous_result() {
+        let conn = db();
+        finished(&conn, "N5", "vocab", "2026-10-20", 1_000, 6, 10, false);
+        finished(&conn, "N5", "grammar", "2026-10-21", 2_000, 9, 10, false);
+        let second = finished(&conn, "N5", "vocab", "2026-10-22", 3_000, 8, 10, false);
+        finished(&conn, "N5", "vocab", "2026-10-23", 4_000, 2, 10, false);
+        let r = result_of(&conn, second).unwrap();
+        assert_eq!((r.correct, r.total, r.answered), (8, 10, 10));
+        assert_eq!(r.prev, Some(Score { correct: 6, total: 10 }), "the earlier vocab result, not the later one or grammar");
+        assert_eq!(r.finished_at, 3_000);
+        let unfinished = { conn.execute("INSERT INTO jlpt_sessions(level, section, explain_lang, data, time_limit) VALUES ('N5', 'vocab', 'en', '[]', 360)", []).unwrap(); conn.last_insert_rowid() };
+        assert!(result_of(&conn, unfinished).is_err());
+    }
+
+    #[test]
+    fn stats_cover_the_period_per_section_and_day() {
+        let conn = db();
+        finished(&conn, "N5", "vocab", "2026-10-01", 500, 10, 10, false); // before the period
+        finished(&conn, "N5", "vocab", "2026-10-20", 1_000, 6, 10, false);
+        finished(&conn, "N5", "vocab", "2026-10-20", 1_100, 8, 10, true);
+        finished(&conn, "N5", "listening", "2026-10-21", 2_000, 3, 5, false);
+        let s = stats(&conn, "2026-10-15", "2026-10-27").unwrap();
+        assert_eq!(s.sessions, 3);
+        assert_eq!(s.in_time, Some(67));
+        let vocab = s.sections.iter().find(|x| x.section == "vocab").unwrap();
+        assert_eq!((vocab.sessions, vocab.accuracy), (2, Some(70)));
+        let grammar = s.sections.iter().find(|x| x.section == "grammar").unwrap();
+        assert_eq!((grammar.sessions, grammar.accuracy), (0, None));
+        assert_eq!(s.days.len(), 2);
+        assert_eq!(s.days[0], DayStats { date: "2026-10-20".into(), vocab: Some(70), grammar: None, reading: None, listening: None });
+        assert_eq!(s.days[1].listening, Some(60));
+        assert!(s.estimates.is_empty(), "no level has a result in every section yet");
+        finished(&conn, "N5", "grammar", "2026-10-22", 3_000, 6, 10, false);
+        finished(&conn, "N5", "reading", "2026-10-22", 3_100, 3, 4, false);
+        let s = stats(&conn, "2026-10-15", "2026-10-27").unwrap();
+        assert_eq!(s.estimates.len(), 1);
+        assert_eq!(s.estimates[0].level, "N5");
+        let empty = stats(&conn, "2027-01-01", "2027-01-31").unwrap();
+        assert_eq!((empty.sessions, empty.in_time, empty.days.len()), (0, None, 0));
     }
 }

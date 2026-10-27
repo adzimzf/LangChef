@@ -82,7 +82,7 @@ No test framework configured.
 
 **One card per word (Japanese):** `db_upsert_review_item` saves the dictionary form (`FuriganaAnnotator::lemma`: 下がります → 下がる) and returns the existing card when another form is already in the deck. `db_merge_duplicate_words` (run from `Layout` once the dictionary is ready) fills `review_items.lemma` and folds duplicates into the strongest card. `load_candidates` in `quiz.rs` never offers a card with the same lemma or reading as a wrong option.
 
-**JLPT practice:** `/jlpt` → `db_jlpt_overview(level)` (rotation, plans, estimate) → the briefing calls `llm_jlpt_prepare` (one AI request per 問題 type; reused if never started) → `db_jlpt_begin` stores the start time → answers saved with `db_jlpt_save_answers` → `db_jlpt_submit` grades, moves the rotation on and returns answers with explanations. Spec: `PRDs/JLPT Practice.md`.
+**JLPT practice:** `/jlpt` → `db_jlpt_overview(level)` (rotation, plans, estimate) → the briefing calls `llm_jlpt_prepare` (one AI request per 問題 type; reused if never started) → `db_jlpt_begin` stores the start time → answers saved with `db_jlpt_save_answers` → `db_jlpt_submit` grades, moves the rotation on and returns answers with explanations. Every session stays in `jlpt_sessions`: `db_jlpt_history` lists finished ones (hub + History screen), `db_jlpt_result` reopens one's full review, `db_jlpt_stats(date_from, date_to)` feeds the JLPT card on `/stats` (accuracy per section and per day, share handed in on time, estimate per level). Spec: `PRDs/JLPT Practice.md`.
 
 **Message branching:** Messages support `parent_message_id` and `is_active_path` for branching conversations. `db_deactivate_message_branch` + `db_get_message_siblings` manage tree traversal.
 

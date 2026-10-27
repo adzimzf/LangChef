@@ -43,4 +43,15 @@ Score with a teacher's stamp (たいへんよくできました ≥ 90%, よく�
 
 The page also shows an estimated score sheet on the real scale once every section has a result: N5/N4 Language knowledge · Reading /120 (min 38) + Listening /60 (min 19), pass 80 (N5) / 90 (N4); N3+ three parts /60 each (min 19), pass 95 / 90 / 100. A rough guide, not the official scaled score.
 
+## History and stats
+
+Every session is kept (`jlpt_sessions`). The hub shows the latest three under **History**, and "See all" opens the full list for the level. Each row has the date, section, score, time used, and a "time ran out" mark. Tapping one reopens its full review: every question with your answer, the right answer and the explanation, plus "Add to cards" for missed words. Back returns to where it was opened from.
+
+The stats dashboard (`/stats`) has a **JLPT practice** card for the chosen period:
+- Sessions, and the share handed in before time ran out.
+- Accuracy per section, and a per-day accuracy chart with one line per section.
+- The estimated score for every level that has a result in each section.
+
+JLPT sessions also count in "Total sessions".
+
 All animations are off under `prefers-reduced-motion`.

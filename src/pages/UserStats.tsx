@@ -16,11 +16,13 @@ import StreakCard from '../components/stats/StreakCard'
 import ActiveTimeCard from '../components/stats/ActiveTimeCard'
 import StatsSkeleton from '../components/stats/StatsSkeleton'
 import { t, locale } from '../lib/i18n'
+import type { JlptStats } from '../lib/types'
 
 const ActivityChart = lazy(() => import('../components/stats/ActivityChart'))
 const MasteryChart = lazy(() => import('../components/stats/MasteryChart'))
 const ProficiencyChart = lazy(() => import('../components/stats/ProficiencyChart'))
 const ReviewBreakdown = lazy(() => import('../components/stats/ReviewBreakdown'))
+const JlptStatsCard = lazy(() => import('../components/stats/JlptStatsCard'))
 
 interface Feedback {
   message_id: number
@@ -47,6 +49,7 @@ export default function UserStats() {
   const [feedbackList, setFeedbackList] = useState<Feedback[]>([])
   const [masteryHistory, setMasteryHistory] = useState<{ date: string; mastered: number }[]>([])
   const [cardsAddedHistory, setCardsAddedHistory] = useState<{ date: string; total: number }[]>([])
+  const [jlptStats, setJlptStats] = useState<JlptStats | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -66,6 +69,7 @@ export default function UserStats() {
           invoke<{ date: string; mastered: number }[]>('db_get_mastery_history', { dateFrom, dateTo }),
           invoke<{ date: string; total: number }[]>('db_get_cards_added_history', { dateFrom, dateTo }),
         ])
+        invoke<JlptStats>('db_jlpt_stats', { dateFrom, dateTo }).then(setJlptStats).catch(() => setJlptStats(null))
         setActivity(act)
         setActiveTime(time)
         setReviewItems(items)
@@ -184,6 +188,7 @@ export default function UserStats() {
   const totalSessions = useMemo(() => activity.reduce((s, a) => s + a.count, 0), [activity])
   const chatSessions = useMemo(() => activity.filter(a => a.activity_type === 'chat').reduce((s, a) => s + a.count, 0), [activity])
   const reviewSessions = useMemo(() => activity.filter(a => a.activity_type === 'review').reduce((s, a) => s + a.count, 0), [activity])
+  const jlptSessions = useMemo(() => activity.filter(a => a.activity_type === 'jlpt').reduce((s, a) => s + a.count, 0), [activity])
 
   // ── Mastery ───────────────────────────────────────────────────────
   const mastery = useMemo(() => {
@@ -293,7 +298,7 @@ export default function UserStats() {
               <span className="text-lg font-bold">{totalSessions}</span>
             </div>
             <div className="flex items-center justify-between mt-1">
-              <span className="text-xs text-gray-400">{t('stats.sessionSplit', { chat: chatSessions, review: reviewSessions })}</span>
+              <span className="text-xs text-gray-400">{t('stats.sessionSplit', { chat: chatSessions, review: reviewSessions })}{jlptSessions > 0 ? ` · ${t('stats.sessionSplitJlpt', { n: jlptSessions })}` : ''}</span>
             </div>
           </div>
 
@@ -311,6 +316,13 @@ export default function UserStats() {
           <Suspense fallback={<StatsSkeleton />}>
             <ReviewBreakdown distribution={stateDistribution} dueCount={dueCount} lapsedCount={lapsedCount} />
           </Suspense>
+
+          {/* JLPT practice */}
+          {jlptStats && (jlptStats.sessions > 0 || jlptStats.estimates.length > 0) && (
+            <Suspense fallback={<StatsSkeleton />}>
+              <JlptStatsCard stats={jlptStats} />
+            </Suspense>
+          )}
         </>
       )}
     </div>
