@@ -8,7 +8,7 @@ use crate::grammar_review::{generate_card_back, parse_grammar_detail, GrammarDet
 use crate::locale::{app_error, effective_detail_sql, explain_lang};
 use crate::srs::{
     apply_session_grade, ensure_study, fetch_review_item, format_next_review_minutes,
-    session_progress, set_card_status, ReviewItem, SessionProgress,
+    requeue_card, session_progress, set_card_status, ReviewItem, SessionProgress,
 };
 use crate::words::is_cjk;
 use rand::seq::SliceRandom;
@@ -1300,8 +1300,8 @@ pub fn db_session_save_meaning(
     let study_id = ensure_study(&conn, &today(), &language, max_reviews, max_new_cards)?;
     let card = fetch_review_item(&conn, &card_id)?.ok_or_else(|| app_error("card_gone", ""))?;
     store_new_task(&conn, study_id, &card, true)?;
-    // Re-marking it pending bumps update_time, which puts it behind every other pending card.
-    set_card_status(&conn, study_id, &card_id, "pending")?;
+    // It comes back in the next round, while the meaning is still fresh.
+    requeue_card(&conn, study_id, &card_id)?;
     session_progress(&conn, study_id)
 }
 
