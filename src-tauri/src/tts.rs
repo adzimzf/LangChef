@@ -2,7 +2,7 @@
 //! listening section has real audio on every platform, including Android where the webview has no Japanese voice.
 //!
 //! Nothing is bundled and nothing loads at start-up. "Download" (`tts_install`) fetches, into `<app data>/tts`:
-//! - the voice model (Tsukuyomi-chan, piper-plus `zs-v1`, pinned Hugging Face commit);
+//! - the voice model (Tsukuyomi-chan 6-language MB-iSTFT, the Tsukuyomi model piper-plus's own registry recommends);
 //! - the NAIST-JDIC source, compiled on the device into the dictionary jpreprocess reads (like the furigana dictionary);
 //! - on desktop, ONNX Runtime from Microsoft's release. Android has it in the APK (`onnxruntime-android` in Gradle).
 //!
@@ -18,14 +18,18 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 
-const MODEL_URL: &str = "https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan/resolve/93c1fb6d67c29accc9ddf52326bb4582b1b52a3d/releases/zs-v1/tsukuyomi.onnx";
-const CONFIG_URL: &str = "https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan/resolve/93c1fb6d67c29accc9ddf52326bb4582b1b52a3d/releases/zs-v1/tsukuyomi.onnx.json";
+// The same files as `tsukuyomi-6lang-v2` in piper-plus's model registry. The earlier `releases/zs-v1` export is a
+// fine-tune of the experimental zero-shot base, which expects a reference speaker embedding: without one it sounds robotic.
+const MODEL_URL: &str = "https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan/resolve/main/tsukuyomi-chan-6lang-fp16.onnx";
+const CONFIG_URL: &str = "https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan/resolve/main/config.json";
 const DICT_URL: &str = "https://github.com/jpreprocess/naist-jdic/archive/refs/tags/v0.1.3.tar.gz";
 /// Matches the ONNX Runtime API that `ort` 2.0.0-rc.15 is built against, and `onnxruntime-android` in Gradle.
 const ORT_VERSION: &str = "1.31.1";
 
-const MODEL_FILE: &str = "tsukuyomi.onnx";
-const CONFIG_FILE: &str = "tsukuyomi.onnx.json";
+const MODEL_FILE: &str = "tsukuyomi-6lang.onnx";
+const CONFIG_FILE: &str = "tsukuyomi-6lang.onnx.json";
+/// The zs-v1 voice of earlier versions, deleted when the new one is downloaded.
+const OLD_MODEL_FILES: [&str; 2] = ["tsukuyomi.onnx", "tsukuyomi.onnx.json"];
 const DICT_DIR: &str = "naist-jdic";
 /// Written last when the dictionary is complete, so a half-built one is never used.
 const DICT_DONE: &str = ".built";
@@ -34,7 +38,8 @@ const ORT_DIR: &str = "onnxruntime";
 /// Pause between the lines of a recording.
 const LINE_GAP_SECONDS: f32 = 0.55;
 /// Male lines are played slower than they were made, which lowers the pitch: the voice has one (female) speaker.
-const MALE_PITCH: f32 = 0.86;
+/// Kept small (about 1.4 semitones): a bigger shift moves the formants too and sounds like a slowed-down tape.
+const MALE_PITCH: f32 = 0.92;
 
 /// The loaded voice, kept between recordings (loading takes a moment and ~200 MB).
 #[derive(Default)]
@@ -235,6 +240,33 @@ fn extract_runtime(tgz: &Path, dir: &Path, lib: &str) -> Result<(), String> {
     Err(app_error("tts_runtime_missing", format!("{lib} not found in the ONNX Runtime archive")))
 }
 
+/// Keeps only Japanese in the multilingual voice's `language_id_map`. piper-plus then reads every line with the
+/// Japanese phonemizer: a line of kanji only (何曜日ですか without kana would be one) is never read as Chinese, and
+/// Latin letters are read by Open JTalk. The model still gets Japanese's language id.
+fn japanese_only_config(path: &Path) -> Result<(), String> {
+    let mut config: serde_json::Value =
+        serde_json::from_slice(&fs::read(path).map_err(|e| e.to_string())?).map_err(|e| app_error("tts_load_failed", e.to_string()))?;
+    if let Some(map) = config.get_mut("language_id_map").and_then(|m| m.as_object_mut()) {
+        let ja = map.get("ja").cloned().ok_or_else(|| app_error("tts_load_failed", "no ja in language_id_map"))?;
+        map.clear();
+        map.insert("ja".into(), ja);
+    }
+    fs::write(path, serde_json::to_vec_pretty(&config).map_err(|e| e.to_string())?).map_err(|e| e.to_string())
+}
+
+/// Takes out the spaces JLPT scripts put between words for beginners (飲みものを 買いましょうか): Open JTalk reads
+/// each space as a break, which chops a sentence into flat, separate pieces. Spaces next to Latin text stay.
+fn join_words(text: &str) -> String {
+    let chars: Vec<char> = text.chars().collect();
+    let latin = |c: Option<&char>| c.is_some_and(|c| c.is_ascii_alphanumeric());
+    chars
+        .iter()
+        .enumerate()
+        .filter(|(i, c)| !(c.is_whitespace() && !latin(chars.get(i.wrapping_sub(1))) && !latin(chars.get(i + 1))))
+        .map(|(_, c)| *c)
+        .collect()
+}
+
 fn set_dictionary_env(dir: &Path) {
     // piper-plus finds the jpreprocess dictionary through this variable, and must never fetch one itself.
     std::env::set_var("JPREPROCESS_DICT", dir.join(DICT_DIR));
@@ -280,7 +312,11 @@ pub async fn tts_install(app: tauri::AppHandle) -> Result<TtsStatus, String> {
             let _ = handle.emit("tts-progress", Progress { stage, percent });
         };
         if !model_ready(&dir) {
+            for old in OLD_MODEL_FILES {
+                let _ = fs::remove_file(dir.join(old));
+            }
             download(CONFIG_URL, &dir.join(CONFIG_FILE), &|_| {})?;
+            japanese_only_config(&dir.join(CONFIG_FILE))?;
             download(MODEL_URL, &dir.join(MODEL_FILE), &|p| emit("voice", p))?;
         }
         if !dict_ready(&dir) {
@@ -392,17 +428,18 @@ fn speak(voice: &mut PiperVoice, lines: &[String]) -> Result<(u32, Vec<i16>), St
     let mut rate = 22050;
     for line in lines {
         let (who, text) = speaker_of(line);
+        let text = join_words(text);
         if text.is_empty() {
             continue;
         }
         let params = SynthesisParams {
             language_override: Some("ja".to_string()),
-            // The Tsukuyomi model sounds best at 0.5 (piper-plus README); men are slowed later, so made a bit faster.
-            noise_scale: 0.5,
-            length_scale: if who == Speaker::Male { 0.9 } else { 1.0 },
+            // Men are slowed afterwards to lower the pitch, so they're made that much faster here: same speed in the end.
+            length_scale: if who == Speaker::Male { MALE_PITCH } else { 1.0 },
+            // piper-plus's own noise defaults (tuned for its models).
             ..Default::default()
         };
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| voice.synthesize_with_params(text, &params)))
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| voice.synthesize_with_params(&text, &params)))
             .map_err(|_| app_error("tts_failed", "panic while speaking"))?
             .map_err(|e| app_error("tts_failed", e.to_string()))?;
         rate = result.sample_rate;
@@ -450,6 +487,27 @@ mod tests {
         assert_eq!(speaker_of("男：飲みものを 買いましょうか。"), (Speaker::Male, "飲みものを 買いましょうか。"));
         assert_eq!(speaker_of(" 女:はい。"), (Speaker::Female, "はい。"));
         assert_eq!(speaker_of("男の 人と 女の 人が 話して います。"), (Speaker::Narrator, "男の 人と 女の 人が 話して います。"));
+    }
+
+    #[test]
+    fn joins_spaced_words_but_not_latin() {
+        assert_eq!(join_words("飲みものを 買いましょうか。"), "飲みものを買いましょうか。");
+        assert_eq!(join_words("あした　ピクニックに 行きます"), "あしたピクニックに行きます");
+        assert_eq!(join_words("この T シャツ"), "この T シャツ");
+        assert_eq!(join_words("New York"), "New York");
+    }
+
+    #[test]
+    fn config_keeps_only_japanese() {
+        let dir = std::env::temp_dir().join(format!("langchef-tts-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("c.json");
+        fs::write(&path, r#"{"num_languages":6,"language_id_map":{"ja":0,"en":1,"zh":2},"audio":{"sample_rate":22050}}"#).unwrap();
+        japanese_only_config(&path).unwrap();
+        let c: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+        assert_eq!(c["language_id_map"], serde_json::json!({"ja": 0}));
+        assert_eq!(c["num_languages"], 6, "the model still has 6 language ids");
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -504,7 +562,7 @@ mod tests {
     }
 
     /// End to end with real files, run by hand:
-    /// `TTS_TEST_DIR=<dir with tsukuyomi.onnx(.json), naist-jdic/ and onnxruntime/> cargo test --lib tts -- --ignored`
+    /// `TTS_TEST_DIR=<dir with tsukuyomi-6lang.onnx(.json), naist-jdic/ and onnxruntime/> cargo test --lib tts -- --ignored`
     /// (`naist-jdic.tar.gz` / `onnxruntime.tgz` there are compiled / extracted first when missing).
     #[test]
     #[ignore]
