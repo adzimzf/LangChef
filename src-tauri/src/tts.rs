@@ -37,8 +37,12 @@ const WOMAN: u32 = 10005;
 const MAN: u32 = 10001;
 const NARRATOR: u32 = 10007;
 
-/// Pause between the lines of a recording.
+/// Pause between the lines of a dialog, and the longer one around the narrator's lines (as in the test room).
 const LINE_GAP_SECONDS: f32 = 0.55;
+const NARRATOR_GAP_SECONDS: f32 = 1.0;
+/// The narrator reads like a test announcer: a little slower and with flatter intonation than the people talking.
+const NARRATOR_SPEED: f32 = 0.9;
+const NARRATOR_INTONATION: f32 = 0.8;
 
 /// The loaded voice, kept between recordings (loading takes a moment).
 #[derive(Default)]
@@ -328,6 +332,23 @@ fn join_words(text: &str) -> String {
         .collect()
 }
 
+/// The lines as they are spoken: like the real test, the narrator's question (the last sentence of the opening narrator
+/// line, when it asks something) is asked again after the dialog.
+fn with_repeated_question(lines: &[String]) -> Vec<String> {
+    let mut out = lines.to_vec();
+    let Some(first) = lines.first().filter(|l| speaker_of(l).0 == Speaker::Narrator) else { return out };
+    let question = first
+        .split_inclusive('。')
+        .map(str::trim)
+        .rfind(|s| !s.is_empty())
+        .filter(|s| s.trim_end_matches(['。', '？', '?']).ends_with('か'));
+    let last_dialog = lines.iter().rposition(|l| speaker_of(l).0 != Speaker::Narrator);
+    if let (Some(question), Some(at)) = (question, last_dialog) {
+        out.insert(at + 1, question.to_string());
+    }
+    out
+}
+
 /// Sample rate and samples of a mono 16-bit WAV as VOICEVOX writes it (44-byte header).
 fn wav_samples(wav: &[u8]) -> Option<(u32, Vec<i16>)> {
     if wav.len() < 44 || &wav[0..4] != b"RIFF" || &wav[36..40] != b"data" {
@@ -359,23 +380,41 @@ fn wav_bytes(sample_rate: u32, samples: &[i16]) -> Vec<u8> {
     out
 }
 
+/// One line in its speaker's voice; the narrator slower and flatter. Returns a WAV file.
+fn speak_line(synth: &Synthesizer<OpenJtalk>, who: Speaker, text: &str) -> Result<Vec<u8>, String> {
+    let failed = |e: String| app_error("tts_failed", e);
+    if who != Speaker::Narrator {
+        return synth.tts(text, who.style()).perform().map_err(|e| failed(e.to_string()));
+    }
+    // AudioQuery's scales are typed floats; set them through its (stable, ENGINE-compatible) JSON form.
+    let query = synth.create_audio_query(text, who.style()).map_err(|e| failed(e.to_string()))?;
+    let mut json = serde_json::to_value(&query).map_err(|e| failed(e.to_string()))?;
+    json["speedScale"] = NARRATOR_SPEED.into();
+    json["intonationScale"] = NARRATOR_INTONATION.into();
+    let query: voicevox_core::AudioQuery = serde_json::from_value(json).map_err(|e| failed(e.to_string()))?;
+    synth.synthesis(&query, who.style()).perform().map_err(|e| failed(e.to_string()))
+}
+
 /// Speaks the lines one after another with a pause between them, each in its speaker's voice. Returns a WAV file.
 fn speak(synth: &Synthesizer<OpenJtalk>, lines: &[String]) -> Result<Vec<u8>, String> {
     let mut audio: Vec<i16> = Vec::new();
     let mut rate = 24000;
-    for line in lines {
-        let (who, text) = speaker_of(line);
+    let mut last: Option<Speaker> = None;
+    for line in with_repeated_question(lines) {
+        let (who, text) = speaker_of(&line);
         let text = join_words(text);
         if text.is_empty() {
             continue;
         }
-        let wav = synth.tts(&text, who.style()).perform().map_err(|e| app_error("tts_failed", e.to_string()))?;
+        let wav = speak_line(synth, who, &text)?;
         let (line_rate, samples) = wav_samples(&wav).ok_or_else(|| app_error("tts_failed", "unexpected WAV"))?;
         rate = line_rate;
-        if !audio.is_empty() {
-            audio.extend(std::iter::repeat_n(0, (rate as f32 * LINE_GAP_SECONDS) as usize));
+        if let Some(prev) = last {
+            let gap = if prev == Speaker::Narrator || who == Speaker::Narrator { NARRATOR_GAP_SECONDS } else { LINE_GAP_SECONDS };
+            audio.extend(std::iter::repeat_n(0, (rate as f32 * gap) as usize));
         }
         audio.extend(samples);
+        last = Some(who);
     }
     Ok(wav_bytes(rate, &audio))
 }
@@ -418,6 +457,21 @@ mod tests {
         assert_eq!(join_words("あした　ピクニックに 行きます"), "あしたピクニックに行きます");
         assert_eq!(join_words("この T シャツ"), "この T シャツ");
         assert_eq!(join_words("New York"), "New York");
+    }
+
+    #[test]
+    fn narrator_question_is_asked_again_after_the_dialog() {
+        let s = |v: &[&str]| v.iter().map(|l| l.to_string()).collect::<Vec<_>>();
+        let lines = s(&["男の人と女の人が話しています。男の人はこのあと何をしますか。", "男：ケーキを買おう。", "女：いいね。", "いち。ケーキを買う"]);
+        assert_eq!(
+            with_repeated_question(&lines),
+            s(&["男の人と女の人が話しています。男の人はこのあと何をしますか。", "男：ケーキを買おう。", "女：いいね。", "男の人はこのあと何をしますか。", "いち。ケーキを買う"])
+        );
+        // No question in the narrator line (概要理解), or no dialog (発話表現): nothing is added.
+        let summary = s(&["ラジオで男の人が話しています。", "男：きょうは…"]);
+        assert_eq!(with_repeated_question(&summary), summary);
+        let no_dialog = s(&["友だちに本を借りたいです。何と言いますか。", "いち。貸して"]);
+        assert_eq!(with_repeated_question(&no_dialog), no_dialog);
     }
 
     #[test]
