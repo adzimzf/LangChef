@@ -19,7 +19,9 @@
   --ok: #16a34a; --ok-soft: #e7f6ec;
   --warn: #d97706; --warn-soft: #fdf3e2;
   --bad: #dc2626; --bad-soft: #fdecec;
-  --hero-a: #3b82f6; --hero-b: #2563eb;
+  --hero-a: #3b82f6; --hero-b: #2563eb; --hero-c: #4f46e5;
+  --seal: #d23a2f;
+  --c-chat: #3b82f6; --c-rev: #22c55e; --c-jlpt: #e11d48; --c-words: #f59e0b; --c-read: #14b8a6; --c-gram: #6366f1; --c-stats: #a855f7;
   --ui: "Noto Sans JP", system-ui, -apple-system, "Segoe UI", sans-serif;
   --booklet: "Noto Serif JP", "Hiragino Mincho ProN", "Yu Mincho", serif;
 }
@@ -27,13 +29,13 @@
   --bg: #0e131a; --card: #161d27; --sunk: #1d2531; --fg: #e5eaf2; --muted: #93a0b5; --line: #263041;
   --accent: #5b95ff; --accent-strong: #7aa8ff; --accent-soft: #1b2a45; --ink: #e5eaf2;
   --ok: #34d399; --ok-soft: #12322a; --warn: #fbbf24; --warn-soft: #3a2c10; --bad: #f87171; --bad-soft: #3d1a1c;
-  --hero-a: #2b5fc2; --hero-b: #1d468f; color-scheme: dark;
+  --hero-a: #2b5fc2; --hero-b: #1d468f; --hero-c: #3b3496; --seal: #ff6b5e; color-scheme: dark;
 } }
 :root[data-theme="dark"] {
   --bg: #0e131a; --card: #161d27; --sunk: #1d2531; --fg: #e5eaf2; --muted: #93a0b5; --line: #263041;
   --accent: #5b95ff; --accent-strong: #7aa8ff; --accent-soft: #1b2a45; --ink: #e5eaf2;
   --ok: #34d399; --ok-soft: #12322a; --warn: #fbbf24; --warn-soft: #3a2c10; --bad: #f87171; --bad-soft: #3d1a1c;
-  --hero-a: #2b5fc2; --hero-b: #1d468f; color-scheme: dark;
+  --hero-a: #2b5fc2; --hero-b: #1d468f; --hero-c: #3b3496; --seal: #ff6b5e; color-scheme: dark;
 }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
@@ -96,14 +98,12 @@ h2 { font-size: 12px; margin: 0; color: var(--muted); text-transform: uppercase;
 .map td.n { font-variant-numeric: tabular-nums; white-space: nowrap; }
 
 /* Bottom nav (mirrors the app's tab bar, with the new tab) */
-.nav { position: sticky; bottom: 0; background: var(--card); border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(7, 1fr);
+.nav { position: sticky; bottom: 0; background: var(--card); border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(6, 1fr);
   margin-left: calc(-1 * max(16px, env(safe-area-inset-left, 0px))); margin-right: calc(-1 * max(16px, env(safe-area-inset-right, 0px)));
   padding: 6px max(8px, env(safe-area-inset-right, 0px)) calc(6px + env(safe-area-inset-bottom, 0px)) max(8px, env(safe-area-inset-left, 0px)); }
 .nav span { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 10px; color: var(--muted); padding: 4px 0; }
 .nav svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; }
 .nav span.on { color: var(--accent); font-weight: 500; }
-.nav .new { position: relative; }
-.nav .new::after { content: "NEW"; position: absolute; top: -2px; right: 2px; font-size: 7.5px; background: var(--bad); color: #fff; border-radius: 4px; padding: 0 3px; font-weight: 700; }
 
 /* Briefing — the booklet cover */
 .cover { background: var(--card); border: 1.5px solid var(--fg); border-radius: 4px; padding: 22px 18px; display: flex; flex-direction: column; gap: 12px; font-family: var(--booklet); }
@@ -195,6 +195,84 @@ body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-a
 .level button { border: 1.5px solid var(--line); background: var(--card); border-radius: 10px; padding: 4px 12px; font-weight: 700; font-size: 13px; }
 .level button.on { border-color: var(--accent); color: var(--accent-strong); background: var(--accent-soft); }
 .level button:disabled { opacity: .45; }
+
+/* Main menu (the app's Home) */
+.menu-hero { border-radius: 18px; padding: 20px; color: #fff; background: linear-gradient(140deg, var(--hero-a), var(--hero-b)); display: flex; flex-direction: column; gap: 6px; }
+.menu-hero .t { font-size: 20px; font-weight: 700; }
+.menu-hero .stats { display: flex; gap: 18px; margin-top: 8px; }
+.menu-hero .stats span { display: flex; align-items: center; gap: 6px; font-size: 13px; opacity: .9; }
+.menu-hero .stats b { font-size: 18px; }
+.menu-hero svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.qa { display: flex; flex-direction: column; gap: 8px; }
+.action { width: 100%; display: flex; align-items: center; gap: 12px; text-align: left; background: var(--card); border: 0; border-radius: 14px; padding: 14px; box-shadow: 0 1px 2px rgb(0 0 0 / .05); transition: transform .15s, box-shadow .15s; }
+.action:hover { box-shadow: 0 4px 14px rgb(0 0 0 / .08); transform: translateY(-1px); }
+.action:active { transform: scale(.985); }
+.action .ic { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; color: #fff; flex-shrink: 0; position: relative; overflow: hidden; }
+.action .ic svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.action .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.action .tx b { font-weight: 500; font-size: 15px; }
+.action .tx span { font-size: 12px; color: var(--muted); }
+.action .chev { color: var(--line); font-size: 18px; }
+.badge-new { font-size: 9.5px; font-weight: 700; color: #fff; background: var(--c-jlpt); border-radius: 5px; padding: 1px 5px; margin-left: 6px; vertical-align: 2px; display: inline-block; }
+.rotdots { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: 1px; }
+.rotdots i { width: 6px; height: 6px; border-radius: 50%; background: var(--line); }
+.rotdots i.done { background: var(--ok); } .rotdots i.next { background: var(--c-jlpt); }
+.action.feature .ic::after { content: ""; position: absolute; top: -20%; bottom: -20%; width: 40%; background: linear-gradient(90deg, transparent, rgb(255 255 255 / .55), transparent); animation: shine 3.2s ease-in-out infinite; }
+.action.feature .badge-new { animation: pop .5s .5s both, wiggle 4s 2s ease-in-out infinite; }
+.tip { background: var(--warn-soft); border-radius: 12px; padding: 12px 14px; font-size: 13px; }
+.seal { position: absolute; top: 12px; right: 12px; width: 76px; height: 76px; border-radius: 50%; border: 2.5px solid var(--seal); color: var(--seal); display: grid; place-items: center; text-align: center; font-family: var(--booklet); font-weight: 600; font-size: 11px; line-height: 1.25; transform: rotate(-14deg); opacity: .9; padding: 6px; }
+.seal::before { content: ""; position: absolute; inset: 4px; border-radius: 50%; border: 1px solid var(--seal); opacity: .6; }
+.call .count { font-family: var(--ui); font-size: 72px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+#confetti { position: fixed; inset: 0; pointer-events: none; z-index: 50; }
+
+/* Motion */
+@keyframes in-fwd { from { opacity: 0; transform: translateX(32px); } }
+@keyframes in-back { from { opacity: 0; transform: translateX(-32px); } }
+@keyframes rise { from { opacity: 0; transform: translateY(16px); } }
+@keyframes pop { 0% { transform: scale(.5); opacity: 0; } 70% { transform: scale(1.15); opacity: 1; } 100% { transform: scale(1); } }
+@keyframes press { 0% { transform: scale(1); } 40% { transform: scale(.97); } 100% { transform: scale(1); } }
+@keyframes grow { from { width: 0; } }
+@keyframes shine { 0%, 65% { left: -50%; } 100% { left: 130%; } }
+@keyframes wiggle { 0%, 92%, 100% { transform: rotate(0); } 94% { transform: rotate(-8deg); } 96% { transform: rotate(8deg); } 98% { transform: rotate(-4deg); } }
+@keyframes halo { 0% { box-shadow: 0 0 0 0 var(--accent); } 100% { box-shadow: 0 0 0 9px transparent; } }
+@keyframes drift { from { background-position: 0% 50%; } to { background-position: 100% 50%; } }
+@keyframes stamp { 0% { transform: scale(2.2); opacity: 0; } 55% { transform: scale(.92); opacity: 1; } 100% { transform: scale(1); } }
+@keyframes seal { 0% { transform: rotate(-14deg) scale(2.4); opacity: 0; } 60% { transform: rotate(-14deg) scale(.9); opacity: .95; } 100% { transform: rotate(-14deg) scale(1); opacity: .9; } }
+@keyframes shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-4px); } 40% { transform: translateX(4px); } 60% { transform: translateX(-3px); } 80% { transform: translateX(2px); } }
+@keyframes fade { from { opacity: 0; } }
+@keyframes sheet-up { from { transform: translateY(100%); } }
+@keyframes ink { from { transform: scale(0); opacity: .6; } to { transform: scale(2.6); opacity: 0; } }
+.app.enter-fwd > * { animation: in-fwd .34s cubic-bezier(.2, .8, .2, 1) backwards; }
+.app.enter-back > * { animation: in-back .34s cubic-bezier(.2, .8, .2, 1) backwards; }
+.app[class*="enter-"] .stag { animation: rise .5s cubic-bezier(.2, .8, .2, 1) backwards; animation-delay: calc(var(--i, 0) * 70ms + 60ms); }
+.app[class*="enter-"] .hero.stag, .app[class*="enter-"] .menu-hero.stag { animation: rise .5s cubic-bezier(.2, .8, .2, 1) backwards, drift 9s ease-in-out infinite alternate; animation-delay: calc(var(--i, 0) * 70ms + 60ms), 0s; }
+.app[class*="enter-"] .bar i { animation: grow 1s .35s cubic-bezier(.2, .8, .2, 1) backwards; }
+.app[class*="enter-"] .week .d.on { animation: pop .45s backwards; animation-delay: calc(var(--i, 0) * 70ms + 350ms); }
+.app[class*="enter-"] .step.just-done .s { animation: pop .5s .4s backwards; display: inline-block; }
+.hero, .menu-hero { background: linear-gradient(120deg, var(--hero-a), var(--hero-b), var(--hero-c), var(--hero-a)); background-size: 300% 300%; animation: drift 9s ease-in-out infinite alternate; }
+.hero .btn { position: relative; overflow: hidden; }
+.hero .btn::after { content: ""; position: absolute; top: 0; bottom: 0; width: 40%; background: linear-gradient(90deg, transparent, rgb(59 130 246 / .18), transparent); animation: shine 3.6s ease-in-out infinite; }
+.step.next { animation: halo 1.8s ease-out infinite; }
+.btn, .step, .choice, .cell { transition: transform .12s, background-color .15s, border-color .15s; }
+.btn:not(:disabled):active, .step:active, .cell:active { transform: scale(.96); }
+#qscreen.q-next { animation: in-fwd .26s cubic-bezier(.2, .8, .2, 1) backwards; }
+#qscreen.q-prev { animation: in-back .26s cubic-bezier(.2, .8, .2, 1) backwards; }
+.choice.just { animation: press .25s; }
+.choice.just .bubble { animation: pop .35s; position: relative; }
+.choice.just .bubble::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: var(--ink); animation: ink .5s ease-out forwards; }
+.timer.shake { animation: shake .4s; }
+.scrim { animation: fade .2s; }
+.sheet { animation: sheet-up .3s cubic-bezier(.2, .8, .2, 1); }
+.call { animation: fade .2s; }
+.call .big, .call .count { animation: stamp .5s cubic-bezier(.2, .8, .2, 1) backwards; }
+.call.timeup .big { animation: stamp .5s backwards, shake .45s .5s; }
+.seal { animation: seal .55s 1.1s cubic-bezier(.2, .8, .2, 1) backwards; }
+.ring .val { transition: stroke-dasharray 1.2s cubic-bezier(.2, .8, .2, 1); }
+.play:not(:disabled) { animation: halo 1.8s ease-out infinite; }
+.toast { animation: rise .25s; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
 </style>
 
 <div class="app" id="app"></div>
@@ -281,7 +359,8 @@ const store = {
 };
 const EXAMPLE_LAST = { moji: [7, 10], bun: [6, 10], dok: [3, 4], cho: [3, 5] };
 const S = {
-  view: 'home',
+  view: 'main',
+  enter: 'fwd',
   rot: store.get('rot', 0),
   cycle: store.get('cycle', 3),
   last: store.get('last', null),        // null → show example scores
@@ -306,11 +385,15 @@ const ICON = {
   urai: '<path d="M4 6h6v5H4z M14 13h6v5h-6z M10 8h2v8h2"/>',
   rev: '<path d="M4 4h12v16H4z M8 4v16 M16 7h4v13H9"/>',
   jlpt: '<path d="M5 3h14v18H5z M8 8h1 M8 12h1 M8 16h1 M11 8h5 M11 12h5 M11 16h5"/>',
+  words: '<path d="M8 6h12 M8 12h12 M8 18h12 M4 6h.5 M4 12h.5 M4 18h.5"/>',
+  gram: '<path d="M4 5h7a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H4z M20 5h-5a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2h5z"/>',
+  stats: '<path d="M13 3L5 14h6l-1 7 8-11h-6z"/>',
+  fire: '<path d="M12 3c1 4 6 6 6 11a6 6 0 0 1-12 0c0-3 2-4 2-6 2 1 3 3 3 3s0-5 1-8z"/>',
   set: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3 M12 19v3 M2 12h3 M19 12h3 M5 5l2 2 M17 17l2 2 M5 19l2-2 M17 7l2-2"/>',
 };
 function nav() {
-  const items = [['home', 'Home'], ['chat', 'Chats'], ['read', 'Reading'], ['urai', 'Urai'], ['rev', 'Review'], ['jlpt', 'JLPT'], ['set', 'Settings']];
-  return `<div class="nav" aria-label="App tabs (mockup)">${items.map(([k, l]) => `<span class="${k === 'jlpt' ? 'on new' : ''}"><svg viewBox="0 0 24 24">${ICON[k]}</svg>${l}</span>`).join('')}</div>`;
+  const items = [['home', 'Home'], ['chat', 'Chats'], ['read', 'Reading'], ['urai', 'Urai'], ['rev', 'Review'], ['set', 'Settings']];
+  return `<div class="nav" aria-label="App tabs (mockup)">${items.map(([k, l]) => `<span class="${k === 'home' ? 'on' : ''}"><svg viewBox="0 0 24 24">${ICON[k]}</svg>${l}</span>`).join('')}</div>`;
 }
 
 function lastScores() { return S.last || EXAMPLE_LAST; }
@@ -323,6 +406,33 @@ function estimate() {
   return { lang, lis, total: lang + lis };
 }
 
+function mainView() {
+  const next = SCENARIOS[S.rot];
+  const dots = SCENARIOS.map((_, i) => `<i class="${i === S.rot ? 'next' : i < S.rot ? 'done' : ''}"></i>`).join('');
+  const jdesc = S.doneToday ? `✓ Done today · next ${next.jp}` : `Next: ${next.jp} · ${next.qs.length} q · ${fmt(next.secs)}`;
+  const rows = [
+    ['chat', 'var(--c-chat)', 'Start Chatting', 'Practice your target language'],
+    ['rev', 'var(--c-rev)', 'Review Words', '128/412 mastered'],
+    ['jlpt', 'var(--c-jlpt)', 'JLPT Practice<span class="badge-new">NEW</span>', `${jdesc}<span class="rotdots" aria-hidden="true">${dots}</span>`, true],
+    ['words', 'var(--c-words)', 'Words List', '412 words in your deck'],
+    ['read', 'var(--c-read)', 'Reading', 'Read articles and practice comprehension'],
+    ['gram', 'var(--c-gram)', 'Grammar', 'Grammar patterns per level'],
+    ['stats', 'var(--c-stats)', 'Your Stats', '2 sessions today'],
+  ];
+  return `<div class="screen">
+    <div class="top stag"><h1>LangChef</h1><span class="sample">example data</span></div>
+    <div class="menu-hero stag" style="--i:1">
+      <div class="t">LangChef</div><div style="opacity:.85;font-size:13.5px">Your daily language practice</div>
+      <div class="stats"><span><svg viewBox="0 0 24 24" style="color:#fdba74">${ICON.fire}</svg><b>12</b> day streak</span><span><svg viewBox="0 0 24 24" style="color:#86efac">${ICON.rev}</svg><b>128</b> words</span></div>
+    </div>
+    <div class="qa">
+      <h2 class="stag" style="--i:2">Quick actions</h2>
+      ${rows.map(([k, c, l, d, f], n) => `<button class="action stag ${f ? 'feature' : ''}" style="--i:${n + 2}" data-act="${f ? 'jlpt' : 'nomock'}"><span class="ic" style="background:${c}"><svg viewBox="0 0 24 24">${ICON[k]}</svg></span><span class="tx"><b>${l}</b><span>${d}</span></span><span class="chev">›</span></button>`).join('')}
+    </div>
+    <div class="tip stag" style="--i:10"><b>Tip:</b> JLPT Practice lives here, not in the tab bar. One short timed section whenever you have ten minutes.</div>
+  </div>${nav()}`;
+}
+
 function homeView() {
   const next = SCENARIOS[S.rot];
   const L = lastScores();
@@ -331,28 +441,29 @@ function homeView() {
   const days = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
   const on = [true, true, false, true, true, S.doneToday, false];
   return `<div class="screen">
-    <div class="top"><h1>JLPT Practice</h1>
+    <div class="top stag"><button class="btn ghost" data-act="main" style="padding-left:0">‹ Home</button>
       <div class="level" role="group" aria-label="Level">${['N5', 'N4', 'N3', 'N2', 'N1'].map((l) => `<button class="${l === 'N5' ? 'on' : ''}" ${l === 'N5' ? '' : 'disabled title="Mockup has N5 content only"'}>${l}</button>`).join('')}</div>
     </div>
+    <h1 class="stag" style="margin-top:-8px">JLPT Practice</h1>
 
-    <div class="hero">
+    <div class="hero stag" style="--i:1">
       <div class="k">${S.doneToday ? 'Done for today · next session' : "Today's session"} · rotation ${S.cycle}</div>
       <div class="t"><span class="jp">${next.jp}</span> · ${next.en}</div>
       <div class="meta"><span>${next.qs.length} questions</span><span>${fmt(next.secs)} limit</span><span>real section: ${next.real.min} min</span></div>
       <button class="btn block" data-act="brief" data-id="${next.id}">${S.doneToday ? 'Practice one more' : 'Start session'}</button>
     </div>
 
-    <div class="stack">
+    <div class="stack stag" style="--i:2">
       <h2>Rotation · one section per session</h2>
       <div class="track">${SCENARIOS.map((s, i) => {
-        const st = i === S.rot ? 'next' : (i < S.rot ? 'done' : '');
+        const st = (i === S.rot ? 'next' : (i < S.rot ? 'done' : '')) + (i === S.justDone ? ' just-done' : '');
         const sc = L[s.id] ? `${L[s.id][0]}/${L[s.id][1]}` : '—';
         return `<button class="step ${st}" data-act="brief" data-id="${s.id}"><span class="jp">${s.jp}</span><span class="en">${s.en}</span><span class="s">${i === S.rot ? 'next' : 'last ' + sc}</span></button>`;
       }).join('')}</div>
       <p class="small muted" style="margin:0">After ${next.jp}, the next session switches to ${SCENARIOS[(S.rot + 1) % 4].jp}. Tap any section to practise it out of turn.</p>
     </div>
 
-    <div class="card stack">
+    <div class="card stack stag" style="--i:3">
       <div class="row between"><h2>Estimated score sheet</h2>${S.last ? '' : '<span class="sample">example data</span>'}</div>
       <div class="score-row"><span>言語知識・読解 <span class="muted small">Language knowledge · Reading</span></span><span class="num">${e.lang}<span class="muted small">/120</span></span>
         <div class="bar"><i style="width:${(e.lang / 120) * 100}%"></i><b style="left:${(38 / 120) * 100}%" title="Section minimum 38"></b></div></div>
@@ -360,19 +471,19 @@ function homeView() {
         <div class="bar"><i style="width:${(e.lis / 60) * 100}%"></i><b style="left:${(19 / 60) * 100}%" title="Section minimum 19"></b></div></div>
       <div class="row between" style="border-top:1px solid var(--line);padding-top:10px">
         <span>総合得点 <span class="muted small">Total</span></span>
-        <span><span class="num" style="font-size:20px">${e.total}</span><span class="muted small">/180 · pass line 80</span>
+        <span><span class="num" style="font-size:20px" data-count="${e.total}">${e.total}</span><span class="muted small">/180 · pass line 80</span>
         <span class="pill ${pass ? 'ok' : 'ng'}" style="margin-left:6px">${pass ? 'on track' : 'below'}</span></span>
       </div>
       <p class="small muted" style="margin:0">From your latest result in each section. The tick on each bar is the N5 section minimum (38 and 19). A rough guide, not the official scaled score.</p>
     </div>
 
-    <div class="card stack">
+    <div class="card stack stag" style="--i:4">
       <div class="row between"><h2>This week</h2><span class="small muted">4-day streak <span class="sample">example</span></span></div>
-      <div class="week">${days.map((d, i) => `<div class="stack" style="gap:4px"><div class="d ${on[i] ? 'on' : ''} ${i === 5 ? 'today' : ''}">${on[i] ? '✓' : ''}</div>${d}</div>`).join('')}</div>
+      <div class="week">${days.map((d, i) => `<div class="stack" style="gap:4px"><div class="d ${on[i] ? 'on' : ''} ${i === 5 ? 'today' : ''}" style="--i:${i}">${on[i] ? '✓' : ''}</div>${d}</div>`).join('')}</div>
       <p class="small muted" style="margin:0">One short timed section a day covers the whole test every four days.</p>
     </div>
 
-    <div class="card stack">
+    <div class="card stack stag" style="--i:5">
       <h2>How sessions map to the real N5</h2>
       <div style="overflow-x:auto"><table class="map">
         <tr><th>Real test section</th><th>Real</th><th>One session</th></tr>
@@ -380,21 +491,21 @@ function homeView() {
       </table></div>
       <p class="small muted" style="margin:0">Each session samples every 問題 type of its section in the real order, and the time limit keeps roughly the real test's pace per question.</p>
     </div>
-  </div>${nav()}`;
+  </div>`;
 }
 
 function briefView() {
   const s = sc(S.pick);
   const pace = Math.round(s.secs / s.qs.length);
   return `<div class="screen">
-    <div class="top"><button class="btn ghost" data-act="home">‹ Back</button><span class="chip">N5 · ${s.en}</span></div>
-    <div class="cover">
+    <div class="top"><button class="btn ghost" data-act="jlpt" style="padding-left:0">‹ Back</button><span class="chip">N5 · ${s.en}</span></div>
+    <div class="cover stag" style="--i:1">
       <div class="lv">N5</div>
       <div class="sec">${s.cover}</div>
       <div class="small muted" style="font-family:var(--ui)">${s.jp}（${s.kana}） · ${s.mix}</div>
       <div class="rule"><b>${s.qs.length} questions · ${fmt(s.secs)}</b> · about ${pace} s per question</div>
     </div>
-    <ul class="rules">
+    <ul class="rules stag" style="--i:2">
       <li>The clock starts at はじめてください and does not stop.</li>
       <li>You can skip questions and come back from the answer sheet.</li>
       <li>No answers are shown until the end, like the real test.</li>
@@ -418,9 +529,9 @@ function stemHtml(q, i) { return q.m === 'g3' ? '' : q.stem; }
 function choicesHtml(q, i) {
   const picked = S.q.answers[i];
   if (!q.c) {
-    return `<div class="choices">${Array.from({ length: q.n }, (_, k) => `<button class="choice audio-only ${picked === k ? 'on' : ''}" data-act="pick" data-k="${k}"><span class="bubble">${k + 1}</span><span style="flex:1;text-align:left">choice ${k + 1} (spoken)</span></button>`).join('')}</div>`;
+    return `<div class="choices">${Array.from({ length: q.n }, (_, k) => `<button class="choice audio-only ${picked === k ? 'on' : ''} ${picked === k && S.q.just ? 'just' : ''}" data-act="pick" data-k="${k}"><span class="bubble">${k + 1}</span><span style="flex:1;text-align:left">choice ${k + 1} (spoken)</span></button>`).join('')}</div>`;
   }
-  return `<div class="choices">${q.c.map((c, k) => `<button class="choice ${picked === k ? 'on' : ''}" data-act="pick" data-k="${k}"><span class="bubble">${k + 1}</span><span>${c}</span></button>`).join('')}</div>`;
+  return `<div class="choices">${q.c.map((c, k) => `<button class="choice ${picked === k ? 'on' : ''} ${picked === k && S.q.just ? 'just' : ''}" data-act="pick" data-k="${k}"><span class="bubble">${k + 1}</span><span>${c}</span></button>`).join('')}</div>`;
 }
 
 function examView() {
@@ -450,7 +561,7 @@ function examView() {
       </div>
       <div class="tbar" id="tbar"><i style="width:${(S.q.left / s.secs) * 100}%"></i></div>
     </div>
-    <div class="screen" style="padding-top:6px">
+    <div class="screen" id="qscreen" style="padding-top:6px">
       <div class="mondai"><div class="h"><span class="tag">${tag}</span><span class="ins">${ins}</span></div>${S.showGloss ? `<div class="gloss">${gloss}</div>` : ''}</div>
       ${passage}
       ${player}
@@ -499,12 +610,14 @@ function resultView() {
   s.qs.forEach((q, k) => { const t = INS[q.m][0]; parts[t] = parts[t] || [0, 0]; parts[t][1]++; if (r.answers[k] === q.a) parts[t][0]++; });
   const next = SCENARIOS[S.rot];
   const missedWords = s.qs.filter((q, k) => q.word && r.answers[k] !== q.a);
+  const seal = pct >= 0.9 ? 'たいへん<br>よく<br>できました' : pct >= 0.7 ? 'よく<br>できました' : 'がんばり<br>ましょう';
   return `<div class="screen">
     <div class="top"><h1>${r.timeUp ? '時間です' : 'Session done'}</h1><span class="chip">N5 · ${s.en}</span></div>
-    <div class="card row" style="gap:16px">
+    <div class="card row stag" style="gap:16px;position:relative;padding-right:92px">
+      <div class="seal" aria-label="Teacher's stamp">${seal}</div>
       <svg class="ring" viewBox="0 0 120 120" role="img" aria-label="${r.correct} of ${s.qs.length} correct">
-        <circle class="trk" cx="60" cy="60" r="50"/><circle class="val" cx="60" cy="60" r="50" stroke-dasharray="${C * pct} ${C}"/>
-        <text x="60" y="62" text-anchor="middle" font-size="28">${r.correct}/${s.qs.length}</text><text class="sub" x="60" y="82" text-anchor="middle" font-size="11">correct</text>
+        <circle class="trk" cx="60" cy="60" r="50"/><circle class="val" cx="60" cy="60" r="50" stroke-dasharray="0 ${C}" data-dash="${C * pct} ${C}"/>
+        <text x="60" y="62" text-anchor="middle" font-size="28"><tspan data-count="${r.correct}">${r.correct}</tspan>/${s.qs.length}</text><text class="sub" x="60" y="82" text-anchor="middle" font-size="11">correct</text>
       </svg>
       <div class="stack" style="gap:4px;min-width:0">
         <b><span class="jp">${s.jp}</span> · rotation ${r.cycle}</b>
@@ -512,12 +625,12 @@ function resultView() {
         <span class="small">Last time: ${r.prev ? `${r.prev[0]}/${r.prev[1]}` : '—'}</span>
       </div>
     </div>
-    <div class="kv">
+    <div class="kv stag" style="--i:1">
       <div><b>${fmt(r.used)}</b><span>time used of ${fmt(s.secs)}</span></div>
       <div><b>${pace}s</b><span>per question · real pace ${target}s</span></div>
       <div><b>${s.qs.length - r.answeredCount}</b><span>left blank</span></div>
     </div>
-    <div class="card stack">
+    <div class="card stack stag" style="--i:2">
       <h2>By question type</h2>
       ${Object.entries(parts).map(([t, [c, n]]) => `<div class="part"><span><span class="jp">${t}</span> <span class="muted">${INS[s.qs.find((q) => INS[q.m][0] === t).m][3]}</span></span><span class="num">${c}/${n}</span><div class="bar"><i style="width:${(c / n) * 100}%;background:${c === n ? 'var(--ok)' : c === 0 ? 'var(--bad)' : 'var(--accent)'}"></i></div></div>`).join('')}
     </div>
@@ -539,20 +652,58 @@ function resultView() {
     <div class="card stack" style="margin-top:4px">
       <div class="small muted">Next in the rotation</div>
       <b><span class="jp">${next.jp}</span> · ${next.en} · ${next.qs.length} questions · ${fmt(next.secs)}</b>
-      <div class="row"><button class="btn block" data-act="home">Done for today</button><button class="btn primary block" data-act="brief" data-id="${next.id}">Start ${next.en}</button></div>
+      <div class="row"><button class="btn block" data-act="main">Done for today</button><button class="btn primary block" data-act="brief" data-id="${next.id}">Start ${next.en}</button></div>
     </div>
   </div>`;
 }
 
 // ---------- Rendering & behaviour ----------
 let tick = null;
+const RM = (() => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } })();
+// go(): change screen with a slide; 'back' slides the other way.
+function go(view, dir = 'fwd') { S.view = view; S.enter = dir; render(); window.scrollTo(0, 0); }
 function render() {
   const app = $('#app');
-  if (S.view === 'home') app.innerHTML = homeView();
+  app.className = 'app';
+  if (S.enter) { void app.offsetWidth; app.classList.add('enter-' + S.enter); }
+  if (S.view === 'main') app.innerHTML = mainView();
+  else if (S.view === 'jlpt') app.innerHTML = homeView();
   else if (S.view === 'brief') app.innerHTML = briefView();
   else if (S.view === 'exam') app.innerHTML = examView() + sheetHtml();
   else if (S.view === 'result') app.innerHTML = resultView();
+  if (S.view === 'exam' && S.qDir) $('#qscreen').classList.add('q-' + S.qDir);
+  if (S.enter) afterEnter();
+  S.enter = null; S.qDir = null; S.justDone = null;
+  if (S.q) S.q.just = false;
   paintTimer();
+}
+
+// Count numbers up, fill the result ring, celebrate a good score.
+function afterEnter() {
+  if (RM) { document.querySelectorAll('[data-dash]').forEach((c) => c.setAttribute('stroke-dasharray', c.dataset.dash)); return; }
+  document.querySelectorAll('[data-count]').forEach((el) => {
+    const end = +el.dataset.count, t0 = performance.now(), dur = 1000;
+    const step = (t) => { const k = Math.min(1, (t - t0) / dur); el.textContent = Math.round(end * (1 - Math.pow(1 - k, 3))); if (k < 1) requestAnimationFrame(step); };
+    el.textContent = 0; requestAnimationFrame(step);
+  });
+  requestAnimationFrame(() => requestAnimationFrame(() => document.querySelectorAll('[data-dash]').forEach((c) => c.setAttribute('stroke-dasharray', c.dataset.dash))));
+  if (S.view === 'result' && S.result.correct / sc(S.result.id).qs.length >= 0.7) setTimeout(confetti, 900);
+}
+
+function confetti() {
+  const cv = document.createElement('canvas'); cv.id = 'confetti'; document.body.appendChild(cv);
+  const dpr = devicePixelRatio || 1, W = innerWidth, H = innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr; const g = cv.getContext('2d'); g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement);
+  const cols = ['--accent', '--ok', '--warn', '--seal', '--c-jlpt'].map((v) => css.getPropertyValue(v).trim());
+  const P = Array.from({ length: 110 }, () => ({ x: W / 2 + (Math.random() - .5) * 80, y: H * .3, vx: (Math.random() - .5) * 9, vy: -Math.random() * 9 - 3, r: Math.random() * 6.28, vr: (Math.random() - .5) * .3, w: 5 + Math.random() * 5, c: cols[Math.floor(Math.random() * cols.length)] }));
+  const t0 = performance.now();
+  const frame = (t) => {
+    g.clearRect(0, 0, W, H);
+    for (const p of P) { p.vy += .25; p.vx *= .99; p.x += p.vx; p.y += p.vy; p.r += p.vr; g.save(); g.translate(p.x, p.y); g.rotate(p.r); g.fillStyle = p.c; g.fillRect(-p.w / 2, -p.w / 4, p.w, p.w / 2); g.restore(); }
+    if (t - t0 < 2600) requestAnimationFrame(frame); else cv.remove();
+  };
+  requestAnimationFrame(frame);
 }
 
 function paintTimer() {
@@ -562,15 +713,31 @@ function paintTimer() {
   t.textContent = fmt(S.q.left);
   const cls = S.q.left <= 30 ? 'bad' : S.q.left <= 60 ? 'warn' : '';
   t.className = 'timer ' + cls; b.className = 'tbar ' + cls;
+  if (S.q.left <= 10 && S.q.left > 0) { void t.offsetWidth; t.classList.add('shake'); }
   b.firstElementChild.style.width = (S.q.left / s.secs) * 100 + '%';
 }
 
-function call(text, sub, then) {
+function call(text, sub, then, extra = '') {
   const el = document.createElement('div');
-  el.className = 'call';
+  el.className = 'call ' + extra;
   el.innerHTML = `<div class="stack" style="align-items:center"><div class="big">${text}</div><div class="muted">${sub}</div></div>`;
   document.body.appendChild(el);
-  setTimeout(() => { el.remove(); then(); }, 1300);
+  setTimeout(() => { el.remove(); then(); }, 1400);
+}
+
+// 3 · 2 · 1 before the proctor's call, like the seconds before the test starts.
+function countdown(sub, then) {
+  if (RM) return call('はじめてください', sub, then);
+  const el = document.createElement('div');
+  el.className = 'call';
+  document.body.appendChild(el);
+  let n = 3;
+  const show = () => {
+    if (n === 0) { el.remove(); return call('はじめてください', sub, then); }
+    el.innerHTML = `<div class="stack" style="align-items:center"><div class="count">${n}</div><div class="muted">${sub}</div></div>`;
+    n--; setTimeout(show, 650);
+  };
+  show();
 }
 
 function toast(msg) {
@@ -582,13 +749,13 @@ function toast(msg) {
 function startExam() {
   const s = sc(S.pick);
   S.q = { id: s.id, i: 0, answers: Array(s.qs.length).fill(null), flags: [], played: {}, script: {}, left: s.secs, started: Date.now() };
-  call('はじめてください', `${s.jp} · ${fmt(s.secs)}`, () => {
-    S.view = 'exam'; render(); window.scrollTo(0, 0);
+  countdown(`${s.jp} · ${fmt(s.secs)}`, () => {
+    go('exam');
     clearInterval(tick);
     tick = setInterval(() => {
       S.q.left--;
       paintTimer();
-      if (S.q.left <= 0) { clearInterval(tick); stopAudio(); S.sheet = null; call('時間です。', 'やめてください。 Time is up — pencils down.', () => submit(true)); }
+      if (S.q.left <= 0) { clearInterval(tick); stopAudio(); S.sheet = null; call('時間です。', 'やめてください。 Time is up — pencils down.', () => submit(true), 'timeup'); }
     }, 1000);
   });
 }
@@ -604,10 +771,10 @@ function submit(timeUp) {
   last[s.id] = [correct, s.qs.length];
   S.last = last;
   const idx = SCENARIOS.indexOf(s);
-  if (idx === S.rot) { S.rot = (S.rot + 1) % SCENARIOS.length; if (S.rot === 0) S.cycle++; }
+  if (idx === S.rot) { S.justDone = null; S.pendingDone = idx; S.rot = (S.rot + 1) % SCENARIOS.length; if (S.rot === 0) S.cycle++; }
   S.doneToday = true;
   store.set('last', S.last); store.set('rot', S.rot); store.set('cycle', S.cycle); store.set('doneToday', true);
-  S.sheet = null; S.q = null; S.view = 'result'; render(); window.scrollTo(0, 0);
+  S.sheet = null; S.q = null; go('result');
 }
 
 function stopAudio() { try { speechSynthesis.cancel(); } catch {} }
@@ -634,22 +801,24 @@ document.addEventListener('click', (e) => {
   const act = el.dataset.act;
   const s = S.q && sc(S.q.id);
   switch (act) {
-    case 'home': S.view = 'home'; render(); window.scrollTo(0, 0); break;
-    case 'brief': S.pick = el.dataset.id; S.view = 'brief'; render(); window.scrollTo(0, 0); break;
+    case 'main': go('main', 'back'); break;
+    case 'jlpt': S.justDone = S.pendingDone; S.pendingDone = null; go('jlpt', S.view === 'main' ? 'fwd' : 'back'); break;
+    case 'nomock': toast('Not part of this mockup — tap JLPT Practice.'); break;
+    case 'brief': S.pick = el.dataset.id; go('brief'); break;
     case 'strict': S.strict = !S.strict; render(); break;
     case 'gloss': S.showGloss = !S.showGloss; render(); break;
     case 'start': startExam(); break;
-    case 'pick': S.q.answers[S.q.i] = +el.dataset.k; render(); break;
-    case 'prev': if (S.q.i > 0) { S.q.i--; stopAudio(); render(); window.scrollTo(0, 0); } break;
-    case 'next': if (S.q.i < s.qs.length - 1) { S.q.i++; stopAudio(); render(); window.scrollTo(0, 0); } break;
+    case 'pick': S.q.answers[S.q.i] = +el.dataset.k; S.q.just = true; render(); break;
+    case 'prev': if (S.q.i > 0) { S.q.i--; S.qDir = 'prev'; stopAudio(); render(); window.scrollTo(0, 0); } break;
+    case 'next': if (S.q.i < s.qs.length - 1) { S.q.i++; S.qDir = 'next'; stopAudio(); render(); window.scrollTo(0, 0); } break;
     case 'flag': S.q.flags[S.q.i] = !S.q.flags[S.q.i]; render(); break;
     case 'sheet': S.sheet = 'grid'; render(); break;
-    case 'go': S.q.i = +el.dataset.k; S.sheet = null; stopAudio(); render(); window.scrollTo(0, 0); break;
+    case 'go': S.qDir = +el.dataset.k < S.q.i ? 'prev' : 'next'; S.q.i = +el.dataset.k; S.sheet = null; stopAudio(); render(); window.scrollTo(0, 0); break;
     case 'close': S.sheet = null; render(); break;
     case 'finish': S.sheet = S.q.answers.some((x) => x == null) ? 'finish' : null; if (!S.sheet) submit(false); else render(); break;
     case 'submit': submit(false); break;
     case 'quit': S.sheet = 'quit'; render(); break;
-    case 'abandon': clearInterval(tick); stopAudio(); S.q = null; S.sheet = null; S.view = 'home'; render(); break;
+    case 'abandon': clearInterval(tick); stopAudio(); S.q = null; S.sheet = null; go('jlpt', 'back'); break;
     case 'play': play(); break;
     case 'script': S.q.script[S.q.i] = !S.q.script[S.q.i]; render(); break;
     case 'demo-30': S.q.left = Math.min(S.q.left, 30); paintTimer(); break;
@@ -661,9 +830,9 @@ document.addEventListener('keydown', (e) => {
   if (S.view !== 'exam' || S.sheet) return;
   const s = sc(S.q.id), q = s.qs[S.q.i];
   const n = q.c ? q.c.length : q.n;
-  if (/^[1-4]$/.test(e.key) && +e.key <= n) { S.q.answers[S.q.i] = +e.key - 1; render(); }
-  if (e.key === 'ArrowRight' && S.q.i < s.qs.length - 1) { S.q.i++; render(); }
-  if (e.key === 'ArrowLeft' && S.q.i > 0) { S.q.i--; render(); }
+  if (/^[1-4]$/.test(e.key) && +e.key <= n) { S.q.answers[S.q.i] = +e.key - 1; S.q.just = true; render(); }
+  if (e.key === 'ArrowRight' && S.q.i < s.qs.length - 1) { S.q.i++; S.qDir = 'next'; render(); }
+  if (e.key === 'ArrowLeft' && S.q.i > 0) { S.q.i--; S.qDir = 'prev'; render(); }
 });
 render();
 </script>
