@@ -2,7 +2,7 @@
 //! listening section has real audio on every platform, including Android where the webview has no Japanese voice.
 //!
 //! Nothing is bundled and nothing loads at start-up. "Download" (`tts_install`) fetches, into `<app data>/tts`:
-//! - the voice model (Tsukuyomi-chan 6-language MB-iSTFT, the Tsukuyomi model piper-plus's own registry recommends);
+//! - the voice model (Tsukuyomi-chan, piper-plus `zs-v1`, pinned Hugging Face commit);
 //! - the NAIST-JDIC source, compiled on the device into the dictionary jpreprocess reads (like the furigana dictionary);
 //! - on desktop, ONNX Runtime from Microsoft's release. Android has it in the APK (`onnxruntime-android` in Gradle).
 //!
@@ -18,18 +18,17 @@ use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
 use tauri::{Emitter, Manager};
 
-// The same files as `tsukuyomi-6lang-v2` in piper-plus's model registry. The earlier `releases/zs-v1` export is a
-// fine-tune of the experimental zero-shot base, which expects a reference speaker embedding: without one it sounds robotic.
-const MODEL_URL: &str = "https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan/resolve/main/tsukuyomi-chan-6lang-fp16.onnx";
-const CONFIG_URL: &str = "https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan/resolve/main/config.json";
+// The zs-v1 export: it sounded better than `tsukuyomi-chan-6lang-fp16` (piper-plus's registry pick), which was tried.
+const MODEL_URL: &str = "https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan/resolve/93c1fb6d67c29accc9ddf52326bb4582b1b52a3d/releases/zs-v1/tsukuyomi.onnx";
+const CONFIG_URL: &str = "https://huggingface.co/ayousanz/piper-plus-tsukuyomi-chan/resolve/93c1fb6d67c29accc9ddf52326bb4582b1b52a3d/releases/zs-v1/tsukuyomi.onnx.json";
 const DICT_URL: &str = "https://github.com/jpreprocess/naist-jdic/archive/refs/tags/v0.1.3.tar.gz";
 /// Matches the ONNX Runtime API that `ort` 2.0.0-rc.15 is built against, and `onnxruntime-android` in Gradle.
 const ORT_VERSION: &str = "1.31.1";
 
-const MODEL_FILE: &str = "tsukuyomi-6lang.onnx";
-const CONFIG_FILE: &str = "tsukuyomi-6lang.onnx.json";
-/// The zs-v1 voice of earlier versions, deleted when the new one is downloaded.
-const OLD_MODEL_FILES: [&str; 2] = ["tsukuyomi.onnx", "tsukuyomi.onnx.json"];
+const MODEL_FILE: &str = "tsukuyomi.onnx";
+const CONFIG_FILE: &str = "tsukuyomi.onnx.json";
+/// The 6-language voice briefly used instead, deleted when this one is downloaded.
+const OLD_MODEL_FILES: [&str; 2] = ["tsukuyomi-6lang.onnx", "tsukuyomi-6lang.onnx.json"];
 const DICT_DIR: &str = "naist-jdic";
 /// Written last when the dictionary is complete, so a half-built one is never used.
 const DICT_DONE: &str = ".built";
@@ -436,7 +435,9 @@ fn speak(voice: &mut PiperVoice, lines: &[String]) -> Result<(u32, Vec<i16>), St
             language_override: Some("ja".to_string()),
             // Men are slowed afterwards to lower the pitch, so they're made that much faster here: same speed in the end.
             length_scale: if who == Speaker::Male { MALE_PITCH } else { 1.0 },
-            // piper-plus's own noise defaults (tuned for its models).
+            // The classic VITS values: piper-plus's defaults (0.4 / 0.5) keep pitch and rhythm too even, which sounds robotic.
+            noise_scale: 0.667,
+            noise_w: 0.8,
             ..Default::default()
         };
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| voice.synthesize_with_params(&text, &params)))
@@ -562,7 +563,7 @@ mod tests {
     }
 
     /// End to end with real files, run by hand:
-    /// `TTS_TEST_DIR=<dir with tsukuyomi-6lang.onnx(.json), naist-jdic/ and onnxruntime/> cargo test --lib tts -- --ignored`
+    /// `TTS_TEST_DIR=<dir with tsukuyomi.onnx(.json), naist-jdic/ and onnxruntime/> cargo test --lib tts -- --ignored`
     /// (`naist-jdic.tar.gz` / `onnxruntime.tgz` there are compiled / extracted first when missing).
     #[test]
     #[ignore]
