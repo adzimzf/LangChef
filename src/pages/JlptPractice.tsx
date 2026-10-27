@@ -8,6 +8,7 @@ import type { JlptHistoryItem, JlptOverview, JlptPart, JlptResult, JlptSection, 
 import { t, errorText, formatDay, formatDate } from '../lib/i18n'
 import { CountUp, burstConfetti, reducedMotion } from '../components/Motion'
 import { goHome, useBackHandler } from '../lib/backNav'
+import { playOffline, stopOffline, ttsStatus } from '../lib/tts'
 import { JLPT_LEVEL_ORDER, JLPT_PRACTICE_LEVEL_KEY, PART_INSTRUCTION, SECTION_JA, SPOKEN_CHOICE_PARTS, practiceLevel, type JLPTLevel } from '../lib/jlpt'
 
 type Phase = 'hub' | 'brief' | 'exam' | 'result' | 'history'
@@ -59,6 +60,7 @@ function speak(lines: string[], onEnd: () => void): boolean {
 }
 
 function stopSpeech() {
+  stopOffline()
   try { window.speechSynthesis?.cancel() } catch { /* no speech */ }
 }
 
@@ -117,6 +119,9 @@ export default function JlptPractice() {
   const [resultFrom, setResultFrom] = useState<'session' | 'history' | 'hub'>('session')
   const [cardsAdded, setCardsAdded] = useState(false)
   const [showGloss, setShowGloss] = useState(false)
+  /** The offline Japanese voice is downloaded (Settings); listening uses it instead of the device voice. */
+  const [offlineVoice, setOfflineVoice] = useState(false)
+  const [offlineVoiceSupported, setOfflineVoiceSupported] = useState(false)
   const submitting = useRef(false)
   /** Latest answers, for the clock's hand-in when time runs out (its callback outlives the render it came from). */
   const answersRef = useRef<(number | null)[]>([])
@@ -151,6 +156,9 @@ export default function JlptPractice() {
 
   useEffect(() => { loadOverview() }, [level])
   useEffect(() => () => stopSpeech(), [])
+  useEffect(() => {
+    ttsStatus().then((s) => { setOfflineVoice(s.installed); setOfflineVoiceSupported(s.supported) }).catch(() => {})
+  }, [])
 
   function go(next: Phase, dir: 'fwd' | 'back' = 'fwd') {
     setEnter(dir)
@@ -298,7 +306,8 @@ export default function JlptPractice() {
     setSheet('')
   }
 
-  function play() {
+  /** Plays the recording once: the offline voice when it's downloaded, else the device's voice, else the script. */
+  async function play() {
     const cur = flat[index]
     if (!cur) return
     const q = cur.part.questions[cur.q]
@@ -306,7 +315,18 @@ export default function JlptPractice() {
       ? [...q.script, ...q.options.map((o, i) => `${['いち', 'に', 'さん'][i] ?? i + 1}。${o}`)]
       : q.script
     const i = index
-    const ok = speak(lines, () => setPlayed((p) => ({ ...p, [i]: 'done' })))
+    const finish = () => setPlayed((p) => ({ ...p, [i]: 'done' }))
+    if (offlineVoice) {
+      setPlayed((p) => ({ ...p, [i]: 'playing' }))
+      try {
+        await playOffline(lines)
+        finish()
+        return
+      } catch (e) {
+        setError(`${t('jlpt.offlineVoiceFailed')} ${errorText(e)}`)
+      }
+    }
+    const ok = speak(lines, finish)
     if (ok) setPlayed((p) => ({ ...p, [i]: 'playing' }))
     else {
       setPlayed((p) => ({ ...p, [i]: 'done' }))
@@ -554,6 +574,12 @@ export default function JlptPractice() {
           {section === 'listening' && <li>{t('jlpt.rule.listening')}</li>}
           <li>{t('jlpt.rule.leave')}</li>
         </ul>
+        {section === 'listening' && offlineVoiceSupported && !offlineVoice && (
+          <div className="bg-blue-50 border border-blue-100 rounded-xl p-4 flex items-center gap-3 anim-stag" style={{ ['--i' as string]: 2 }}>
+            <span className="flex-1 text-sm text-blue-800">{t('jlpt.offlineVoiceHint')}</span>
+            <button className={`${secondaryBtn} py-2 bg-white`} onClick={() => navigate('/settings#offline-voice')}>{t('jlpt.offlineVoiceOpen')}</button>
+          </div>
+        )}
         <label className="bg-white rounded-xl p-4 shadow-sm flex items-center justify-between gap-3 anim-stag" style={{ ['--i' as string]: 2 }}>
           <span>
             <span className="block text-sm font-medium">{t('jlpt.gloss')}</span>
