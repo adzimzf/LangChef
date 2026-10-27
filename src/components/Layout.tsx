@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from 'react-router-dom'
-import { useMemo, useEffect, useState } from 'react'
+import { useMemo, useEffect, useRef, useState } from 'react'
 import {
   HomeOutlined,
   MessageOutlined,
@@ -16,6 +16,7 @@ import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useActiveTimeHeartbeat } from '../hooks/useActiveTimeHeartbeat'
 import { t } from '../lib/i18n'
+import { afterHome, openTab } from '../lib/backNav'
 
 type LinderaStage = 'idle' | 'downloading' | 'extracting' | 'building' | 'ready' | 'error'
 
@@ -83,10 +84,28 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     return 'home'
   }, [location.pathname])
 
+  // Pages slide in from the side of the tab they come from: from the right when moving to a tab further
+  // right or to a page off the tab bar, from the left when going back.
+  const pageIndex = NAV_ITEMS.some((n) => n.path === location.pathname)
+    ? NAV_ITEMS.findIndex((n) => n.key === activeKey)
+    : NAV_ITEMS.length
+  // A tab opened from another tab goes through Home first (see openTab); the page waits until it's there.
+  const pendingTab = useRef<string | null>(null)
+  const switchingTab = pendingTab.current !== null
+  useEffect(() => { afterHome(navigate, location.pathname, pendingTab) }, [location.pathname])
+
+  const page = useRef({ path: location.pathname, index: pageIndex, dir: '' })
+  if (page.current.path !== location.pathname && !switchingTab) {
+    const dir = pageIndex >= page.current.index ? 'anim-enter-fwd' : 'anim-enter-back'
+    page.current = { path: location.pathname, index: pageIndex, dir }
+  }
+
   return (
     <div className="h-dvh bg-gray-50 flex flex-col">
       {/* Content */}
-      <main className={`flex-1 overflow-hidden ${isChatPage ? '' : 'px-4 pb-[50px]'}`}>{children}</main>
+      <main className={`flex-1 overflow-hidden ${isChatPage ? '' : 'px-4 pb-[50px]'}`}>
+        {!switchingTab && <div key={location.pathname} className={`h-full ${page.current.dir}`}>{children}</div>}
+      </main>
 
       {/* Lindera dict download/build progress banner */}
       {showBanner && (
@@ -116,13 +135,15 @@ export default function Layout({ children }: { children: React.ReactNode }) {
               return (
                 <button
                   key={item.key}
-                  onClick={() => navigate(item.path)}
+                  onClick={() => item.path !== location.pathname && openTab(navigate, item.path, pendingTab)}
                   className={`
                     flex flex-col items-center justify-center gap-0.5 flex-1 h-full transition-colors
                     ${isActive ? 'text-blue-500' : 'text-gray-400 active:text-gray-600'}
                   `}
                 >
-                  <Icon className="text-xl" style={{ fontSize: 22 }} />
+                  <span key={isActive ? 'on' : 'off'} className={isActive ? 'anim-pop' : ''}>
+                    <Icon className="text-xl" style={{ fontSize: 22 }} />
+                  </span>
                   <span className={`text-[10px] leading-tight ${isActive ? 'font-semibold' : ''}`}>
                     {item.label}
                   </span>

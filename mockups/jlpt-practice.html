@@ -1,0 +1,838 @@
+<title>LangChef JLPT Practice</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;700&family=Noto+Serif+JP:wght@400;600&display=swap">
+<style>
+/* Layout: one phone-width app column in LangChef's own look (gray ground, white cards, blue accent);
+   exam screens switch to a test-booklet feel (serif stems, mark-sheet bubbles). */
+:root {
+  --bg: #f4f6f9;
+  --card: #ffffff;
+  --sunk: #eef1f6;
+  --fg: #18202c;
+  --muted: #677287;
+  --line: #e1e6ee;
+  --accent: #3b82f6;
+  --accent-strong: #2563eb;
+  --accent-soft: #e8f0fe;
+  --ink: #161b24;
+  --ok: #16a34a; --ok-soft: #e7f6ec;
+  --warn: #d97706; --warn-soft: #fdf3e2;
+  --bad: #dc2626; --bad-soft: #fdecec;
+  --hero-a: #3b82f6; --hero-b: #2563eb; --hero-c: #4f46e5;
+  --seal: #d23a2f;
+  --c-chat: #3b82f6; --c-rev: #22c55e; --c-jlpt: #e11d48; --c-words: #f59e0b; --c-read: #14b8a6; --c-gram: #6366f1; --c-stats: #a855f7;
+  --ui: "Noto Sans JP", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --booklet: "Noto Serif JP", "Hiragino Mincho ProN", "Yu Mincho", serif;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0e131a; --card: #161d27; --sunk: #1d2531; --fg: #e5eaf2; --muted: #93a0b5; --line: #263041;
+  --accent: #5b95ff; --accent-strong: #7aa8ff; --accent-soft: #1b2a45; --ink: #e5eaf2;
+  --ok: #34d399; --ok-soft: #12322a; --warn: #fbbf24; --warn-soft: #3a2c10; --bad: #f87171; --bad-soft: #3d1a1c;
+  --hero-a: #2b5fc2; --hero-b: #1d468f; --hero-c: #3b3496; --seal: #ff6b5e; color-scheme: dark;
+} }
+:root[data-theme="dark"] {
+  --bg: #0e131a; --card: #161d27; --sunk: #1d2531; --fg: #e5eaf2; --muted: #93a0b5; --line: #263041;
+  --accent: #5b95ff; --accent-strong: #7aa8ff; --accent-soft: #1b2a45; --ink: #e5eaf2;
+  --ok: #34d399; --ok-soft: #12322a; --warn: #fbbf24; --warn-soft: #3a2c10; --bad: #f87171; --bad-soft: #3d1a1c;
+  --hero-a: #2b5fc2; --hero-b: #1d468f; --hero-c: #3b3496; --seal: #ff6b5e; color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { background: var(--bg); color: var(--fg); font-family: var(--ui); font-size: 15px; line-height: 1.55; }
+button { font: inherit; color: inherit; cursor: pointer; }
+button:focus-visible, [tabindex]:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.app { max-width: 440px; margin: 0 auto; min-height: 100%; display: flex; flex-direction: column;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+.screen { flex: 1; display: flex; flex-direction: column; gap: 18px; padding-block: 16px 24px; }
+.top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+h1 { font-size: 20px; margin: 0; font-weight: 700; text-wrap: balance; }
+h2 { font-size: 12px; margin: 0; color: var(--muted); text-transform: uppercase; letter-spacing: .08em; font-weight: 500; }
+.muted { color: var(--muted); }
+.small { font-size: 12.5px; }
+.chip { display: inline-flex; align-items: center; gap: 4px; padding: 3px 10px; border-radius: 999px; font-size: 12px; font-weight: 500; background: var(--accent-soft); color: var(--accent-strong); border: 0; }
+.card { background: var(--card); border-radius: 16px; padding: 16px; box-shadow: 0 1px 2px rgb(0 0 0 / .05); }
+.stack { display: flex; flex-direction: column; gap: 10px; }
+.row { display: flex; align-items: center; gap: 10px; }
+.between { justify-content: space-between; }
+.btn { border: 0; border-radius: 14px; padding: 12px 16px; font-weight: 500; font-size: 14.5px; background: var(--sunk); }
+.btn.primary { background: var(--accent); color: #fff; }
+.btn.primary:hover { background: var(--accent-strong); }
+.btn.ghost { background: transparent; color: var(--muted); padding: 8px 10px; }
+.btn.block { width: 100%; }
+.btn:disabled { opacity: .45; cursor: default; }
+.jp { font-family: var(--ui); }
+.sample { font-size: 10.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--warn); background: var(--warn-soft); padding: 1px 7px; border-radius: 6px; font-weight: 500; }
+
+/* Home hero */
+.hero { border-radius: 18px; padding: 18px; color: #fff; background: linear-gradient(140deg, var(--hero-a), var(--hero-b)); display: flex; flex-direction: column; gap: 12px; }
+.hero .k { font-size: 12px; opacity: .8; letter-spacing: .06em; text-transform: uppercase; }
+.hero .t { font-size: 22px; font-weight: 700; line-height: 1.25; }
+.hero .meta { display: flex; flex-wrap: wrap; gap: 6px; }
+.hero .meta span { background: rgb(255 255 255 / .16); border-radius: 999px; padding: 2px 10px; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+.hero .btn { background: #fff; color: #1d4ed8; font-weight: 700; }
+
+/* Rotation track */
+.track { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+.step { border: 1.5px solid var(--line); background: var(--card); border-radius: 12px; padding: 10px 6px; text-align: center; display: flex; flex-direction: column; gap: 2px; align-items: center; }
+.step .jp { font-size: 13px; font-weight: 700; }
+.step .en { font-size: 11px; color: var(--muted); }
+.step .s { font-size: 11px; font-variant-numeric: tabular-nums; color: var(--muted); }
+.step.next { border-color: var(--accent); background: var(--accent-soft); }
+.step.next .s { color: var(--accent-strong); font-weight: 500; }
+.step.done .s { color: var(--ok); }
+
+/* Score sheet */
+.score-row { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; align-items: baseline; }
+.bar { grid-column: 1 / -1; position: relative; height: 8px; border-radius: 99px; background: var(--sunk); overflow: visible; }
+.bar i { position: absolute; inset: 0 auto 0 0; border-radius: 99px; background: var(--accent); }
+.bar b { position: absolute; top: -3px; bottom: -3px; width: 2px; background: var(--fg); opacity: .55; }
+.num { font-variant-numeric: tabular-nums; font-weight: 700; }
+.week { display: grid; grid-template-columns: repeat(7, 1fr); gap: 6px; text-align: center; font-size: 11px; color: var(--muted); }
+.week .d { aspect-ratio: 1; max-width: 100%; border-radius: 10px; background: var(--sunk); display: grid; place-items: center; font-size: 11px; color: var(--muted); }
+.week .d.on { background: var(--ok-soft); color: var(--ok); font-weight: 700; }
+.week .d.today { outline: 2px solid var(--accent); outline-offset: -2px; }
+.map { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.map th, .map td { text-align: left; padding: 7px 4px; border-top: 1px solid var(--line); vertical-align: top; }
+.map th { color: var(--muted); font-weight: 500; border-top: 0; }
+.map td.n { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
+/* Bottom nav (mirrors the app's tab bar, with the new tab) */
+.nav { position: sticky; bottom: 0; background: var(--card); border-top: 1px solid var(--line); display: grid; grid-template-columns: repeat(6, 1fr);
+  margin-left: calc(-1 * max(16px, env(safe-area-inset-left, 0px))); margin-right: calc(-1 * max(16px, env(safe-area-inset-right, 0px)));
+  padding: 6px max(8px, env(safe-area-inset-right, 0px)) calc(6px + env(safe-area-inset-bottom, 0px)) max(8px, env(safe-area-inset-left, 0px)); }
+.nav span { display: flex; flex-direction: column; align-items: center; gap: 2px; font-size: 10px; color: var(--muted); padding: 4px 0; }
+.nav svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.nav span.on { color: var(--accent); font-weight: 500; }
+
+/* Briefing — the booklet cover */
+.cover { background: var(--card); border: 1.5px solid var(--fg); border-radius: 4px; padding: 22px 18px; display: flex; flex-direction: column; gap: 12px; font-family: var(--booklet); }
+.cover .lv { font-size: 34px; font-weight: 600; letter-spacing: .05em; }
+.cover .sec { font-size: 20px; font-weight: 600; }
+.cover .rule { border-top: 1px solid var(--line); padding-top: 10px; font-size: 13px; font-family: var(--ui); }
+.rules { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
+.toggle { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.switch { width: 44px; height: 26px; border-radius: 99px; border: 0; background: var(--line); position: relative; flex-shrink: 0; }
+.switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%; background: #fff; transition: left .15s; }
+.switch[aria-checked="true"] { background: var(--accent); }
+.switch[aria-checked="true"]::after { left: 21px; }
+
+/* Exam */
+.exam-top { position: sticky; top: env(safe-area-inset-top, 0px); z-index: 5; background: var(--bg); padding-block: 10px 8px; display: flex; flex-direction: column; gap: 8px; }
+body::before { content: ""; position: fixed; inset: 0 0 auto; height: env(safe-area-inset-top, 0px); z-index: 10; background: var(--bg); }
+.timer { font-variant-numeric: tabular-nums; font-weight: 700; font-size: 17px; padding: 4px 12px; border-radius: 999px; background: var(--card); border: 1.5px solid var(--line); display: inline-flex; align-items: center; gap: 6px; }
+.timer.warn { color: var(--warn); border-color: var(--warn); background: var(--warn-soft); }
+.timer.bad { color: var(--bad); border-color: var(--bad); background: var(--bad-soft); animation: pulse 1s infinite; }
+@keyframes pulse { 50% { opacity: .6; } }
+@media (prefers-reduced-motion: reduce) { .timer.bad { animation: none; } .switch::after { transition: none; } }
+.tbar { height: 4px; border-radius: 99px; background: var(--line); overflow: hidden; }
+.tbar i { display: block; height: 100%; background: var(--accent); transition: width 1s linear; }
+.tbar.warn i { background: var(--warn); } .tbar.bad i { background: var(--bad); }
+.mondai { display: flex; flex-direction: column; gap: 4px; }
+.mondai .h { display: flex; gap: 8px; align-items: baseline; }
+.mondai .tag { font-family: var(--booklet); font-weight: 600; border: 1.5px solid var(--fg); padding: 0 8px; font-size: 14px; flex-shrink: 0; }
+.mondai .ins { font-family: var(--booklet); font-size: 14px; line-height: 1.7; }
+.mondai .gloss { font-size: 12px; color: var(--muted); }
+.paper { background: var(--card); border-radius: 6px; border: 1px solid var(--line); padding: 16px; font-family: var(--booklet); line-height: 1.9; font-size: 15.5px; }
+.paper.passage { font-size: 14.5px; white-space: normal; }
+.paper .memo { border: 1px dashed var(--muted); padding: 12px; border-radius: 4px; }
+.qnum { font-family: var(--ui); font-weight: 700; font-size: 13px; color: var(--muted); }
+.stem { font-family: var(--booklet); font-size: 18px; line-height: 2; min-width: 0; }
+.u { text-decoration: underline; text-decoration-thickness: 1.5px; text-underline-offset: 6px; }
+.slot { display: inline-block; width: 3.2em; border-bottom: 1.5px solid var(--fg); margin: 0 3px; text-align: center; height: 1.4em; vertical-align: -2px; }
+.slot.star { font-size: 14px; }
+.gap { display: inline-block; white-space: nowrap; border: 1.5px solid var(--fg); padding: 0 8px; line-height: 1.4; font-family: var(--ui); font-weight: 700; font-size: 13px; margin: 0 2px; }
+.gap.cur { background: var(--accent-soft); border-color: var(--accent); color: var(--accent-strong); }
+.choices { display: flex; flex-direction: column; gap: 8px; }
+.choice { display: flex; align-items: center; gap: 12px; text-align: left; width: 100%; background: var(--card); border: 1.5px solid var(--line); border-radius: 12px; padding: 11px 12px; font-family: var(--booklet); font-size: 16px; line-height: 1.5; }
+.choice:hover { border-color: var(--accent); }
+.bubble { width: 28px; height: 28px; border-radius: 50%; border: 1.5px solid var(--muted); display: grid; place-items: center; font-family: var(--ui); font-size: 13px; font-weight: 700; color: var(--muted); flex-shrink: 0; }
+.choice.on { border-color: var(--ink); }
+.choice.on .bubble { background: var(--ink); border-color: var(--ink); color: var(--card); }
+.choice.audio-only { justify-content: center; font-family: var(--ui); font-size: 14px; color: var(--muted); }
+.player { display: flex; align-items: center; gap: 12px; }
+.play { width: 52px; height: 52px; border-radius: 50%; border: 0; background: var(--accent); color: #fff; display: grid; place-items: center; flex-shrink: 0; }
+.play:disabled { background: var(--line); color: var(--muted); }
+.play svg { width: 22px; height: 22px; fill: currentColor; }
+.script { font-size: 13.5px; background: var(--sunk); border-radius: 10px; padding: 10px 12px; font-family: var(--booklet); line-height: 1.8; }
+.exam-foot { position: sticky; bottom: 0; background: var(--bg); padding-block: 10px calc(10px + env(safe-area-inset-bottom, 0px)); display: grid; grid-template-columns: auto auto 1fr auto; gap: 8px; align-items: center; border-top: 1px solid var(--line); margin-top: auto; }
+.flag.on { color: var(--warn); background: var(--warn-soft); }
+.demo { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; font-size: 11.5px; color: var(--muted); }
+.demo button { border: 1px dashed var(--muted); background: transparent; border-radius: 8px; padding: 3px 8px; font-size: 11.5px; color: var(--muted); }
+
+/* Sheets / overlays */
+.scrim { position: fixed; inset: 0; background: rgb(10 14 20 / .45); z-index: 20; display: flex; align-items: flex-end; justify-content: center; }
+.sheet { background: var(--card); width: 100%; max-width: 440px; border-radius: 20px 20px 0 0; padding: 18px max(16px, env(safe-area-inset-right, 0px)) calc(18px + env(safe-area-inset-bottom, 0px)) max(16px, env(safe-area-inset-left, 0px)); display: flex; flex-direction: column; gap: 14px; max-height: 85%; overflow: auto; }
+.grid { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+.cell { border: 1.5px solid var(--line); border-radius: 10px; padding: 8px 0; text-align: center; background: var(--card); font-variant-numeric: tabular-nums; font-weight: 700; font-size: 14px; position: relative; }
+.cell.ans { background: var(--ink); color: var(--card); border-color: var(--ink); }
+.cell.cur { outline: 2px solid var(--accent); outline-offset: 1px; }
+.cell.fl::after { content: ""; position: absolute; top: 4px; right: 4px; width: 7px; height: 7px; border-radius: 50%; background: var(--warn); }
+.call { position: fixed; inset: 0; z-index: 30; background: var(--bg); display: grid; place-items: center; text-align: center; padding: 24px; }
+.call .big { font-family: var(--booklet); font-size: 34px; font-weight: 600; }
+
+/* Results */
+.ring { width: 120px; height: 120px; flex-shrink: 0; }
+.ring circle { fill: none; stroke-width: 10; }
+.ring .trk { stroke: var(--sunk); } .ring .val { stroke: var(--accent); stroke-linecap: round; transform: rotate(-90deg); transform-origin: 50% 50%; }
+.ring text { fill: var(--fg); font-family: var(--ui); font-weight: 700; }
+.ring .sub { fill: var(--muted); font-weight: 400; }
+.kv { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.kv div { background: var(--sunk); border-radius: 12px; padding: 10px; display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.kv b { font-variant-numeric: tabular-nums; font-size: 17px; }
+.kv span { font-size: 11px; color: var(--muted); }
+.part { display: grid; grid-template-columns: 1fr auto; gap: 4px 10px; font-size: 13px; }
+.part .bar { height: 6px; }
+.item { border-left: 3px solid var(--line); padding: 4px 0 4px 12px; display: flex; flex-direction: column; gap: 6px; }
+.item.ok { border-color: var(--ok); } .item.ng { border-color: var(--bad); }
+.item .stem { font-size: 15.5px; line-height: 1.8; }
+.pill { font-size: 11.5px; padding: 1px 8px; border-radius: 999px; font-weight: 500; }
+.pill.ok { background: var(--ok-soft); color: var(--ok); } .pill.ng { background: var(--bad-soft); color: var(--bad); } .pill.sk { background: var(--sunk); color: var(--muted); }
+.ans-line { font-size: 13px; display: flex; flex-wrap: wrap; gap: 4px 12px; }
+.why { font-size: 13px; color: var(--muted); }
+.toast { position: fixed; left: 50%; bottom: calc(80px + env(safe-area-inset-bottom, 0px)); transform: translateX(-50%); background: var(--fg); color: var(--bg); padding: 8px 14px; border-radius: 10px; font-size: 13px; z-index: 40; max-width: calc(100% - 32px); }
+.level { display: flex; gap: 6px; flex-wrap: wrap; }
+.level button { border: 1.5px solid var(--line); background: var(--card); border-radius: 10px; padding: 4px 12px; font-weight: 700; font-size: 13px; }
+.level button.on { border-color: var(--accent); color: var(--accent-strong); background: var(--accent-soft); }
+.level button:disabled { opacity: .45; }
+
+/* Main menu (the app's Home) */
+.menu-hero { border-radius: 18px; padding: 20px; color: #fff; background: linear-gradient(140deg, var(--hero-a), var(--hero-b)); display: flex; flex-direction: column; gap: 6px; }
+.menu-hero .t { font-size: 20px; font-weight: 700; }
+.menu-hero .stats { display: flex; gap: 18px; margin-top: 8px; }
+.menu-hero .stats span { display: flex; align-items: center; gap: 6px; font-size: 13px; opacity: .9; }
+.menu-hero .stats b { font-size: 18px; }
+.menu-hero svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.qa { display: flex; flex-direction: column; gap: 8px; }
+.action { width: 100%; display: flex; align-items: center; gap: 12px; text-align: left; background: var(--card); border: 0; border-radius: 14px; padding: 14px; box-shadow: 0 1px 2px rgb(0 0 0 / .05); transition: transform .15s, box-shadow .15s; }
+.action:hover { box-shadow: 0 4px 14px rgb(0 0 0 / .08); transform: translateY(-1px); }
+.action:active { transform: scale(.985); }
+.action .ic { width: 44px; height: 44px; border-radius: 12px; display: grid; place-items: center; color: #fff; flex-shrink: 0; position: relative; overflow: hidden; }
+.action .ic svg { width: 22px; height: 22px; fill: none; stroke: currentColor; stroke-width: 1.8; }
+.action .tx { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.action .tx b { font-weight: 500; font-size: 15px; }
+.action .tx span { font-size: 12px; color: var(--muted); }
+.action .chev { color: var(--line); font-size: 18px; }
+.badge-new { font-size: 9.5px; font-weight: 700; color: #fff; background: var(--c-jlpt); border-radius: 5px; padding: 1px 5px; margin-left: 6px; vertical-align: 2px; display: inline-block; }
+.rotdots { display: inline-flex; gap: 3px; margin-left: 6px; vertical-align: 1px; }
+.rotdots i { width: 6px; height: 6px; border-radius: 50%; background: var(--line); }
+.rotdots i.done { background: var(--ok); } .rotdots i.next { background: var(--c-jlpt); }
+.action.feature .ic::after { content: ""; position: absolute; top: -20%; bottom: -20%; width: 40%; background: linear-gradient(90deg, transparent, rgb(255 255 255 / .55), transparent); animation: shine 3.2s ease-in-out infinite; }
+.action.feature .badge-new { animation: pop .5s .5s both, wiggle 4s 2s ease-in-out infinite; }
+.tip { background: var(--warn-soft); border-radius: 12px; padding: 12px 14px; font-size: 13px; }
+.seal { position: absolute; top: 12px; right: 12px; width: 76px; height: 76px; border-radius: 50%; border: 2.5px solid var(--seal); color: var(--seal); display: grid; place-items: center; text-align: center; font-family: var(--booklet); font-weight: 600; font-size: 11px; line-height: 1.25; transform: rotate(-14deg); opacity: .9; padding: 6px; }
+.seal::before { content: ""; position: absolute; inset: 4px; border-radius: 50%; border: 1px solid var(--seal); opacity: .6; }
+.call .count { font-family: var(--ui); font-size: 72px; font-weight: 700; color: var(--accent); font-variant-numeric: tabular-nums; }
+#confetti { position: fixed; inset: 0; pointer-events: none; z-index: 50; }
+
+/* Motion */
+@keyframes in-fwd { from { opacity: 0; transform: translateX(32px); } }
+@keyframes in-back { from { opacity: 0; transform: translateX(-32px); } }
+@keyframes rise { from { opacity: 0; transform: translateY(16px); } }
+@keyframes pop { 0% { transform: scale(.5); opacity: 0; } 70% { transform: scale(1.15); opacity: 1; } 100% { transform: scale(1); } }
+@keyframes press { 0% { transform: scale(1); } 40% { transform: scale(.97); } 100% { transform: scale(1); } }
+@keyframes grow { from { width: 0; } }
+@keyframes shine { 0%, 65% { left: -50%; } 100% { left: 130%; } }
+@keyframes wiggle { 0%, 92%, 100% { transform: rotate(0); } 94% { transform: rotate(-8deg); } 96% { transform: rotate(8deg); } 98% { transform: rotate(-4deg); } }
+@keyframes halo { 0% { box-shadow: 0 0 0 0 var(--accent); } 100% { box-shadow: 0 0 0 9px transparent; } }
+@keyframes drift { from { background-position: 0% 50%; } to { background-position: 100% 50%; } }
+@keyframes stamp { 0% { transform: scale(2.2); opacity: 0; } 55% { transform: scale(.92); opacity: 1; } 100% { transform: scale(1); } }
+@keyframes seal { 0% { transform: rotate(-14deg) scale(2.4); opacity: 0; } 60% { transform: rotate(-14deg) scale(.9); opacity: .95; } 100% { transform: rotate(-14deg) scale(1); opacity: .9; } }
+@keyframes shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-4px); } 40% { transform: translateX(4px); } 60% { transform: translateX(-3px); } 80% { transform: translateX(2px); } }
+@keyframes fade { from { opacity: 0; } }
+@keyframes sheet-up { from { transform: translateY(100%); } }
+@keyframes ink { from { transform: scale(0); opacity: .6; } to { transform: scale(2.6); opacity: 0; } }
+.app.enter-fwd > * { animation: in-fwd .34s cubic-bezier(.2, .8, .2, 1) backwards; }
+.app.enter-back > * { animation: in-back .34s cubic-bezier(.2, .8, .2, 1) backwards; }
+.app[class*="enter-"] .stag { animation: rise .5s cubic-bezier(.2, .8, .2, 1) backwards; animation-delay: calc(var(--i, 0) * 70ms + 60ms); }
+.app[class*="enter-"] .hero.stag, .app[class*="enter-"] .menu-hero.stag { animation: rise .5s cubic-bezier(.2, .8, .2, 1) backwards, drift 9s ease-in-out infinite alternate; animation-delay: calc(var(--i, 0) * 70ms + 60ms), 0s; }
+.app[class*="enter-"] .bar i { animation: grow 1s .35s cubic-bezier(.2, .8, .2, 1) backwards; }
+.app[class*="enter-"] .week .d.on { animation: pop .45s backwards; animation-delay: calc(var(--i, 0) * 70ms + 350ms); }
+.app[class*="enter-"] .step.just-done .s { animation: pop .5s .4s backwards; display: inline-block; }
+.hero, .menu-hero { background: linear-gradient(120deg, var(--hero-a), var(--hero-b), var(--hero-c), var(--hero-a)); background-size: 300% 300%; animation: drift 9s ease-in-out infinite alternate; }
+.hero .btn { position: relative; overflow: hidden; }
+.hero .btn::after { content: ""; position: absolute; top: 0; bottom: 0; width: 40%; background: linear-gradient(90deg, transparent, rgb(59 130 246 / .18), transparent); animation: shine 3.6s ease-in-out infinite; }
+.step.next { animation: halo 1.8s ease-out infinite; }
+.btn, .step, .choice, .cell { transition: transform .12s, background-color .15s, border-color .15s; }
+.btn:not(:disabled):active, .step:active, .cell:active { transform: scale(.96); }
+#qscreen.q-next { animation: in-fwd .26s cubic-bezier(.2, .8, .2, 1) backwards; }
+#qscreen.q-prev { animation: in-back .26s cubic-bezier(.2, .8, .2, 1) backwards; }
+.choice.just { animation: press .25s; }
+.choice.just .bubble { animation: pop .35s; position: relative; }
+.choice.just .bubble::after { content: ""; position: absolute; inset: 0; border-radius: 50%; background: var(--ink); animation: ink .5s ease-out forwards; }
+.timer.shake { animation: shake .4s; }
+.scrim { animation: fade .2s; }
+.sheet { animation: sheet-up .3s cubic-bezier(.2, .8, .2, 1); }
+.call { animation: fade .2s; }
+.call .big, .call .count { animation: stamp .5s cubic-bezier(.2, .8, .2, 1) backwards; }
+.call.timeup .big { animation: stamp .5s backwards, shake .45s .5s; }
+.seal { animation: seal .55s 1.1s cubic-bezier(.2, .8, .2, 1) backwards; }
+.ring .val { transition: stroke-dasharray 1.2s cubic-bezier(.2, .8, .2, 1); }
+.play:not(:disabled) { animation: halo 1.8s ease-out infinite; }
+.toast { animation: rise .25s; }
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation: none !important; transition: none !important; }
+}
+</style>
+
+<div class="app" id="app"></div>
+
+<script>
+// ---------- Content: one N5 rotation, written in the format and instructions of the real test ----------
+const INS = {
+  m1: ['問題1', '＿＿＿の ことばは ひらがなで どう かきますか。１・２・３・４から いちばん いい ものを ひとつ えらんで ください。', 'How is the underlined word written in hiragana? Choose the best answer from 1–4.', 'Kanji reading'],
+  m2: ['問題2', '＿＿＿の ことばは どう かきますか。１・２・３・４から いちばん いい ものを ひとつ えらんで ください。', 'How is the underlined word written? Choose the best answer from 1–4.', 'Writing'],
+  m3: ['問題3', '（　　）に なにが はいりますか。１・２・３・４から いちばん いい ものを ひとつ えらんで ください。', 'What goes in the ( )? Choose the best answer from 1–4.', 'Word in context'],
+  m4: ['問題4', '＿＿＿の ぶんと だいたい おなじ いみの ぶんが あります。１・２・３・４から いちばん いい ものを ひとつ えらんで ください。', 'Choose the sentence closest in meaning to the underlined one.', 'Paraphrase'],
+  g1: ['問題1', '（　　）に 何を 入れますか。１・２・３・４から いちばん いい ものを 一つ えらんで ください。', 'What goes in the ( )? Choose the best answer.', 'Grammar form'],
+  g2: ['問題2', '★ に 入る ものは どれですか。１・２・３・４から いちばん いい ものを 一つ えらんで ください。', 'Put the four parts in order. Which one goes in the ★ slot?', 'Sentence order ★'],
+  g3: ['問題3', '[ 8 ] から [ 10 ] に 何を 入れますか。ぶんしょうの いみを かんがえて、１・２・３・４から いちばん いい ものを 一つ えらんで ください。', 'Read the essay. What goes in each numbered gap?', 'Text grammar'],
+  r4: ['問題4', 'つぎの ぶんしょうを 読んで、しつもんに こたえて ください。', 'Read the text and answer the question. (short text)', 'Short text'],
+  r5: ['問題5', 'つぎの ぶんしょうを 読んで、しつもんに こたえて ください。', 'Read the text and answer the questions. (mid-length text)', 'Mid-length text'],
+  r6: ['問題6', 'みぎの ページを 見て、下の しつもんに こたえて ください。', 'Look at the notice and answer the question. (finding information)', 'Finding information'],
+  l1: ['問題1', 'はじめに しつもんを 聞いて ください。それから 話を 聞いて、もんだいようしの １から４の 中から、いちばん いい ものを 一つ えらんで ください。', 'Task comprehension: hear the question, then the conversation.', 'Task'],
+  l2: ['問題2', 'はじめに しつもんを 聞いて ください。それから 話を 聞いて、もんだいようしの １から４の 中から、いちばん いい ものを 一つ えらんで ください。', 'Point comprehension: listen for one specific detail.', 'Key point'],
+  l3: ['問題3', 'えを 見ながら しつもんを 聞いて ください。→（やじるし）の 人は 何と 言いますか。１から３の 中から、いちばん いい ものを 一つ えらんで ください。', 'Utterance: what does the person say? The choices are spoken only.', 'Utterance'],
+  l4: ['問題4', 'えなどが ありません。ぶんを 聞いて、１から３の 中から、いちばん いい ものを 一つ えらんで ください。', 'Quick response: nothing is printed. Hear a line, pick the reply.', 'Quick response'],
+};
+
+const PASSAGES = {
+  essay: `<b>日本の 食べもの</b>　　　　リナ・サリ<br>わたしは 先月 インドネシアから 日本へ 来ました。日本の 食べものは とても おいしいです。でも、すしは まだ <span class="gap" data-gap="8">8</span>。<br>きのう、友だちと 駅の 近くの 店へ 行きました。店は 小さかったですが、人が たくさん <span class="gap" data-gap="9">9</span>。<br>来週は 友だちと いっしょに すしを <span class="gap" data-gap="10">10</span>。`,
+  memo: `<div class="memo">（つくえの 上に この メモが あります。）<br><br>マリアさん<br>きょう 3時に 山田さんから 電話が ありました。あしたの パーティーは 6時からです。飲みものを 買って きて ください。食べものは 山田さんが 買います。<br><div style="text-align:right">林</div></div>`,
+  town: `わたしは 大学の 近くの アパートに 住んで います。へやは せまいですが、まどから 山が 見えます。<br>アパートの 前に スーパーが あります。夜 10時まで やって いますから、とても べんりです。<br>しゅうまつは よく 自転車で 川の そばの こうえんへ 行きます。そこで 本を 読んだり、ギターを ひいたり します。でも、雨の 日は どこへも 行かないで、へやで 国の 家族に 手紙を 書きます。`,
+  pool: `<div style="text-align:center;font-weight:600">さくら市 市民プール</div>
+  <table class="map" style="font-family:var(--booklet);font-size:14px;margin-top:6px"><tr><td>月曜日</td><td>休み</td></tr><tr><td>火曜日〜金曜日</td><td>午前10時〜午後8時</td></tr><tr><td>土曜日・日曜日</td><td>午前9時〜午後5時</td></tr><tr><td>おとな</td><td>500円</td></tr><tr><td>子ども（小学生）</td><td>200円</td></tr></table>`,
+};
+
+const SCENARIOS = [
+  { id: 'moji', jp: '文字・語彙', kana: 'もじ・ごい', en: 'Vocabulary', cover: 'げんごちしき（もじ・ごい）', secs: 360,
+    real: { name: '言語知識（文字・語彙）', min: 20, q: '≈30' }, mix: '問題1–4: 3 · 3 · 2 · 2',
+    qs: [
+      { m: 'm1', stem: '毎朝 <span class="u">七時</span>に おきます。', c: ['しちじ', 'ななじ', 'しじ', 'ひちじ'], a: 0, why: '七時 is read しちじ. なな is used for 7 on its own, but hours use しち.', word: '七時' },
+      { m: 'm1', stem: 'この <span class="u">川</span>は とても きれいです。', c: ['やま', 'かわ', 'いけ', 'うみ'], a: 1, why: '川 = かわ (river). 山 is やま, 池 いけ, 海 うみ.', word: '川' },
+      { m: 'm1', stem: '<span class="u">先週</span> ともだちと えいがを みました。', c: ['せんしゅ', 'さきしゅう', 'せんしゅう', 'ぜんしゅう'], a: 2, why: '先週 = せんしゅう (last week). Watch the long vowel: しゅう, not しゅ.', word: '先週' },
+      { m: 'm2', stem: 'よる <span class="u">てれび</span>を みます。', c: ['テルビ', 'テレビ', 'デレビ', 'テレピ'], a: 1, why: 'テレビ (TV). The distractors swap one sound: ル/レ, テ/デ, ビ/ピ.', word: 'テレビ' },
+      { m: 'm2', stem: 'えきの <span class="u">みなみ</span>に こうえんが あります。', c: ['西', '北', '東', '南'], a: 3, why: 'みなみ = 南 (south). 西 にし, 北 きた, 東 ひがし.', word: '南' },
+      { m: 'm2', stem: '<span class="u">やすみ</span>の ひは なにを しますか。', c: ['体み', '休み', '木み', '本み'], a: 1, why: '休み (rest, day off). 体 looks almost the same — check the right side: 木 vs 本.', word: '休み' },
+      { m: 'm3', stem: 'さむいですから、まどを （　　） ください。', c: ['しめて', 'けして', 'とめて', 'きって'], a: 0, why: 'まどを しめる = close the window. けす is for lights, とめる for cars or machines.', word: '閉める' },
+      { m: 'm3', stem: 'あたまが いたかったので、くすりを （　　）。', c: ['たべました', 'のみました', 'かみました', 'しました'], a: 1, why: 'In Japanese you "drink" medicine: くすりを のむ.', word: '飲む' },
+      { m: 'm4', stem: '<span class="u">あには いしゃです。</span>', c: ['あには びょういんで はたらいて います。', 'あには ぎんこうで はたらいて います。', 'あには がっこうで はたらいて います。', 'あには ゆうびんきょくで はたらいて います。'], a: 0, why: 'いしゃ (doctor) works at a びょういん (hospital).', word: '医者' },
+      { m: 'm4', stem: '<span class="u">この みせは やすいです。</span>', c: ['この みせは たかくないです。', 'この みせは ひろくないです。', 'この みせは しずかです。', 'この みせは あたらしいです。'], a: 0, why: 'やすい (cheap) = たかくない (not expensive). This "opposite + ない" swap is very common in 問題4.', word: '安い' },
+    ] },
+  { id: 'bun', jp: '文法', kana: 'ぶんぽう', en: 'Grammar', cover: 'げんごちしき（ぶんぽう）', secs: 420,
+    real: { name: '言語知識（文法）・読解', min: 40, q: '≈16 + reading' }, mix: '問題1–3: 5 · 2 · 3',
+    qs: [
+      { m: 'g1', stem: 'わたしは まいにち でんしゃ （　　） がっこうへ 行きます。', c: ['を', 'で', 'に', 'が'], a: 1, why: 'で marks the means: でんしゃで 行く = go by train.' },
+      { m: 'g1', stem: 'この りんごは 一つ 100円です。三つ （　　） 300円です。', c: ['で', 'に', 'を', 'も'], a: 0, why: 'Number + で gives a total: 三つで 300円 = three for 300 yen.' },
+      { m: 'g1', stem: 'A「日曜日に どこか 行きましたか。」<br>B「いいえ、どこ （　　） 行きませんでした。」', c: ['に', 'へ', 'も', 'か'], a: 2, why: 'どこも + negative = nowhere. どこか (somewhere) is in the question, どこも in the answer.' },
+      { m: 'g1', stem: 'きのうは いそがしかった （　　）、えいがを 見に 行きませんでした。', c: ['から', 'が', 'ても', 'まで'], a: 0, why: '〜から gives the reason: because I was busy.' },
+      { m: 'g1', stem: 'ここで しゃしんを とって （　　） いいですか。', c: ['も', 'は', 'が', 'を'], a: 0, why: '〜ても いいですか = may I …? (asking permission).' },
+      { m: 'g2', stem: 'つくえの <span class="slot"></span><span class="slot"></span><span class="slot star">★</span><span class="slot"></span> あります。', c: ['本', 'に', 'が', '上'], a: 0, why: 'つくえの 上 に 本 が あります。The ★ slot is 本.', order: 'つくえの 上に ★本が あります。' },
+      { m: 'g2', stem: 'A「あの <span class="slot"></span><span class="slot star">★</span><span class="slot"></span><span class="slot"></span> だれですか。」<br>B「田中さんです。」', c: ['かけた', 'めがねを', '人', 'は'], a: 0, why: 'あの めがねを かけた 人 は だれですか。The ★ slot is かけた.', order: 'あの めがねを ★かけた 人は だれですか。' },
+      { m: 'g3', p: 'essay', gap: 8, stem: '<span class="gap cur">8</span>', c: ['食べました', '食べて いません', '食べたいです', '食べませんでした'], a: 1, why: 'まだ + 〜て いません = not yet. She hasn\'t eaten sushi yet.' },
+      { m: 'g3', p: 'essay', gap: 9, stem: '<span class="gap cur">9</span>', c: ['いました', 'ありました', 'しました', 'なりました'], a: 0, why: 'People are living things, so いる: 人が たくさん いました.' },
+      { m: 'g3', p: 'essay', gap: 10, stem: '<span class="gap cur">10</span>', c: ['食べに 行きます', '食べて 行きました', '食べました', '食べて います'], a: 0, why: '来週 (next week) needs the future: 食べに 行きます = will go to eat.' },
+    ] },
+  { id: 'dok', jp: '読解', kana: 'どっかい', en: 'Reading', cover: 'どっかい', secs: 600,
+    real: { name: '言語知識（文法）・読解', min: 40, q: '≈6 reading' }, mix: '問題4–6: 1 · 2 · 1',
+    qs: [
+      { m: 'r4', p: 'memo', stem: 'マリアさんは あした 何を しますか。', c: ['6時までに 食べものを 買います。', '飲みものを 買って パーティーへ 行きます。', '3時に 山田さんに 電話を します。', '食べものと 飲みものを 買います。'], a: 1, why: 'The memo asks her to buy drinks; Yamada buys the food.' },
+      { m: 'r5', p: 'town', stem: 'どうして スーパーは べんりですか。', c: ['アパートから 山が 見えるから', '夜 おそくまで やって いるから', '大学の 中に あるから', '自転車で 行けるから'], a: 1, why: '夜 10時まで やって いますから、べんりです。' },
+      { m: 'r5', p: 'town', stem: '雨の 日、「わたし」は 何を しますか。', c: ['こうえんで 本を 読みます。', 'ギターを ひきます。', '家族に 手紙を 書きます。', 'スーパーへ 行きます。'], a: 2, why: 'でも、雨の 日は … 家族に 手紙を 書きます。The park is for weekends with good weather.' },
+      { m: 'r6', p: 'pool', stem: '土曜日の 午後、父と 小学生の 弟と わたしの 3人で プールへ 行きます。ぜんぶで いくら はらいますか。（わたしは 大学生です。）', c: ['900円', '1,000円', '1,200円', '1,500円'], a: 2, why: 'Two adults (500 × 2) + one child (200) = 1,200円.' },
+    ] },
+  { id: 'cho', jp: '聴解', kana: 'ちょうかい', en: 'Listening', cover: 'ちょうかい', secs: 360,
+    real: { name: '聴解', min: 30, q: '≈24' }, mix: '問題1–4: 1 · 1 · 1 · 2',
+    qs: [
+      { m: 'l1', stem: '男の 人は 何を 買いますか。', audio: ['男の 人と 女の 人が 話して います。男の 人は 何を 買いますか。', '女：あしたの ピクニック、何を 持って いきますか。', '男：おにぎりを 作ります。飲みものを 買いましょうか。', '女：飲みものは わたしが 持って いきます。くだものを おねがいします。', '男：わかりました。りんごと バナナを 買います。', '男の 人は 何を 買いますか。'], c: ['おにぎり', '飲みもの', 'くだもの', 'おべんとう'], a: 2, why: 'He offers drinks, but she brings those. He buys fruit: りんごと バナナ.' },
+      { m: 'l2', stem: '女の 人は きのう どこへ 行きましたか。', audio: ['女の 人が 話して います。女の 人は きのう どこへ 行きましたか。', '女：きのうは 雨でしたから、海へ 行きませんでした。友だちと デパートへ 行きました。デパートの 上で ごはんも 食べました。', '女の 人は きのう どこへ 行きましたか。'], c: ['海', 'デパート', '山', '駅'], a: 1, why: 'The rain cancelled the beach; she went to the department store.' },
+      { m: 'l3', stem: '（え：友だちの 本を 見て いる 人）', audio: ['友だちに 本を かりたいです。何と 言いますか。', '1　本を かして ください。', '2　本を かりて ください。', '3　本を かえして ください。'], c: null, n: 3, a: 0, why: 'かす = lend. You ask the friend to lend: 本を かして ください.', script: true },
+      { m: 'l4', stem: '', audio: ['お国は どちらですか。', '1　インドネシアです。', '2　あちらです。', '3　ジャカルタへ 行きます。'], c: null, n: 3, a: 0, why: 'お国は どちらですか = Where are you from? → インドネシアです.' },
+      { m: 'l4', stem: '', audio: ['いっしょに お茶を 飲みませんか。', '1　はい、飲みませんでした。', '2　ええ、いいですね。', '3　いいえ、お茶です。'], c: null, n: 3, a: 1, why: '〜ませんか is an invitation. Accept with ええ、いいですね.' },
+    ] },
+];
+
+// ---------- State ----------
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('jlptmock_' + k); return v == null ? d : JSON.parse(v); } catch { return d; } },
+  set(k, v) { try { localStorage.setItem('jlptmock_' + k, JSON.stringify(v)); } catch {} },
+};
+const EXAMPLE_LAST = { moji: [7, 10], bun: [6, 10], dok: [3, 4], cho: [3, 5] };
+const S = {
+  view: 'main',
+  enter: 'fwd',
+  rot: store.get('rot', 0),
+  cycle: store.get('cycle', 3),
+  last: store.get('last', null),        // null → show example scores
+  doneToday: store.get('doneToday', false),
+  strict: true,
+  showGloss: false,
+  pick: null,                            // scenario chosen on Home
+  q: null,                               // running quiz
+  result: null,
+  sheet: null,
+};
+
+const $ = (s) => document.querySelector(s);
+const fmt = (s) => `${Math.floor(s / 60)}:${String(Math.max(0, s % 60)).padStart(2, '0')}`;
+const sc = (id) => SCENARIOS.find((x) => x.id === id);
+
+// ---------- Views ----------
+const ICON = {
+  home: '<path d="M3 11l9-7 9 7v9h-6v-6H9v6H3z"/>',
+  chat: '<path d="M4 5h16v11H9l-5 4z"/>',
+  read: '<path d="M6 3h9l4 4v14H6z M14 3v5h5 M9 12h7 M9 16h7"/>',
+  urai: '<path d="M4 6h6v5H4z M14 13h6v5h-6z M10 8h2v8h2"/>',
+  rev: '<path d="M4 4h12v16H4z M8 4v16 M16 7h4v13H9"/>',
+  jlpt: '<path d="M5 3h14v18H5z M8 8h1 M8 12h1 M8 16h1 M11 8h5 M11 12h5 M11 16h5"/>',
+  words: '<path d="M8 6h12 M8 12h12 M8 18h12 M4 6h.5 M4 12h.5 M4 18h.5"/>',
+  gram: '<path d="M4 5h7a2 2 0 0 1 2 2v13a2 2 0 0 0-2-2H4z M20 5h-5a2 2 0 0 0-2 2v13a2 2 0 0 1 2-2h5z"/>',
+  stats: '<path d="M13 3L5 14h6l-1 7 8-11h-6z"/>',
+  fire: '<path d="M12 3c1 4 6 6 6 11a6 6 0 0 1-12 0c0-3 2-4 2-6 2 1 3 3 3 3s0-5 1-8z"/>',
+  set: '<circle cx="12" cy="12" r="3"/><path d="M12 2v3 M12 19v3 M2 12h3 M19 12h3 M5 5l2 2 M17 17l2 2 M5 19l2-2 M17 7l2-2"/>',
+};
+function nav() {
+  const items = [['home', 'Home'], ['chat', 'Chats'], ['read', 'Reading'], ['urai', 'Urai'], ['rev', 'Review'], ['set', 'Settings']];
+  return `<div class="nav" aria-label="App tabs (mockup)">${items.map(([k, l]) => `<span class="${k === 'home' ? 'on' : ''}"><svg viewBox="0 0 24 24">${ICON[k]}</svg>${l}</span>`).join('')}</div>`;
+}
+
+function lastScores() { return S.last || EXAMPLE_LAST; }
+
+function estimate() {
+  const L = lastScores();
+  const pct = (id) => (L[id] ? L[id][0] / L[id][1] : 0);
+  const lang = Math.round(((pct('moji') + pct('bun') + pct('dok')) / 3) * 120);
+  const lis = Math.round(pct('cho') * 60);
+  return { lang, lis, total: lang + lis };
+}
+
+function mainView() {
+  const next = SCENARIOS[S.rot];
+  const dots = SCENARIOS.map((_, i) => `<i class="${i === S.rot ? 'next' : i < S.rot ? 'done' : ''}"></i>`).join('');
+  const jdesc = S.doneToday ? `✓ Done today · next ${next.jp}` : `Next: ${next.jp} · ${next.qs.length} q · ${fmt(next.secs)}`;
+  const rows = [
+    ['chat', 'var(--c-chat)', 'Start Chatting', 'Practice your target language'],
+    ['rev', 'var(--c-rev)', 'Review Words', '128/412 mastered'],
+    ['jlpt', 'var(--c-jlpt)', 'JLPT Practice<span class="badge-new">NEW</span>', `${jdesc}<span class="rotdots" aria-hidden="true">${dots}</span>`, true],
+    ['words', 'var(--c-words)', 'Words List', '412 words in your deck'],
+    ['read', 'var(--c-read)', 'Reading', 'Read articles and practice comprehension'],
+    ['gram', 'var(--c-gram)', 'Grammar', 'Grammar patterns per level'],
+    ['stats', 'var(--c-stats)', 'Your Stats', '2 sessions today'],
+  ];
+  return `<div class="screen">
+    <div class="top stag"><h1>LangChef</h1><span class="sample">example data</span></div>
+    <div class="menu-hero stag" style="--i:1">
+      <div class="t">LangChef</div><div style="opacity:.85;font-size:13.5px">Your daily language practice</div>
+      <div class="stats"><span><svg viewBox="0 0 24 24" style="color:#fdba74">${ICON.fire}</svg><b>12</b> day streak</span><span><svg viewBox="0 0 24 24" style="color:#86efac">${ICON.rev}</svg><b>128</b> words</span></div>
+    </div>
+    <div class="qa">
+      <h2 class="stag" style="--i:2">Quick actions</h2>
+      ${rows.map(([k, c, l, d, f], n) => `<button class="action stag ${f ? 'feature' : ''}" style="--i:${n + 2}" data-act="${f ? 'jlpt' : 'nomock'}"><span class="ic" style="background:${c}"><svg viewBox="0 0 24 24">${ICON[k]}</svg></span><span class="tx"><b>${l}</b><span>${d}</span></span><span class="chev">›</span></button>`).join('')}
+    </div>
+    <div class="tip stag" style="--i:10"><b>Tip:</b> JLPT Practice lives here, not in the tab bar. One short timed section whenever you have ten minutes.</div>
+  </div>${nav()}`;
+}
+
+function homeView() {
+  const next = SCENARIOS[S.rot];
+  const L = lastScores();
+  const e = estimate();
+  const pass = e.total >= 80 && e.lang >= 38 && e.lis >= 19;
+  const days = ['M', 'T', 'W', 'T', 'F', 'S', 'S'];
+  const on = [true, true, false, true, true, S.doneToday, false];
+  return `<div class="screen">
+    <div class="top stag"><button class="btn ghost" data-act="main" style="padding-left:0">‹ Home</button>
+      <div class="level" role="group" aria-label="Level">${['N5', 'N4', 'N3', 'N2', 'N1'].map((l) => `<button class="${l === 'N5' ? 'on' : ''}" ${l === 'N5' ? '' : 'disabled title="Mockup has N5 content only"'}>${l}</button>`).join('')}</div>
+    </div>
+    <h1 class="stag" style="margin-top:-8px">JLPT Practice</h1>
+
+    <div class="hero stag" style="--i:1">
+      <div class="k">${S.doneToday ? 'Done for today · next session' : "Today's session"} · rotation ${S.cycle}</div>
+      <div class="t"><span class="jp">${next.jp}</span> · ${next.en}</div>
+      <div class="meta"><span>${next.qs.length} questions</span><span>${fmt(next.secs)} limit</span><span>real section: ${next.real.min} min</span></div>
+      <button class="btn block" data-act="brief" data-id="${next.id}">${S.doneToday ? 'Practice one more' : 'Start session'}</button>
+    </div>
+
+    <div class="stack stag" style="--i:2">
+      <h2>Rotation · one section per session</h2>
+      <div class="track">${SCENARIOS.map((s, i) => {
+        const st = (i === S.rot ? 'next' : (i < S.rot ? 'done' : '')) + (i === S.justDone ? ' just-done' : '');
+        const sc = L[s.id] ? `${L[s.id][0]}/${L[s.id][1]}` : '—';
+        return `<button class="step ${st}" data-act="brief" data-id="${s.id}"><span class="jp">${s.jp}</span><span class="en">${s.en}</span><span class="s">${i === S.rot ? 'next' : 'last ' + sc}</span></button>`;
+      }).join('')}</div>
+      <p class="small muted" style="margin:0">After ${next.jp}, the next session switches to ${SCENARIOS[(S.rot + 1) % 4].jp}. Tap any section to practise it out of turn.</p>
+    </div>
+
+    <div class="card stack stag" style="--i:3">
+      <div class="row between"><h2>Estimated score sheet</h2>${S.last ? '' : '<span class="sample">example data</span>'}</div>
+      <div class="score-row"><span>言語知識・読解 <span class="muted small">Language knowledge · Reading</span></span><span class="num">${e.lang}<span class="muted small">/120</span></span>
+        <div class="bar"><i style="width:${(e.lang / 120) * 100}%"></i><b style="left:${(38 / 120) * 100}%" title="Section minimum 38"></b></div></div>
+      <div class="score-row"><span>聴解 <span class="muted small">Listening</span></span><span class="num">${e.lis}<span class="muted small">/60</span></span>
+        <div class="bar"><i style="width:${(e.lis / 60) * 100}%"></i><b style="left:${(19 / 60) * 100}%" title="Section minimum 19"></b></div></div>
+      <div class="row between" style="border-top:1px solid var(--line);padding-top:10px">
+        <span>総合得点 <span class="muted small">Total</span></span>
+        <span><span class="num" style="font-size:20px" data-count="${e.total}">${e.total}</span><span class="muted small">/180 · pass line 80</span>
+        <span class="pill ${pass ? 'ok' : 'ng'}" style="margin-left:6px">${pass ? 'on track' : 'below'}</span></span>
+      </div>
+      <p class="small muted" style="margin:0">From your latest result in each section. The tick on each bar is the N5 section minimum (38 and 19). A rough guide, not the official scaled score.</p>
+    </div>
+
+    <div class="card stack stag" style="--i:4">
+      <div class="row between"><h2>This week</h2><span class="small muted">4-day streak <span class="sample">example</span></span></div>
+      <div class="week">${days.map((d, i) => `<div class="stack" style="gap:4px"><div class="d ${on[i] ? 'on' : ''} ${i === 5 ? 'today' : ''}" style="--i:${i}">${on[i] ? '✓' : ''}</div>${d}</div>`).join('')}</div>
+      <p class="small muted" style="margin:0">One short timed section a day covers the whole test every four days.</p>
+    </div>
+
+    <div class="card stack stag" style="--i:5">
+      <h2>How sessions map to the real N5</h2>
+      <div style="overflow-x:auto"><table class="map">
+        <tr><th>Real test section</th><th>Real</th><th>One session</th></tr>
+        ${SCENARIOS.map((s) => `<tr><td><span class="jp">${s.real.name}</span><div class="muted">${s.mix}</div></td><td class="n">${s.real.min} min<br><span class="muted">${s.real.q} q</span></td><td class="n">${s.qs.length} q<br><span class="muted">${fmt(s.secs)}</span></td></tr>`).join('')}
+      </table></div>
+      <p class="small muted" style="margin:0">Each session samples every 問題 type of its section in the real order, and the time limit keeps roughly the real test's pace per question.</p>
+    </div>
+  </div>`;
+}
+
+function briefView() {
+  const s = sc(S.pick);
+  const pace = Math.round(s.secs / s.qs.length);
+  return `<div class="screen">
+    <div class="top"><button class="btn ghost" data-act="jlpt" style="padding-left:0">‹ Back</button><span class="chip">N5 · ${s.en}</span></div>
+    <div class="cover stag" style="--i:1">
+      <div class="lv">N5</div>
+      <div class="sec">${s.cover}</div>
+      <div class="small muted" style="font-family:var(--ui)">${s.jp}（${s.kana}） · ${s.mix}</div>
+      <div class="rule"><b>${s.qs.length} questions · ${fmt(s.secs)}</b> · about ${pace} s per question</div>
+    </div>
+    <ul class="rules stag" style="--i:2">
+      <li>The clock starts at はじめてください and does not stop.</li>
+      <li>You can skip questions and come back from the answer sheet.</li>
+      <li>No answers are shown until the end, like the real test.</li>
+      ${s.id === 'cho' ? '<li>Each recording plays <b>once</b>. In 問題3 and 問題4 the choices are spoken only.</li>' : ''}
+      <li>When time runs out, unanswered questions count as wrong.</li>
+    </ul>
+    <div class="card toggle">
+      <div><div style="font-weight:500">Strict mode</div><div class="small muted">Leaving the session ends it and scores what you answered.</div></div>
+      <button class="switch" role="switch" aria-checked="${S.strict}" data-act="strict" aria-label="Strict mode"></button>
+    </div>
+    <div class="card toggle">
+      <div><div style="font-weight:500">Show English under instructions</div><div class="small muted">The real test prints instructions in Japanese only.</div></div>
+      <button class="switch" role="switch" aria-checked="${S.showGloss}" data-act="gloss" aria-label="Show English under instructions"></button>
+    </div>
+    <button class="btn primary block" data-act="start" style="margin-top:auto">Begin · ${fmt(s.secs)}</button>
+  </div>`;
+}
+
+function stemHtml(q, i) { return q.m === 'g3' ? '' : q.stem; }
+
+function choicesHtml(q, i) {
+  const picked = S.q.answers[i];
+  if (!q.c) {
+    return `<div class="choices">${Array.from({ length: q.n }, (_, k) => `<button class="choice audio-only ${picked === k ? 'on' : ''} ${picked === k && S.q.just ? 'just' : ''}" data-act="pick" data-k="${k}"><span class="bubble">${k + 1}</span><span style="flex:1;text-align:left">choice ${k + 1} (spoken)</span></button>`).join('')}</div>`;
+  }
+  return `<div class="choices">${q.c.map((c, k) => `<button class="choice ${picked === k ? 'on' : ''} ${picked === k && S.q.just ? 'just' : ''}" data-act="pick" data-k="${k}"><span class="bubble">${k + 1}</span><span>${c}</span></button>`).join('')}</div>`;
+}
+
+function examView() {
+  const s = sc(S.q.id), i = S.q.i, q = s.qs[i];
+  const [tag, ins, gloss] = INS[q.m];
+  let passage = '';
+  if (q.p) {
+    let html = PASSAGES[q.p];
+    if (q.gap) html = html.replace(`<span class="gap" data-gap="${q.gap}">`, `<span class="gap cur" data-gap="${q.gap}">`);
+    passage = `<div class="paper passage">${html}</div>`;
+  }
+  let player = '';
+  if (q.audio) {
+    const played = S.q.played[i];
+    player = `<div class="card stack"><div class="player">
+      <button class="play" data-act="play" ${played ? 'disabled' : ''} aria-label="Play recording"><svg viewBox="0 0 24 24"><path d="M7 4l13 8-13 8z"/></svg></button>
+      <div><div style="font-weight:500">${played === 'playing' ? 'Playing…' : played ? 'Played · no replay' : 'Play recording'}</div><div class="small muted">Plays once, as in the test room.</div></div></div>
+      <button class="btn ghost small" data-act="script" style="align-self:flex-start;padding:0">${S.q.script[i] ? 'Hide' : 'Show'} script <span class="sample">mockup only</span></button>
+      ${S.q.script[i] ? `<div class="script">${q.audio.join('<br>')}</div>` : ''}</div>`;
+  }
+  const answered = S.q.answers.filter((x) => x != null).length;
+  return `<div class="exam-top">
+      <div class="row between">
+        <button class="btn ghost" data-act="quit">✕</button>
+        <span class="small muted"><span class="jp">${s.jp}</span> · ${i + 1} / ${s.qs.length}</span>
+        <span class="timer" id="timer">${fmt(S.q.left)}</span>
+      </div>
+      <div class="tbar" id="tbar"><i style="width:${(S.q.left / s.secs) * 100}%"></i></div>
+    </div>
+    <div class="screen" id="qscreen" style="padding-top:6px">
+      <div class="mondai"><div class="h"><span class="tag">${tag}</span><span class="ins">${ins}</span></div>${S.showGloss ? `<div class="gloss">${gloss}</div>` : ''}</div>
+      ${passage}
+      ${player}
+      <div class="stack" style="gap:6px"><span class="qnum">${q.gap ? `<span class="gap cur">${q.gap}</span>` : i + 1}</span>${stemHtml(q, i) ? `<div class="stem">${stemHtml(q, i)}</div>` : ''}</div>
+      ${choicesHtml(q, i)}
+      <div class="demo">Mockup controls: <button data-act="demo-30">jump to 0:30 left</button><button data-act="demo-0">end the time now</button></div>
+    </div>
+    <div class="exam-foot">
+      <button class="btn" data-act="prev" ${i === 0 ? 'disabled' : ''} aria-label="Previous">‹</button>
+      <button class="btn flag ${S.q.flags[i] ? 'on' : ''}" data-act="flag" aria-label="Flag for later">⚑</button>
+      <button class="btn" data-act="sheet">Answer sheet · ${answered}/${s.qs.length}</button>
+      ${i === s.qs.length - 1 ? '<button class="btn primary" data-act="finish">Finish</button>' : '<button class="btn primary" data-act="next" aria-label="Next">›</button>'}
+    </div>`;
+}
+
+function sheetHtml() {
+  const s = sc(S.q.id);
+  if (S.sheet === 'grid') {
+    return `<div class="scrim" data-act="close"><div class="sheet" data-stop>
+      <div class="row between"><b>Answer sheet</b><span class="small muted">● answered · <span style="color:var(--warn)">●</span> flagged</span></div>
+      <div class="grid">${s.qs.map((_, k) => `<button class="cell ${S.q.answers[k] != null ? 'ans' : ''} ${S.q.flags[k] ? 'fl' : ''} ${k === S.q.i ? 'cur' : ''}" data-act="go" data-k="${k}">${k + 1}</button>`).join('')}</div>
+      <button class="btn primary block" data-act="finish">Hand in</button></div></div>`;
+  }
+  if (S.sheet === 'finish') {
+    const left = S.q.answers.filter((x) => x == null).length;
+    return `<div class="scrim" data-act="close"><div class="sheet" data-stop>
+      <b>Hand in with ${left} unanswered?</b><p class="muted small" style="margin:0">You still have ${fmt(S.q.left)}. Unanswered questions count as wrong.</p>
+      <div class="row"><button class="btn block" data-act="close">Keep going</button><button class="btn primary block" data-act="submit">Hand in</button></div></div></div>`;
+  }
+  if (S.sheet === 'quit') {
+    return `<div class="scrim" data-act="close"><div class="sheet" data-stop>
+      <b>${S.strict ? 'End the session now?' : 'Leave the session?'}</b>
+      <p class="muted small" style="margin:0">${S.strict ? 'Strict mode is on, so leaving scores what you have answered. The rotation moves on.' : 'Your answers are discarded and this section stays next in the rotation.'}</p>
+      <div class="row"><button class="btn block" data-act="close">Keep going</button><button class="btn primary block" data-act="${S.strict ? 'submit' : 'abandon'}">${S.strict ? 'End and score' : 'Leave'}</button></div></div></div>`;
+  }
+  return '';
+}
+
+function resultView() {
+  const r = S.result, s = sc(r.id);
+  const pct = r.correct / s.qs.length;
+  const C = 2 * Math.PI * 50;
+  const pace = r.answeredCount ? Math.round(r.used / Math.max(1, r.answeredCount)) : 0;
+  const target = Math.round(s.secs / s.qs.length);
+  const parts = {};
+  s.qs.forEach((q, k) => { const t = INS[q.m][0]; parts[t] = parts[t] || [0, 0]; parts[t][1]++; if (r.answers[k] === q.a) parts[t][0]++; });
+  const next = SCENARIOS[S.rot];
+  const missedWords = s.qs.filter((q, k) => q.word && r.answers[k] !== q.a);
+  const seal = pct >= 0.9 ? 'たいへん<br>よく<br>できました' : pct >= 0.7 ? 'よく<br>できました' : 'がんばり<br>ましょう';
+  return `<div class="screen">
+    <div class="top"><h1>${r.timeUp ? '時間です' : 'Session done'}</h1><span class="chip">N5 · ${s.en}</span></div>
+    <div class="card row stag" style="gap:16px;position:relative;padding-right:92px">
+      <div class="seal" aria-label="Teacher's stamp">${seal}</div>
+      <svg class="ring" viewBox="0 0 120 120" role="img" aria-label="${r.correct} of ${s.qs.length} correct">
+        <circle class="trk" cx="60" cy="60" r="50"/><circle class="val" cx="60" cy="60" r="50" stroke-dasharray="0 ${C}" data-dash="${C * pct} ${C}"/>
+        <text x="60" y="62" text-anchor="middle" font-size="28"><tspan data-count="${r.correct}">${r.correct}</tspan>/${s.qs.length}</text><text class="sub" x="60" y="82" text-anchor="middle" font-size="11">correct</text>
+      </svg>
+      <div class="stack" style="gap:4px;min-width:0">
+        <b><span class="jp">${s.jp}</span> · rotation ${r.cycle}</b>
+        <span class="small muted">${r.timeUp ? 'Time ran out. Unanswered questions count as wrong.' : `Handed in with ${fmt(s.secs - r.used)} left.`}</span>
+        <span class="small">Last time: ${r.prev ? `${r.prev[0]}/${r.prev[1]}` : '—'}</span>
+      </div>
+    </div>
+    <div class="kv stag" style="--i:1">
+      <div><b>${fmt(r.used)}</b><span>time used of ${fmt(s.secs)}</span></div>
+      <div><b>${pace}s</b><span>per question · real pace ${target}s</span></div>
+      <div><b>${s.qs.length - r.answeredCount}</b><span>left blank</span></div>
+    </div>
+    <div class="card stack stag" style="--i:2">
+      <h2>By question type</h2>
+      ${Object.entries(parts).map(([t, [c, n]]) => `<div class="part"><span><span class="jp">${t}</span> <span class="muted">${INS[s.qs.find((q) => INS[q.m][0] === t).m][3]}</span></span><span class="num">${c}/${n}</span><div class="bar"><i style="width:${(c / n) * 100}%;background:${c === n ? 'var(--ok)' : c === 0 ? 'var(--bad)' : 'var(--accent)'}"></i></div></div>`).join('')}
+    </div>
+    ${missedWords.length ? `<div class="card row between"><div><b>${missedWords.length} missed word${missedWords.length > 1 ? 's' : ''}</b><div class="small muted">${missedWords.map((q) => q.word).join('、')}</div></div><button class="btn primary" data-act="addcards">Add to cards</button></div>` : ''}
+    <div class="stack">
+      <h2>Answers</h2>
+      ${s.qs.map((q, k) => {
+        const mine = r.answers[k];
+        const ok = mine === q.a;
+        const lab = (x) => (x == null ? 'blank' : q.c ? `${x + 1}. ${q.c[x]}` : `${x + 1}. ${q.audio[x + 1].replace(/^\d\s*/, '')}`);
+        const stem = q.m === 'g3' ? `<span class="gap">${q.gap}</span> in the essay` : q.stem || q.audio[0];
+        return `<div class="item ${ok ? 'ok' : 'ng'}">
+          <div class="row between"><span class="qnum">${k + 1} · <span class="jp">${INS[q.m][0]}</span></span><span class="pill ${ok ? 'ok' : mine == null ? 'sk' : 'ng'}">${ok ? 'correct' : mine == null ? 'blank' : 'wrong'}</span></div>
+          <div class="stem">${q.order || stem}</div>
+          <div class="ans-line"><span>Answer: <b>${lab(q.a)}</b></span>${ok ? '' : `<span class="muted">You: ${lab(mine)}</span>`}</div>
+          <div class="why">${q.why}</div></div>`;
+      }).join('')}
+    </div>
+    <div class="card stack" style="margin-top:4px">
+      <div class="small muted">Next in the rotation</div>
+      <b><span class="jp">${next.jp}</span> · ${next.en} · ${next.qs.length} questions · ${fmt(next.secs)}</b>
+      <div class="row"><button class="btn block" data-act="main">Done for today</button><button class="btn primary block" data-act="brief" data-id="${next.id}">Start ${next.en}</button></div>
+    </div>
+  </div>`;
+}
+
+// ---------- Rendering & behaviour ----------
+let tick = null;
+const RM = (() => { try { return matchMedia('(prefers-reduced-motion: reduce)').matches; } catch { return false; } })();
+// go(): change screen with a slide; 'back' slides the other way.
+function go(view, dir = 'fwd') { S.view = view; S.enter = dir; render(); window.scrollTo(0, 0); }
+function render() {
+  const app = $('#app');
+  app.className = 'app';
+  if (S.enter) { void app.offsetWidth; app.classList.add('enter-' + S.enter); }
+  if (S.view === 'main') app.innerHTML = mainView();
+  else if (S.view === 'jlpt') app.innerHTML = homeView();
+  else if (S.view === 'brief') app.innerHTML = briefView();
+  else if (S.view === 'exam') app.innerHTML = examView() + sheetHtml();
+  else if (S.view === 'result') app.innerHTML = resultView();
+  if (S.view === 'exam' && S.qDir) $('#qscreen').classList.add('q-' + S.qDir);
+  if (S.enter) afterEnter();
+  S.enter = null; S.qDir = null; S.justDone = null;
+  if (S.q) S.q.just = false;
+  paintTimer();
+}
+
+// Count numbers up, fill the result ring, celebrate a good score.
+function afterEnter() {
+  if (RM) { document.querySelectorAll('[data-dash]').forEach((c) => c.setAttribute('stroke-dasharray', c.dataset.dash)); return; }
+  document.querySelectorAll('[data-count]').forEach((el) => {
+    const end = +el.dataset.count, t0 = performance.now(), dur = 1000;
+    const step = (t) => { const k = Math.min(1, (t - t0) / dur); el.textContent = Math.round(end * (1 - Math.pow(1 - k, 3))); if (k < 1) requestAnimationFrame(step); };
+    el.textContent = 0; requestAnimationFrame(step);
+  });
+  requestAnimationFrame(() => requestAnimationFrame(() => document.querySelectorAll('[data-dash]').forEach((c) => c.setAttribute('stroke-dasharray', c.dataset.dash))));
+  if (S.view === 'result' && S.result.correct / sc(S.result.id).qs.length >= 0.7) setTimeout(confetti, 900);
+}
+
+function confetti() {
+  const cv = document.createElement('canvas'); cv.id = 'confetti'; document.body.appendChild(cv);
+  const dpr = devicePixelRatio || 1, W = innerWidth, H = innerHeight;
+  cv.width = W * dpr; cv.height = H * dpr; const g = cv.getContext('2d'); g.scale(dpr, dpr);
+  const css = getComputedStyle(document.documentElement);
+  const cols = ['--accent', '--ok', '--warn', '--seal', '--c-jlpt'].map((v) => css.getPropertyValue(v).trim());
+  const P = Array.from({ length: 110 }, () => ({ x: W / 2 + (Math.random() - .5) * 80, y: H * .3, vx: (Math.random() - .5) * 9, vy: -Math.random() * 9 - 3, r: Math.random() * 6.28, vr: (Math.random() - .5) * .3, w: 5 + Math.random() * 5, c: cols[Math.floor(Math.random() * cols.length)] }));
+  const t0 = performance.now();
+  const frame = (t) => {
+    g.clearRect(0, 0, W, H);
+    for (const p of P) { p.vy += .25; p.vx *= .99; p.x += p.vx; p.y += p.vy; p.r += p.vr; g.save(); g.translate(p.x, p.y); g.rotate(p.r); g.fillStyle = p.c; g.fillRect(-p.w / 2, -p.w / 4, p.w, p.w / 2); g.restore(); }
+    if (t - t0 < 2600) requestAnimationFrame(frame); else cv.remove();
+  };
+  requestAnimationFrame(frame);
+}
+
+function paintTimer() {
+  if (S.view !== 'exam') return;
+  const s = sc(S.q.id), t = $('#timer'), b = $('#tbar');
+  if (!t) return;
+  t.textContent = fmt(S.q.left);
+  const cls = S.q.left <= 30 ? 'bad' : S.q.left <= 60 ? 'warn' : '';
+  t.className = 'timer ' + cls; b.className = 'tbar ' + cls;
+  if (S.q.left <= 10 && S.q.left > 0) { void t.offsetWidth; t.classList.add('shake'); }
+  b.firstElementChild.style.width = (S.q.left / s.secs) * 100 + '%';
+}
+
+function call(text, sub, then, extra = '') {
+  const el = document.createElement('div');
+  el.className = 'call ' + extra;
+  el.innerHTML = `<div class="stack" style="align-items:center"><div class="big">${text}</div><div class="muted">${sub}</div></div>`;
+  document.body.appendChild(el);
+  setTimeout(() => { el.remove(); then(); }, 1400);
+}
+
+// 3 · 2 · 1 before the proctor's call, like the seconds before the test starts.
+function countdown(sub, then) {
+  if (RM) return call('はじめてください', sub, then);
+  const el = document.createElement('div');
+  el.className = 'call';
+  document.body.appendChild(el);
+  let n = 3;
+  const show = () => {
+    if (n === 0) { el.remove(); return call('はじめてください', sub, then); }
+    el.innerHTML = `<div class="stack" style="align-items:center"><div class="count">${n}</div><div class="muted">${sub}</div></div>`;
+    n--; setTimeout(show, 650);
+  };
+  show();
+}
+
+function toast(msg) {
+  const el = document.createElement('div');
+  el.className = 'toast'; el.textContent = msg; document.body.appendChild(el);
+  setTimeout(() => el.remove(), 2200);
+}
+
+function startExam() {
+  const s = sc(S.pick);
+  S.q = { id: s.id, i: 0, answers: Array(s.qs.length).fill(null), flags: [], played: {}, script: {}, left: s.secs, started: Date.now() };
+  countdown(`${s.jp} · ${fmt(s.secs)}`, () => {
+    go('exam');
+    clearInterval(tick);
+    tick = setInterval(() => {
+      S.q.left--;
+      paintTimer();
+      if (S.q.left <= 0) { clearInterval(tick); stopAudio(); S.sheet = null; call('時間です。', 'やめてください。 Time is up — pencils down.', () => submit(true), 'timeup'); }
+    }, 1000);
+  });
+}
+
+function submit(timeUp) {
+  clearInterval(tick); stopAudio();
+  const s = sc(S.q.id);
+  const correct = s.qs.filter((q, k) => S.q.answers[k] === q.a).length;
+  const last = S.last || { ...EXAMPLE_LAST };
+  const prev = last[s.id];
+  S.result = { id: s.id, answers: S.q.answers.slice(), correct, used: s.secs - Math.max(0, S.q.left), timeUp, prev, cycle: S.cycle,
+    answeredCount: S.q.answers.filter((x) => x != null).length };
+  last[s.id] = [correct, s.qs.length];
+  S.last = last;
+  const idx = SCENARIOS.indexOf(s);
+  if (idx === S.rot) { S.justDone = null; S.pendingDone = idx; S.rot = (S.rot + 1) % SCENARIOS.length; if (S.rot === 0) S.cycle++; }
+  S.doneToday = true;
+  store.set('last', S.last); store.set('rot', S.rot); store.set('cycle', S.cycle); store.set('doneToday', true);
+  S.sheet = null; S.q = null; go('result');
+}
+
+function stopAudio() { try { speechSynthesis.cancel(); } catch {} }
+function play() {
+  const s = sc(S.q.id), i = S.q.i, q = s.qs[i];
+  const ok = 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined';
+  if (!ok) { S.q.played[i] = true; S.q.script[i] = true; toast('No speech voice here, so the script is shown instead.'); render(); return; }
+  stopAudio();
+  const u = new SpeechSynthesisUtterance(q.audio.map((l) => l.replace(/^(男|女)：/, '').replace(/^(\d)\s+/, (m, d) => ['いち', 'に', 'さん'][d - 1] + '。 ')).join('。 '));
+  u.lang = 'ja-JP'; u.rate = 0.9;
+  const v = speechSynthesis.getVoices().find((x) => x.lang && x.lang.startsWith('ja'));
+  if (v) u.voice = v;
+  u.onend = () => { if (S.q && S.q.played[i] === 'playing') { S.q.played[i] = true; render(); } };
+  u.onerror = u.onend;
+  S.q.played[i] = 'playing'; render();
+  speechSynthesis.speak(u);
+}
+
+document.addEventListener('click', (e) => {
+  const el = e.target.closest('[data-act]');
+  if (!el) return;
+  if (el.hasAttribute('data-stop') ) return;
+  if (el.classList.contains('scrim') && e.target !== el) return;
+  const act = el.dataset.act;
+  const s = S.q && sc(S.q.id);
+  switch (act) {
+    case 'main': go('main', 'back'); break;
+    case 'jlpt': S.justDone = S.pendingDone; S.pendingDone = null; go('jlpt', S.view === 'main' ? 'fwd' : 'back'); break;
+    case 'nomock': toast('Not part of this mockup — tap JLPT Practice.'); break;
+    case 'brief': S.pick = el.dataset.id; go('brief'); break;
+    case 'strict': S.strict = !S.strict; render(); break;
+    case 'gloss': S.showGloss = !S.showGloss; render(); break;
+    case 'start': startExam(); break;
+    case 'pick': S.q.answers[S.q.i] = +el.dataset.k; S.q.just = true; render(); break;
+    case 'prev': if (S.q.i > 0) { S.q.i--; S.qDir = 'prev'; stopAudio(); render(); window.scrollTo(0, 0); } break;
+    case 'next': if (S.q.i < s.qs.length - 1) { S.q.i++; S.qDir = 'next'; stopAudio(); render(); window.scrollTo(0, 0); } break;
+    case 'flag': S.q.flags[S.q.i] = !S.q.flags[S.q.i]; render(); break;
+    case 'sheet': S.sheet = 'grid'; render(); break;
+    case 'go': S.qDir = +el.dataset.k < S.q.i ? 'prev' : 'next'; S.q.i = +el.dataset.k; S.sheet = null; stopAudio(); render(); window.scrollTo(0, 0); break;
+    case 'close': S.sheet = null; render(); break;
+    case 'finish': S.sheet = S.q.answers.some((x) => x == null) ? 'finish' : null; if (!S.sheet) submit(false); else render(); break;
+    case 'submit': submit(false); break;
+    case 'quit': S.sheet = 'quit'; render(); break;
+    case 'abandon': clearInterval(tick); stopAudio(); S.q = null; S.sheet = null; go('jlpt', 'back'); break;
+    case 'play': play(); break;
+    case 'script': S.q.script[S.q.i] = !S.q.script[S.q.i]; render(); break;
+    case 'demo-30': S.q.left = Math.min(S.q.left, 30); paintTimer(); break;
+    case 'demo-0': S.q.left = 1; paintTimer(); break;
+    case 'addcards': el.disabled = true; el.textContent = 'Added'; toast('Added to your review deck as new cards.'); break;
+  }
+});
+document.addEventListener('keydown', (e) => {
+  if (S.view !== 'exam' || S.sheet) return;
+  const s = sc(S.q.id), q = s.qs[S.q.i];
+  const n = q.c ? q.c.length : q.n;
+  if (/^[1-4]$/.test(e.key) && +e.key <= n) { S.q.answers[S.q.i] = +e.key - 1; S.q.just = true; render(); }
+  if (e.key === 'ArrowRight' && S.q.i < s.qs.length - 1) { S.q.i++; S.qDir = 'next'; render(); }
+  if (e.key === 'ArrowLeft' && S.q.i > 0) { S.q.i--; S.qDir = 'prev'; render(); }
+});
+render();
+</script>

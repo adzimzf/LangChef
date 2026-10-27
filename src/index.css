@@ -110,3 +110,67 @@
     overflow: hidden;
   }
 }
+
+/* Motion shared by every page (anim-*): page and screen slides, staggered lists, sheets and dialogs,
+   answer feedback, results. All of it is off under prefers-reduced-motion. */
+@keyframes animInFwd { from { opacity: 0; transform: translateX(32px); } }
+@keyframes animInBack { from { opacity: 0; transform: translateX(-32px); } }
+@keyframes animRise { from { opacity: 0; transform: translateY(16px); } }
+@keyframes animPop { 0% { transform: scale(.5); opacity: 0; } 70% { transform: scale(1.15); opacity: 1; } 100% { transform: scale(1); } }
+@keyframes animPress { 40% { transform: scale(.97); } }
+@keyframes animInk { from { box-shadow: 0 0 0 0 rgb(17 24 39 / .5); } to { box-shadow: 0 0 0 14px rgb(17 24 39 / 0); } }
+@keyframes animGrow { from { width: 0; } }
+@keyframes animShine { 0%, 65% { left: -50%; } 100% { left: 130%; } }
+@keyframes animHalo { from { box-shadow: 0 0 0 0 rgb(59 130 246 / .55); } to { box-shadow: 0 0 0 9px rgb(59 130 246 / 0); } }
+@keyframes animDrift { from { background-position: 0% 50%; } to { background-position: 100% 50%; } }
+@keyframes animStamp { 0% { transform: scale(2.2); opacity: 0; } 55% { transform: scale(.92); opacity: 1; } 100% { transform: scale(1); } }
+@keyframes animSeal { 0% { transform: rotate(-14deg) scale(2.4); opacity: 0; } 60% { transform: rotate(-14deg) scale(.9); opacity: .95; } 100% { transform: rotate(-14deg) scale(1); opacity: .9; } }
+@keyframes animShake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-4px); } 40% { transform: translateX(4px); } 60% { transform: translateX(-3px); } 80% { transform: translateX(2px); } }
+@keyframes animFade { from { opacity: 0; } }
+@keyframes animSheet { from { transform: translateY(100%); } }
+@keyframes animRing { from { stroke-dasharray: 0 var(--ring-len); } }
+@keyframes animWiggle { 0%, 92%, 100% { transform: rotate(0); } 94% { transform: rotate(-8deg); } 96% { transform: rotate(8deg); } 98% { transform: rotate(-4deg); } }
+@keyframes animPulse { 50% { opacity: .6; } }
+
+.anim-enter-fwd { animation: animInFwd .34s cubic-bezier(.2, .8, .2, 1) backwards; }
+.anim-enter-back { animation: animInBack .34s cubic-bezier(.2, .8, .2, 1) backwards; }
+.anim-stag { animation: animRise .5s cubic-bezier(.2, .8, .2, 1) backwards; animation-delay: calc(var(--i, 0) * 70ms + 60ms); }
+.anim-pop { animation: animPop .45s backwards; }
+.anim-press { animation: animPress .25s; }
+.anim-ink { animation: animPop .35s, animInk .6s ease-out; }
+.anim-grow { animation: animGrow 1s .35s cubic-bezier(.2, .8, .2, 1) backwards; }
+.anim-shine::after { content: ""; position: absolute; top: 0; bottom: 0; width: 40%; background: linear-gradient(90deg, transparent, rgb(59 130 246 / .18), transparent); animation: animShine 3.6s ease-in-out infinite; }
+.anim-halo { animation: animHalo 1.8s ease-out infinite; }
+.anim-stagger > * { animation: animRise .45s cubic-bezier(.2, .8, .2, 1) backwards; }
+.anim-stagger > :nth-child(1) { animation-delay: 30ms; }
+.anim-stagger > :nth-child(2) { animation-delay: 80ms; }
+.anim-stagger > :nth-child(3) { animation-delay: 130ms; }
+.anim-stagger > :nth-child(4) { animation-delay: 180ms; }
+.anim-stagger > :nth-child(5) { animation-delay: 230ms; }
+.anim-stagger > :nth-child(6) { animation-delay: 280ms; }
+.anim-stagger > :nth-child(7) { animation-delay: 330ms; }
+.anim-stagger > :nth-child(8) { animation-delay: 380ms; }
+.anim-stagger > :nth-child(9) { animation-delay: 430ms; }
+.anim-stagger > :nth-child(10) { animation-delay: 480ms; }
+.anim-stagger > :nth-child(n+11) { animation-delay: 530ms; }
+@keyframes animDialog { from { opacity: 0; transform: scale(.94); } }
+.anim-dialog { animation: animDialog .22s cubic-bezier(.2, .8, .2, 1); }
+.anim-backdrop { animation: animFade .2s; }
+.anim-rise { animation: animRise .35s cubic-bezier(.2, .8, .2, 1) backwards; }
+.anim-hero { background: linear-gradient(120deg, #3b82f6, #2563eb, #4f46e5, #3b82f6); background-size: 300% 300%; animation: animRise .5s cubic-bezier(.2, .8, .2, 1) backwards, animDrift 9s ease-in-out infinite alternate; animation-delay: 130ms, 0s; }
+.anim-stamp { animation: animStamp .5s cubic-bezier(.2, .8, .2, 1) backwards; }
+.anim-stamp-shake { animation: animStamp .5s backwards, animShake .45s .5s; }
+.anim-seal { transform: rotate(-14deg); opacity: .9; animation: animSeal .55s 1.1s cubic-bezier(.2, .8, .2, 1) backwards; }
+.anim-shake { animation: animShake .4s; }
+.anim-pulse { animation: animPulse 1s infinite; }
+.anim-fade { animation: animFade .2s; }
+.anim-sheet { animation: animSheet .3s cubic-bezier(.2, .8, .2, 1); }
+.anim-ring { animation: animRing 1.2s .2s cubic-bezier(.2, .8, .2, 1) backwards; }
+.anim-new { animation: animPop .5s .5s backwards, animWiggle 4s 2s ease-in-out infinite; display: inline-block; }
+.anim-icon-shine { position: relative; overflow: hidden; }
+.anim-icon-shine::after { content: ""; position: absolute; top: -20%; bottom: -20%; width: 40%; background: linear-gradient(90deg, transparent, rgb(255 255 255 / .55), transparent); animation: animShine 3.2s ease-in-out infinite; }
+.anim-confetti { position: fixed; inset: 0; pointer-events: none; z-index: 70; }
+
+@media (prefers-reduced-motion: reduce) {
+  [class*="anim-"], [class*="anim-"]::after { animation: none !important; transition: none !important; }
+}

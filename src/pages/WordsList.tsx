@@ -16,6 +16,7 @@ import { parseDetailJson } from '../lib/types'
 import EditWordForm from '../components/EditWordForm'
 import { t, lang as explainLang, errorText, formatNextReview, formatNumber, languageName, partOfSpeechLabel } from '../lib/i18n'
 import { languageLabel } from '../lib/languages'
+import { useBackHandler } from '../lib/backNav'
 
 const PAGE_SIZE = 20
 
@@ -59,6 +60,7 @@ export default function WordsList() {
 
   // Delete confirmation
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  useBackHandler(deletingId !== null, () => setDeletingId(null))
   const [generating, setGenerating] = useState(false)
   const [generateError, setGenerateError] = useState<string | null>(null)
 
@@ -551,7 +553,7 @@ export default function WordsList() {
             </div>
           )}
 
-          <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+          <div className="bg-white rounded-xl shadow-sm overflow-hidden anim-stagger">
             {items.map((item, idx) => {
               return (
                 <div

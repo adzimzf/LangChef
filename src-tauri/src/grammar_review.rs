@@ -38,14 +38,14 @@ const ORIGINAL_ROWS: &str = "g.ai_translated = 0 AND g.level != ''";
 // Settings
 // ---------------------------------------------------------------------------
 
-fn setting(conn: &Connection, key: &str) -> Option<String> {
+pub(crate) fn setting(conn: &Connection, key: &str) -> Option<String> {
     conn.query_row("SELECT value FROM app_settings WHERE key = ?1", params![key], |r| r.get(0))
         .optional()
         .ok()
         .flatten()
 }
 
-fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
+pub(crate) fn set_setting(conn: &Connection, key: &str, value: &str) -> Result<(), String> {
     conn.execute(
         "INSERT INTO app_settings(key, value) VALUES (?1, ?2)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value",

@@ -6,6 +6,7 @@ import { JLPT_LEVELS, JLPT_LEVEL_ORDER, DEFAULT_JLPT_LEVEL, JLPT_LEVEL_STORAGE_K
 import type { JLPTLevel } from '../lib/jlpt'
 import { t, formatAgo } from '../lib/i18n'
 import { TARGET_LANGUAGES, languageLabel } from '../lib/languages'
+import { useBackHandler } from '../lib/backNav'
 
 type GrammarLevelInfo = { level: string; count: number }
 
@@ -45,6 +46,9 @@ export default function Chats() {
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editTitle, setEditTitle] = useState('')
   const [deletingId, setDeletingId] = useState<string | null>(null)
+  useBackHandler(showLangPicker, () => setShowLangPicker(false))
+  useBackHandler(showJlptPicker, () => setShowJlptPicker(false))
+  useBackHandler(deletingId !== null, () => setDeletingId(null))
   const [dbLevels, setDbLevels] = useState<string[]>(JLPT_LEVEL_ORDER)
   const navigate = useNavigate()
 
@@ -140,9 +144,9 @@ export default function Chats() {
 
       {/* Language picker modal */}
       {showLangPicker && (
-        <div className="fixed inset-x-0 top-0 bottom-14 z-[60] flex items-end justify-center bg-black/30" onClick={() => setShowLangPicker(false)}>
+        <div className="anim-backdrop fixed inset-x-0 top-0 bottom-14 z-[60] flex items-end justify-center bg-black/30" onClick={() => setShowLangPicker(false)}>
           <div
-            className="w-full max-w-lg bg-white rounded-t-2xl p-5 safe-bottom"
+            className="anim-sheet w-full max-w-lg bg-white rounded-t-2xl p-5 safe-bottom"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
@@ -172,9 +176,9 @@ export default function Chats() {
 
       {/* JLPT level picker modal */}
       {showJlptPicker && (
-        <div className="fixed inset-x-0 top-0 bottom-14 z-[60] flex items-end justify-center bg-black/30" onClick={() => setShowJlptPicker(false)}>
+        <div className="anim-backdrop fixed inset-x-0 top-0 bottom-14 z-[60] flex items-end justify-center bg-black/30" onClick={() => setShowJlptPicker(false)}>
           <div
-            className="w-full max-w-lg bg-white rounded-t-2xl p-5 safe-bottom"
+            className="anim-sheet w-full max-w-lg bg-white rounded-t-2xl p-5 safe-bottom"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
@@ -212,9 +216,9 @@ export default function Chats() {
 
       {/* Delete confirmation modal */}
       {deletingId && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30" onClick={() => setDeletingId(null)}>
+        <div className="anim-backdrop fixed inset-0 z-[60] flex items-center justify-center bg-black/30" onClick={() => setDeletingId(null)}>
           <div
-            className="bg-white rounded-2xl p-5 mx-6 max-w-sm w-full"
+            className="anim-dialog bg-white rounded-2xl p-5 mx-6 max-w-sm w-full"
             onClick={(e) => e.stopPropagation()}
           >
             <h3 className="text-base font-semibold mb-2">{t('chats.deleteTitle')}</h3>
@@ -249,7 +253,7 @@ export default function Chats() {
           </button>
         </div>
       ) : (
-        <div className="flex flex-col -mx-4 overflow-x-hidden">
+        <div className="flex flex-col -mx-4 overflow-x-hidden anim-stagger">
           {sessions.map(s => (
             <div
               key={s.id}

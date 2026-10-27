@@ -9,6 +9,7 @@ import type {
 } from '../lib/types'
 import { t, errorText, formatDay } from '../lib/i18n'
 import { TARGET_LANGUAGES } from '../lib/languages'
+import { useBackHandler } from '../lib/backNav'
 
 type Phase = 'input' | 'pick' | 'result'
 
@@ -177,6 +178,7 @@ export default function Breakdown() {
     setError('')
     setPhase('input')
   }
+  useBackHandler(phase !== 'input', backToInput)
 
   /** A section's frame: its content once it arrived, a skeleton while it loads, or the error with a retry. */
   function section(name: BreakdownSection, title: string | null, body: ReactNode, lines = 2) {
@@ -475,7 +477,7 @@ export default function Breakdown() {
           <PartitionOutlined /> {t('breakdown.submit')}
         </button>
 
-        <section className="flex flex-col gap-2">
+        <section className="flex flex-col gap-2 anim-stagger">
           <h2 className="text-[15px] font-bold text-gray-900">{t('breakdown.recent')}</h2>
           {history.length === 0 ? (
             <p className="text-sm text-gray-500">{t('breakdown.recentEmpty')}</p>

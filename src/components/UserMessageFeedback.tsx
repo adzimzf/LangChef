@@ -3,6 +3,7 @@ import { CloseOutlined } from '@ant-design/icons'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { t } from '../lib/i18n'
+import { useBackHandler } from '../lib/backNav'
 
 export type UserFeedback = { messageId: number; score: number; feedback: string; loading: boolean }
 
@@ -108,6 +109,7 @@ function feedbackToMarkdown(fb: FeedbackJSON): string {
 
 export default function UserMessageFeedback({ feedback }: Props) {
   const [showDetail, setShowDetail] = useState(false)
+  useBackHandler(showDetail, () => setShowDetail(false))
 
   if (!feedback) return null
 
@@ -135,11 +137,11 @@ export default function UserMessageFeedback({ feedback }: Props) {
 
       {showDetail && (
         <div
-          className="fixed inset-0 z-50 flex items-end justify-center bg-black/30 sm:items-center"
+          className="anim-backdrop fixed inset-0 z-50 flex items-end justify-center bg-black/30 sm:items-center"
           onClick={() => setShowDetail(false)}
         >
           <div
-            className="bg-white rounded-t-2xl sm:rounded-2xl w-full max-w-lg max-h-[70vh] flex flex-col safe-bottom"
+            className="anim-sheet bg-white rounded-t-2xl sm:rounded-2xl w-full max-w-lg max-h-[70vh] flex flex-col safe-bottom"
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-center justify-between px-4 py-3 border-b shrink-0">

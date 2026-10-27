@@ -17,6 +17,7 @@ const { TextArea } = Input
 import { ArrowLeftOutlined, SendOutlined, InfoCircleOutlined, CloseOutlined, PlusOutlined, EditOutlined, LeftOutlined, RightOutlined, DownOutlined, UpOutlined, TranslationOutlined, LoadingOutlined, BulbOutlined } from '@ant-design/icons'
 import { useNavigate, useSearchParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
+import { useBackHandler } from '../lib/backNav'
 
 type Msg = { id: number | null, role: 'user' | 'assistant' | 'system', content: string, parentMessageId?: number | null, isActivePath?: boolean }
 
@@ -268,6 +269,8 @@ export default function Chat() {
   const [grammarInfoItem, setGrammarInfoItem] = useState<GrammarDBItem | null>(null)
   const [grammarAnalysis, setGrammarAnalysis] = useState<string | null>(null)
   const [grammarAnalysisLoading, setGrammarAnalysisLoading] = useState<number | null>(null)
+  useBackHandler(grammarInfoItem !== null, () => setGrammarInfoItem(null))
+  useBackHandler(grammarAnalysis !== null, () => setGrammarAnalysis(null))
   const [feedbackMap, setFeedbackMap] = useState<Map<number, UserFeedback>>(new Map())
   const [wordColorsByMessage, setWordColorsByMessage] = useState<Map<number, { tokens: Array<{surface: string, base_form: string}>, colors: Map<string, WordColorInfo> }>>(new Map())
   const logRef = useRef<HTMLDivElement | null>(null)
@@ -331,6 +334,7 @@ export default function Chat() {
       detailCloseTimer.current = null
     }, 220)
   }
+  useBackHandler(detailIndex !== null, closeDetail)
 
   const openDetail = async (idx: number) => {
     if (detailCloseTimer.current) {
@@ -1589,11 +1593,11 @@ export default function Chat() {
       {/* Grammar info modal */}
       {grammarInfoItem && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+          className="anim-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/30"
           onClick={() => setGrammarInfoItem(null)}
         >
           <div
-            className="bg-white rounded-2xl p-5 mx-4 max-w-sm w-full max-h-[70vh] overflow-y-auto"
+            className="anim-dialog bg-white rounded-2xl p-5 mx-4 max-w-sm w-full max-h-[70vh] overflow-y-auto"
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-3">
@@ -1617,11 +1621,11 @@ export default function Chat() {
       {/* Grammar analysis modal */}
       {grammarAnalysis !== null && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+          className="anim-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/30"
           onClick={() => setGrammarAnalysis(null)}
         >
           <div
-            className="bg-white rounded-2xl p-5 mx-4 max-w-sm w-full max-h-[70vh] overflow-y-auto"
+            className="anim-dialog bg-white rounded-2xl p-5 mx-4 max-w-sm w-full max-h-[70vh] overflow-y-auto"
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-3">

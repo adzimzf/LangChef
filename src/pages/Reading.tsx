@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useBackHandler } from '../lib/backNav'
 import { invoke } from '@tauri-apps/api/core'
 import {
   ArrowLeftOutlined, LoadingOutlined, PlusOutlined, CheckCircleFilled, CloseOutlined,
@@ -435,6 +436,9 @@ export default function Reading() {
     setPhase('init')
     loadHome()
   }
+  // Back: an open sheet closes first, then a text goes back to the list.
+  useBackHandler(phase === 'loading' || phase === 'reading' || phase === 'qa' || phase === 'summary', goHome)
+  useBackHandler(showPassage, () => setShowPassage(false))
 
   // Sheets go to <body> so they cover the bottom navigation.
   const wordSheetEl = wordSheet && text && createPortal(
@@ -582,7 +586,7 @@ export default function Reading() {
                 <p className="text-gray-500 text-sm max-w-[16rem]">{t('reading.empty')}</p>
               </div>
             ) : (
-              <div className="flex flex-col gap-2">
+              <div className="flex flex-col gap-2 anim-stagger">
                 {sessions.map(s => {
                   const isDone = s.phase === 'complete'
                   if (confirmDelete === s.id) {
@@ -974,11 +978,11 @@ export default function Reading() {
         </div>
 
         {showPassage && createPortal(
-          <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40" onClick={() => setShowPassage(false)}>
+          <div className="anim-backdrop fixed inset-0 z-50 flex items-end justify-center bg-black/40" onClick={() => setShowPassage(false)}>
             <div
               role="dialog"
               aria-label={t('reading.viewPassage')}
-              className="w-full max-w-lg bg-white rounded-t-3xl max-h-[78vh] flex flex-col safe-bottom"
+              className="anim-sheet w-full max-w-lg bg-white rounded-t-3xl max-h-[78vh] flex flex-col safe-bottom"
               onClick={(e) => e.stopPropagation()}
             >
               <div className="flex items-center justify-between px-5 pt-3 pb-2 border-b border-gray-100">

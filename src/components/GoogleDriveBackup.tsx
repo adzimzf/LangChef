@@ -20,6 +20,7 @@ import {
   ThunderboltOutlined,
 } from '@ant-design/icons'
 import { t, errorWithDetail, formatAgo, formatDate, formatNumber } from '../lib/i18n'
+import { useBackHandler } from '../lib/backNav'
 
 type AuthStatus = {
   signed_in: boolean
@@ -69,6 +70,7 @@ export default function GoogleDriveBackup() {
   const [backupStatus, setBackupStatus] = useState<BackupStatus | null>(null)
   const [backupAction, setBackupAction] = useState<'idle' | 'backing_up' | 'restoring'>('idle')
   const [showRestoreConfirm, setShowRestoreConfirm] = useState(false)
+  useBackHandler(showRestoreConfirm, () => setShowRestoreConfirm(false))
 
   // Auto-sync state
   const [syncConfig, setSyncConfig] = useState<SyncConfig>({
@@ -480,8 +482,8 @@ export default function GoogleDriveBackup() {
 
             {/* Restore confirmation dialog */}
             {showRestoreConfirm && (
-              <div className="fixed inset-0 z-[100] flex items-end sm:items-center justify-center bg-black/40 p-4">
-                <div className="bg-white rounded-2xl p-5 w-full max-w-sm shadow-xl animate-in fade-in slide-in-from-bottom-4">
+              <div className="anim-backdrop fixed inset-0 z-[100] flex items-end sm:items-center justify-center bg-black/40 p-4">
+                <div className="bg-white rounded-2xl p-5 w-full max-w-sm shadow-xl anim-sheet">
                   <h4 className="text-base font-semibold mb-2">{t('backup.restoreTitle')}</h4>
                   <p className="text-sm text-gray-500 leading-relaxed mb-1">
                     {t('backup.restoreBody')}

@@ -5,6 +5,7 @@ import type { CardDetail, ReviewItem, SavedWord } from '../lib/types'
 import { parseDetailJson } from '../lib/types'
 import { t, lang as explainLang, errorText, languageName, partOfSpeechLabel } from '../lib/i18n'
 import { readFlag, ROMAJI_KEY } from '../lib/prefs'
+import { useBackHandler } from '../lib/backNav'
 
 type Api = { apiHost: string; apiKey: string; model: string }
 
@@ -28,6 +29,7 @@ export default function WordSheet({ word, base, language, api, onAdd, onClose }:
   onAdd: (content: string, detail: string | null) => Promise<SavedWord>
   onClose: () => void
 }) {
+  useBackHandler(true, onClose)
   const [item, setItem] = useState<ReviewItem | null>(null)
   const [detail, setDetail] = useState<Partial<CardDetail> | null>(null)
   const [rawDetail, setRawDetail] = useState<string | null>(null)
@@ -84,11 +86,11 @@ export default function WordSheet({ word, base, language, api, onAdd, onClose }:
   const inDeck = !!item || added
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40" onClick={onClose}>
+    <div className="anim-backdrop fixed inset-0 z-50 flex items-end justify-center bg-black/40" onClick={onClose}>
       <div
         role="dialog"
         aria-label={t('chat.wordMeaning')}
-        className="w-full max-w-lg bg-white rounded-t-2xl p-5 space-y-3 safe-bottom"
+        className="anim-sheet w-full max-w-lg bg-white rounded-t-2xl p-5 space-y-3 safe-bottom"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-2">
