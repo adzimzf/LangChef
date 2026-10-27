@@ -18,6 +18,7 @@ mod feedback;
 mod reading;
 mod breakdown;
 mod jlpt;
+mod tts;
 mod locale;
 mod romaji;
 
@@ -151,6 +152,7 @@ pub fn run() {
                 eprintln!("[furigana] Dict not cached — call init_lindera_dict from frontend");
             }
             app.manage(Mutex::new(initial));
+            app.manage(tts::TtsState::default());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -273,6 +275,11 @@ pub fn run() {
             jlpt::db_jlpt_result,
             jlpt::db_jlpt_history,
             jlpt::db_jlpt_stats,
+            // Offline Japanese voice
+            tts::tts_status,
+            tts::tts_install,
+            tts::tts_remove,
+            tts::tts_speak,
             // Google Auth
             google_auth::google_sign_in,
             google_auth::google_sign_out,
