@@ -10,9 +10,22 @@ import {
   UnorderedListOutlined,
   ReadOutlined,
   FileTextOutlined,
+  FormOutlined,
 } from '@ant-design/icons'
 import { type ActivityRow, todayKey, computeStreakFromActivity } from '../lib/stats'
 import { t } from '../lib/i18n'
+import { SECTION_JA, practiceLevel } from '../lib/jlpt'
+import type { JlptOverview } from '../lib/types'
+
+/** The JLPT row says what comes next in the rotation, or that today's session is done. */
+function jlptDesc(o: JlptOverview | null): string {
+  if (!o) return t('home.jlptDesc')
+  const next = o.plans.find((p) => p.section === o.next_section)
+  if (o.done_today) return t('home.jlptDone', { section: SECTION_JA[o.next_section] })
+  if (!next) return t('home.jlptDesc')
+  const time = `${Math.floor(next.time_limit / 60)}:${String(next.time_limit % 60).padStart(2, '0')}`
+  return t('home.jlptNext', { section: SECTION_JA[next.section], count: next.questions, time })
+}
 
 export default function Home() {
   const navigate = useNavigate()
@@ -24,6 +37,12 @@ export default function Home() {
     sessionsToday: 0,
     knownWords: 0,
   })
+
+  const [jlpt, setJlpt] = useState<JlptOverview | null>(null)
+
+  useEffect(() => {
+    invoke<JlptOverview>('db_jlpt_overview', { level: practiceLevel() }).then(setJlpt).catch(() => {})
+  }, [])
 
   useEffect(() => {
     async function loadStats() {
@@ -69,6 +88,15 @@ export default function Home() {
       desc: t('home.reviewDesc', { mastered: stats.mastered, total: stats.total }),
       color: 'bg-green-500',
       onClick: () => navigate('/review'),
+    },
+    {
+      key: 'jlpt',
+      icon: <FormOutlined className="text-xl" />,
+      label: t('home.jlpt'),
+      desc: jlptDesc(jlpt),
+      color: 'bg-rose-500',
+      isNew: true,
+      onClick: () => navigate('/jlpt'),
     },
     {
       key: 'words',
@@ -138,11 +166,14 @@ export default function Home() {
             onClick={a.onClick}
             className="w-full flex items-center gap-3 bg-white rounded-xl p-4 shadow-sm hover:shadow active:bg-gray-50 transition-all text-left"
           >
-            <div className={`w-11 h-11 rounded-xl ${a.color} flex items-center justify-center text-white shrink-0`}>
+            <div className={`w-11 h-11 rounded-xl ${a.color} flex items-center justify-center text-white shrink-0 ${a.isNew ? 'jlpt-icon-shine' : ''}`}>
               {a.icon}
             </div>
             <div className="flex-1 min-w-0">
-              <div className="font-medium text-[15px]">{a.label}</div>
+              <div className="font-medium text-[15px]">
+                {a.label}
+                {a.isNew && <span className="jlpt-new ml-1.5 align-[2px] text-[9.5px] font-bold text-white bg-rose-500 rounded px-1">{t('home.new')}</span>}
+              </div>
               <div className="text-xs text-gray-400">{a.desc}</div>
             </div>
             <RightOutlined className="text-gray-300" />

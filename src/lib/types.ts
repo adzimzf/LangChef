@@ -338,3 +338,74 @@ export type BreakdownSummary = {
 }
 
 export type BreakdownCheckResult = { correct: boolean; answer: number; explanation: string }
+
+// JLPT practice (src-tauri/src/jlpt.rs)
+
+export type JlptSection = 'vocab' | 'grammar' | 'reading' | 'listening'
+export type JlptScore = { correct: number; total: number }
+
+export type JlptSectionPlan = {
+  section: JlptSection
+  /** 問題 types in order, with how many questions each */
+  parts: { part: string; count: number }[]
+  questions: number
+  /** Seconds */
+  time_limit: number
+  real_minutes: number
+  /** 'grammar_reading' / 'language_reading' when the real test times it with other sections, else '' */
+  real_block: string
+}
+
+export type JlptEstimate = {
+  parts: { code: string; score: number; max: number; min: number }[]
+  total: number
+  max: number
+  pass_mark: number
+  passed: boolean
+}
+
+export type JlptOverview = {
+  level: string
+  rotation: { section: JlptSection; state: 'done' | 'next' | 'upcoming'; last: JlptScore | null }[]
+  next_section: JlptSection
+  cycle: number
+  plans: JlptSectionPlan[]
+  done_today: boolean
+  /** Last 7 days, oldest first */
+  week: boolean[]
+  estimate: JlptEstimate | null
+  open_session: number | null
+}
+
+export type JlptQuestion = { stem: string; script: string[]; options: string[] }
+export type JlptPart = { part: string; passage: string; questions: JlptQuestion[] }
+
+export type JlptSessionView = {
+  id: number
+  level: string
+  section: JlptSection
+  time_limit: number
+  /** Milliseconds since the epoch, once the clock runs */
+  started_at: number | null
+  answers: (number | null)[]
+  parts: JlptPart[]
+}
+
+export type JlptReviewedQuestion = JlptQuestion & { answer: number; chosen: number | null; explanation: string; word: string }
+
+export type JlptResult = {
+  id: number
+  level: string
+  section: JlptSection
+  correct: number
+  total: number
+  answered: number
+  time_used: number
+  time_limit: number
+  timed_out: boolean
+  prev: JlptScore | null
+  parts: { part: string; passage: string; correct: number; total: number; questions: JlptReviewedQuestion[] }[]
+  missed_words: string[]
+  next_section: JlptSection
+  cycle: number
+}

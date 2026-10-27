@@ -17,6 +17,7 @@ mod grammar_review;
 mod feedback;
 mod reading;
 mod breakdown;
+mod jlpt;
 mod locale;
 mod romaji;
 
@@ -262,6 +263,13 @@ pub fn run() {
             breakdown::db_get_sentence_breakdown,
             breakdown::db_check_breakdown_answer,
             breakdown::db_delete_sentence_breakdown,
+            // JLPT practice
+            jlpt::db_jlpt_overview,
+            jlpt::llm_jlpt_prepare,
+            jlpt::db_jlpt_begin,
+            jlpt::db_jlpt_get_session,
+            jlpt::db_jlpt_save_answers,
+            jlpt::db_jlpt_submit,
             // Google Auth
             google_auth::google_sign_in,
             google_auth::google_sign_out,

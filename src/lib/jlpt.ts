@@ -102,3 +102,54 @@ export function seedGrammarLevel(): Promise<void> {
   try { level = localStorage.getItem(JLPT_LEVEL_STORAGE_KEY) } catch { /* storage blocked */ }
   return level ? invoke<void>('db_seed_grammar_level', { language: 'ja', level }).catch(() => {}) : Promise.resolve()
 }
+
+// ---------------------------------------------------------------------------
+// JLPT practice (timed sections like the real test)
+// ---------------------------------------------------------------------------
+
+/** localStorage key for the level practised on the JLPT practice page */
+export const JLPT_PRACTICE_LEVEL_KEY = 'jlpt_practice_level'
+
+export function practiceLevel(): JLPTLevel {
+  try {
+    const v = localStorage.getItem(JLPT_PRACTICE_LEVEL_KEY) || localStorage.getItem(JLPT_LEVEL_STORAGE_KEY)
+    if (v && (JLPT_LEVEL_ORDER as string[]).includes(v)) return v as JLPTLevel
+  } catch { /* storage blocked */ }
+  return 'N5'
+}
+
+/** Section names as the test booklet prints them, the same in every explanation language. */
+export const SECTION_JA: Record<string, string> = {
+  vocab: '文字・語彙',
+  grammar: '文法',
+  reading: '読解',
+  listening: '聴解',
+}
+
+/** The instruction the test booklet prints above each 問題 type. */
+export const PART_INSTRUCTION: Record<string, string> = {
+  kanji_reading: '＿＿＿の ことばは ひらがなで どう かきますか。１・２・３・４から いちばん いい ものを ひとつ えらんで ください。',
+  orthography: '＿＿＿の ことばは どう かきますか。１・２・３・４から いちばん いい ものを ひとつ えらんで ください。',
+  word_formation: '（　　）に 入れるのに 最も よいものを、１・２・３・４から 一つ 選びなさい。',
+  context: '（　　）に なにが はいりますか。１・２・３・４から いちばん いい ものを ひとつ えらんで ください。',
+  paraphrase: '＿＿＿の ことばと だいたい おなじ いみの ものが あります。１・２・３・４から いちばん いい ものを ひとつ えらんで ください。',
+  usage: 'つぎの ことばの つかいかたで いちばん いい ものを １・２・３・４から ひとつ えらんで ください。',
+  sentence_grammar: '（　　）に 何を 入れますか。１・２・３・４から いちばん いい ものを 一つ えらんで ください。',
+  sentence_order: '★ に 入る ものは どれですか。１・２・３・４から いちばん いい ものを 一つ えらんで ください。',
+  text_grammar: 'つぎの 文章を 読んで、【　】に 入る いちばん いい ものを １・２・３・４から 一つ えらんで ください。',
+  short_text: 'つぎの 文章を 読んで、しつもんに こたえて ください。',
+  mid_text: 'つぎの 文章を 読んで、しつもんに こたえて ください。',
+  long_text: 'つぎの 文章を 読んで、しつもんに こたえて ください。',
+  integrated: 'つぎの AとBの 文章を 読んで、しつもんに こたえて ください。',
+  thematic: 'つぎの 文章を 読んで、しつもんに こたえて ください。',
+  info_search: 'つぎの ページを 見て、しつもんに こたえて ください。',
+  task: 'はじめに しつもんを 聞いて ください。それから 話を 聞いて、１から４の 中から、いちばん いい ものを 一つ えらんで ください。',
+  point: 'はじめに しつもんを 聞いて ください。それから 話を 聞いて、１から４の 中から、いちばん いい ものを 一つ えらんで ください。',
+  summary: '話を 聞いて、しつもんに いちばん いい こたえを １から４の 中から 一つ えらんで ください。',
+  integrated_listening: '話を 聞いて、しつもんに いちばん いい こたえを １から４の 中から 一つ えらんで ください。',
+  utterance: 'しつもんを 聞いて ください。何と 言いますか。１から３の 中から、いちばん いい ものを 一つ えらんで ください。',
+  quick_response: 'ぶんを 聞いて、１から３の 中から、いちばん いい へんじを 一つ えらんで ください。',
+}
+
+/** Parts whose choices are only spoken, like the real test. */
+export const SPOKEN_CHOICE_PARTS = ['utterance', 'quick_response']

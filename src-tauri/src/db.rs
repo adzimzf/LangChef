@@ -177,6 +177,23 @@ pub fn prepare_db(conn: &Connection) -> Result<(), String> {
             data TEXT NOT NULL,
             PRIMARY KEY (breakdown_id, section)
         );
+        CREATE TABLE IF NOT EXISTS jlpt_sessions(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            level TEXT NOT NULL,
+            section TEXT NOT NULL,
+            explain_lang TEXT NOT NULL,
+            data TEXT NOT NULL,
+            time_limit INTEGER NOT NULL,
+            answers TEXT NOT NULL DEFAULT '[]',
+            started_at INTEGER,
+            finished_at INTEGER,
+            finished_on TEXT,
+            correct INTEGER,
+            total INTEGER,
+            time_used INTEGER,
+            timed_out INTEGER NOT NULL DEFAULT 0,
+            created_at TEXT NOT NULL DEFAULT (datetime('now'))
+        );
         "
     ).map_err(|e| e.to_string())?;
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN session_id TEXT", []);

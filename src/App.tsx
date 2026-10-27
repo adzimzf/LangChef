@@ -11,6 +11,7 @@ import WordsList from './pages/WordsList'
 import Grammar from './pages/Grammar'
 import Reading from './pages/Reading'
 import Breakdown from './pages/Breakdown'
+import JlptPractice from './pages/JlptPractice'
 import Layout from './components/Layout'
 import Onboarding, { needsOnboarding } from './pages/Onboarding'
 
@@ -29,6 +30,7 @@ export default function App() {
           <Route path="/reading" element={<Reading />} />
           <Route path="/breakdown" element={<Breakdown />} />
           <Route path="/grammar" element={<Grammar />} />
+          <Route path="/jlpt" element={<JlptPractice />} />
           <Route path="/stats" element={<UserStats />} />
           <Route path="/telemetry" element={<Navigate to="/stats" replace />} />
           <Route path="/settings" element={<Settings />} />
