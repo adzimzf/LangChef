@@ -84,11 +84,11 @@ export default function WordSheet({ word, base, language, api, onAdd, onClose }:
   const inDeck = !!item || added
 
   return (
-    <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/40" onClick={onClose}>
+    <div className="anim-backdrop fixed inset-0 z-50 flex items-end justify-center bg-black/40" onClick={onClose}>
       <div
         role="dialog"
         aria-label={t('chat.wordMeaning')}
-        className="w-full max-w-lg bg-white rounded-t-2xl p-5 space-y-3 safe-bottom"
+        className="anim-sheet w-full max-w-lg bg-white rounded-t-2xl p-5 space-y-3 safe-bottom"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-start justify-between gap-2">

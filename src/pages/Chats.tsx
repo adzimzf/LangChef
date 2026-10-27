@@ -140,9 +140,9 @@ export default function Chats() {
 
       {/* Language picker modal */}
       {showLangPicker && (
-        <div className="fixed inset-x-0 top-0 bottom-14 z-[60] flex items-end justify-center bg-black/30" onClick={() => setShowLangPicker(false)}>
+        <div className="anim-backdrop fixed inset-x-0 top-0 bottom-14 z-[60] flex items-end justify-center bg-black/30" onClick={() => setShowLangPicker(false)}>
           <div
-            className="w-full max-w-lg bg-white rounded-t-2xl p-5 safe-bottom"
+            className="anim-sheet w-full max-w-lg bg-white rounded-t-2xl p-5 safe-bottom"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
@@ -172,9 +172,9 @@ export default function Chats() {
 
       {/* JLPT level picker modal */}
       {showJlptPicker && (
-        <div className="fixed inset-x-0 top-0 bottom-14 z-[60] flex items-end justify-center bg-black/30" onClick={() => setShowJlptPicker(false)}>
+        <div className="anim-backdrop fixed inset-x-0 top-0 bottom-14 z-[60] flex items-end justify-center bg-black/30" onClick={() => setShowJlptPicker(false)}>
           <div
-            className="w-full max-w-lg bg-white rounded-t-2xl p-5 safe-bottom"
+            className="anim-sheet w-full max-w-lg bg-white rounded-t-2xl p-5 safe-bottom"
             onClick={(e) => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-4">
@@ -212,9 +212,9 @@ export default function Chats() {
 
       {/* Delete confirmation modal */}
       {deletingId && (
-        <div className="fixed inset-0 z-[60] flex items-center justify-center bg-black/30" onClick={() => setDeletingId(null)}>
+        <div className="anim-backdrop fixed inset-0 z-[60] flex items-center justify-center bg-black/30" onClick={() => setDeletingId(null)}>
           <div
-            className="bg-white rounded-2xl p-5 mx-6 max-w-sm w-full"
+            className="anim-dialog bg-white rounded-2xl p-5 mx-6 max-w-sm w-full"
             onClick={(e) => e.stopPropagation()}
           >
             <h3 className="text-base font-semibold mb-2">{t('chats.deleteTitle')}</h3>
@@ -249,7 +249,7 @@ export default function Chats() {
           </button>
         </div>
       ) : (
-        <div className="flex flex-col -mx-4 overflow-x-hidden">
+        <div className="flex flex-col -mx-4 overflow-x-hidden anim-stagger">
           {sessions.map(s => (
             <div
               key={s.id}

@@ -475,7 +475,7 @@ export default function Breakdown() {
           <PartitionOutlined /> {t('breakdown.submit')}
         </button>
 
-        <section className="flex flex-col gap-2">
+        <section className="flex flex-col gap-2 anim-stagger">
           <h2 className="text-[15px] font-bold text-gray-900">{t('breakdown.recent')}</h2>
           {history.length === 0 ? (
             <p className="text-sm text-gray-500">{t('breakdown.recentEmpty')}</p>

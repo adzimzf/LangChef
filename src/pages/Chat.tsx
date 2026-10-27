@@ -1589,11 +1589,11 @@ export default function Chat() {
       {/* Grammar info modal */}
       {grammarInfoItem && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+          className="anim-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/30"
           onClick={() => setGrammarInfoItem(null)}
         >
           <div
-            className="bg-white rounded-2xl p-5 mx-4 max-w-sm w-full max-h-[70vh] overflow-y-auto"
+            className="anim-dialog bg-white rounded-2xl p-5 mx-4 max-w-sm w-full max-h-[70vh] overflow-y-auto"
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-3">
@@ -1617,11 +1617,11 @@ export default function Chat() {
       {/* Grammar analysis modal */}
       {grammarAnalysis !== null && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/30"
+          className="anim-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/30"
           onClick={() => setGrammarAnalysis(null)}
         >
           <div
-            className="bg-white rounded-2xl p-5 mx-4 max-w-sm w-full max-h-[70vh] overflow-y-auto"
+            className="anim-dialog bg-white rounded-2xl p-5 mx-4 max-w-sm w-full max-h-[70vh] overflow-y-auto"
             onClick={e => e.stopPropagation()}
           >
             <div className="flex items-center justify-between mb-3">

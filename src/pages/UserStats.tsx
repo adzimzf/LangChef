@@ -260,7 +260,7 @@ export default function UserStats() {
   const isEmpty = !loading && activity.length === 0 && activeTime.length === 0 && reviewItems.length === 0
 
   return (
-    <div className="space-y-5 h-full overflow-y-auto">
+    <div className="space-y-5 h-full overflow-y-auto anim-stagger">
       <div className="sticky top-0 z-10 pt-4 pb-2 bg-gray-50 space-y-3">
         <h2 className="text-lg font-semibold">{t('home.stats')}</h2>
         <TimeRangeFilter value={timeRange} onChange={setTimeRange} />

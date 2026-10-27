@@ -212,7 +212,7 @@ export default function Settings() {
   const currentStatus = statusConfig[status]
 
   return (
-    <div className={`space-y-5 h-full overflow-y-auto ${dirty ? 'pb-28' : ''}`}>
+    <div className={`space-y-5 h-full overflow-y-auto anim-stagger ${dirty ? 'pb-28' : ''}`}>
       <div className="sticky top-0 z-10 pt-4 pb-2 bg-gray-50">
         <h2 className="text-lg font-semibold">{t('settings.title')}</h2>
       </div>
@@ -563,8 +563,8 @@ export default function Settings() {
 
       {/* Confirm switching the explanation language */}
       {confirmLang && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/40 px-5" onClick={() => !switching && setConfirmLang(null)}>
-          <div role="dialog" aria-label={t('settings.switchTitle')} className="bg-white rounded-2xl p-5 w-full max-w-sm space-y-3" onClick={(e) => e.stopPropagation()}>
+        <div className="anim-backdrop fixed inset-0 z-[70] flex items-center justify-center bg-black/40 px-5" onClick={() => !switching && setConfirmLang(null)}>
+          <div role="dialog" aria-label={t('settings.switchTitle')} className="anim-dialog bg-white rounded-2xl p-5 w-full max-w-sm space-y-3" onClick={(e) => e.stopPropagation()}>
             <h3 className="text-base font-semibold">{t('settings.switchTitle', { language: confirmLang === 'id' ? 'Bahasa Indonesia' : 'English' })}</h3>
             <p className="text-sm text-gray-600">{t('settings.switchBody')}</p>
             <ul className="list-disc pl-5 text-sm text-gray-600 space-y-0.5">

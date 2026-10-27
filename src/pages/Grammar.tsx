@@ -502,7 +502,7 @@ export default function Grammar() {
       )}
 
       {/* Grammar list */}
-      <div className="space-y-2 pb-4">
+      <div className="space-y-2 pb-4 anim-stagger">
         {items.length === 0 && (
           <div className="text-center text-gray-400 py-8">
             <ReadOutlined className="text-3xl mb-2" />
@@ -636,8 +636,8 @@ export default function Grammar() {
 
       {/* Delete confirmation */}
       {deletingId && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => setDeletingId(null)}>
-          <div className="bg-white rounded-2xl p-5 mx-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
+        <div className="anim-backdrop fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => setDeletingId(null)}>
+          <div className="anim-dialog bg-white rounded-2xl p-5 mx-6 max-w-sm w-full" onClick={e => e.stopPropagation()}>
             <h3 className="text-base font-semibold mb-2">{t('grammar.deleteTitle')}</h3>
             <p className="text-sm text-gray-500 mb-4">{t('grammar.deleteBody')}</p>
             <div className="flex gap-2 justify-end">

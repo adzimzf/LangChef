@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { BulbOutlined } from '@ant-design/icons'
 import { NONE_ANSWER } from '../lib/types'
+import { burstConfetti } from './Motion'
 import type { AnswerResult, CardDetail, GradeReason, GrammarInfo, QuizAnswer, QuizTask, SessionSummary } from '../lib/types'
 import { t, lang as explainLang, formatInMinutes, formatSeconds, languageName, partOfSpeechLabel } from '../lib/i18n'
 
@@ -36,9 +37,9 @@ function reasonText(r: GradeReason): string {
   return t(`reason.${r.code}`, { time: r.ms != null ? formatSeconds(r.ms) : '' })
 }
 
-const optionBase = 'w-full text-left px-4 py-3 rounded-2xl bg-white border-[1.5px] border-gray-200 text-sm font-medium hover:border-blue-300 active:bg-gray-50 transition-colors disabled:opacity-60'
-const secondaryBtn = 'py-3 rounded-2xl bg-gray-100 text-gray-700 text-sm font-medium hover:bg-gray-200 active:bg-gray-300 transition-colors disabled:opacity-50'
-const primaryBtn = 'py-3 rounded-2xl bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 active:bg-blue-700 transition-colors shadow-sm disabled:opacity-50'
+const optionBase = 'w-full text-left px-4 py-3 rounded-2xl bg-white border-[1.5px] border-gray-200 text-sm font-medium hover:border-blue-300 active:bg-gray-50 active:scale-[.98] transition disabled:opacity-60'
+const secondaryBtn = 'py-3 rounded-2xl bg-gray-100 text-gray-700 text-sm font-medium hover:bg-gray-200 active:bg-gray-300 active:scale-[.98] transition disabled:opacity-50'
+const primaryBtn = 'py-3 rounded-2xl bg-blue-500 text-white text-sm font-medium hover:bg-blue-600 active:bg-blue-700 active:scale-[.98] transition shadow-sm disabled:opacity-50'
 
 /** Word with furigana. The reading's space is always kept so revealing it doesn't move the buttons. */
 function Furigana({ word, reading, show }: { word: string; reading: string; show: boolean }) {
@@ -183,7 +184,7 @@ export function ReviewQuiz({ task, submitting, onAnswer }: {
   const showTimer = phase === 'recall' || (phase === 'answer' && task.kind !== 'recall_confirm')
 
   return (
-    <div className="flex flex-col gap-3 w-full max-w-sm mx-auto">
+    <div className="flex flex-col gap-3 w-full max-w-sm mx-auto anim-rise">
       <div className="bg-white rounded-2xl shadow-md px-6 py-8 text-center flex flex-col items-center gap-2">
         <div className="flex flex-wrap justify-center gap-1.5">
           <GrammarChip task={task} />
@@ -310,7 +311,7 @@ export function QuizVerdictView({ task, result, details, onNext, onOverride, ove
   const isTf = task.kind === 'intro_tf' || task.kind === 'true_false'
 
   return (
-    <div className="flex flex-col gap-3 w-full max-w-sm mx-auto">
+    <div className="flex flex-col gap-3 w-full max-w-sm mx-auto anim-fade">
       <div className="bg-white rounded-2xl shadow-md px-6 py-6 text-center flex flex-col items-center gap-1">
         <GrammarChip task={task} />
         <Word word={task.word} reading={task.reading} showReading size="text-3xl" />
@@ -335,20 +336,20 @@ export function QuizVerdictView({ task, result, details, onNext, onOverride, ove
           </div>
         )}
         {!v.correct && !v.dont_know && chosenLabel && (
-          <div className="px-4 py-3 rounded-2xl border-[1.5px] border-red-400 bg-red-50 text-sm font-medium flex justify-between">
+          <div className="px-4 py-3 rounded-2xl border-[1.5px] border-red-400 bg-red-50 text-sm font-medium flex justify-between anim-shake">
             <span>{chosenLabel}</span><span className="text-xs text-gray-400">{t('quiz.yourPick')}</span>
           </div>
         )}
         {!isTf && (
           <div className="px-4 py-3 rounded-2xl border-[1.5px] border-green-500 bg-green-50 text-sm font-medium flex justify-between">
-            <span>{v.none_correct ? t('quiz.noneCorrect', { meaning: v.correct_answer }) : v.correct_answer}</span><span>✓</span>
+            <span>{v.none_correct ? t('quiz.noneCorrect', { meaning: v.correct_answer }) : v.correct_answer}</span><span className={v.correct ? 'anim-pop' : ''}>✓</span>
           </div>
         )}
       </div>
 
       <div className={`rounded-2xl p-3 flex flex-col gap-2 ${VERDICT_BG[v.grade] || 'bg-gray-50'}`}>
         <div className="flex items-center justify-between">
-          <span className={`px-2.5 py-0.5 rounded-full text-white text-xs font-bold ${GRADE_COLORS[v.grade]}`}>{t(`grade.${v.grade}`)}</span>
+          <span className={`px-2.5 py-0.5 rounded-full text-white text-xs font-bold anim-pop ${GRADE_COLORS[v.grade]}`}>{t(`grade.${v.grade}`)}</span>
           <span className="text-xs text-gray-500">{t('quiz.nextIn', { when: formatInMinutes(v.next_minutes) })}</span>
         </div>
         <div className="flex flex-wrap gap-1.5">
@@ -412,6 +413,12 @@ export function useAutoAdvance(result: AnswerResult | null, onNext: () => void, 
 }
 
 export function SessionSummaryView({ summary }: { summary: SessionSummary }) {
+  // A strong session ends with confetti, like a good JLPT practice result.
+  useEffect(() => {
+    if (summary.total < 5 || summary.correct / summary.total < 0.8) return
+    const timer = setTimeout(burstConfetti, 500)
+    return () => clearTimeout(timer)
+  }, [summary])
   const grades: { key: keyof SessionSummary; label: string; color: string }[] = [
     { key: 'again', label: t('grade.again'), color: GRADE_COLORS.again },
     { key: 'hard', label: t('grade.hard'), color: GRADE_COLORS.hard },
@@ -436,7 +443,7 @@ export function SessionSummaryView({ summary }: { summary: SessionSummary }) {
   )
 
   return (
-    <div className="w-full max-w-sm flex flex-col gap-2 text-gray-700">
+    <div className="w-full max-w-sm flex flex-col gap-2 text-gray-700 anim-stagger">
       <div className="grid grid-cols-3 gap-2">
         {stat(`${summary.correct}/${summary.total}`, t('summary.correct'))}
         {stat(summary.avg_ms != null ? formatSeconds(summary.avg_ms) : '—', t('summary.avgAnswer'))}
@@ -454,7 +461,7 @@ export function SessionSummaryView({ summary }: { summary: SessionSummary }) {
         <div className="flex h-2.5 rounded-full overflow-hidden bg-gray-100">
           {grades.map(g => {
             const n = summary[g.key] as number
-            return n > 0 ? <div key={g.key} className={g.color} style={{ width: `${(n / summary.total) * 100}%` }} /> : null
+            return n > 0 ? <div key={g.key} className={`${g.color} anim-grow`} style={{ width: `${(n / summary.total) * 100}%` }} /> : null
           })}
         </div>
         <div className="flex justify-between text-[10px] text-gray-500">
@@ -635,7 +642,7 @@ export function MeaningSetup({ task, isGrammar = false, hasApi, generating, savi
   }
 
   return (
-    <div className="flex flex-col gap-3 w-full max-w-sm mx-auto">
+    <div className="flex flex-col gap-3 w-full max-w-sm mx-auto anim-rise">
       <div className="bg-white rounded-2xl shadow-md px-6 py-8 text-center flex flex-col items-center gap-2">
         {label}
         <div className="text-4xl font-semibold">{task.word}</div>

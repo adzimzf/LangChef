@@ -551,7 +551,7 @@ export default function WordsList() {
             </div>
           )}
 
-          <div className="bg-white rounded-xl shadow-sm overflow-hidden">
+          <div className="bg-white rounded-xl shadow-sm overflow-hidden anim-stagger">
             {items.map((item, idx) => {
               return (
                 <div

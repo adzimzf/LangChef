@@ -6,11 +6,11 @@ import {
 } from '@ant-design/icons'
 import type { JlptOverview, JlptPart, JlptResult, JlptSection, JlptSessionView } from '../lib/types'
 import { t, errorText } from '../lib/i18n'
+import { CountUp, burstConfetti, reducedMotion } from '../components/Motion'
 import { JLPT_LEVEL_ORDER, JLPT_PRACTICE_LEVEL_KEY, PART_INSTRUCTION, SECTION_JA, SPOKEN_CHOICE_PARTS, practiceLevel, type JLPTLevel } from '../lib/jlpt'
 
 type Phase = 'hub' | 'brief' | 'exam' | 'result'
 
-const reducedMotion = () => typeof window !== 'undefined' && window.matchMedia?.('(prefers-reduced-motion: reduce)').matches
 
 function clock(seconds: number): string {
   const s = Math.max(0, Math.round(seconds))
@@ -61,64 +61,12 @@ function stopSpeech() {
   try { window.speechSynthesis?.cancel() } catch { /* no speech */ }
 }
 
-/** Number that counts up from 0 when it first shows. */
-function CountUp({ value }: { value: number }) {
-  const [shown, setShown] = useState(() => (reducedMotion() ? value : 0))
-  useEffect(() => {
-    if (reducedMotion()) { setShown(value); return }
-    let frame = 0
-    const start = performance.now()
-    const step = (now: number) => {
-      const k = Math.min(1, (now - start) / 900)
-      setShown(Math.round(value * (1 - Math.pow(1 - k, 3))))
-      if (k < 1) frame = requestAnimationFrame(step)
-    }
-    frame = requestAnimationFrame(step)
-    return () => cancelAnimationFrame(frame)
-  }, [value])
-  return <>{shown}</>
-}
-
-/** Paper confetti for a good result. */
-function burstConfetti() {
-  if (reducedMotion()) return
-  const canvas = document.createElement('canvas')
-  canvas.className = 'jlpt-confetti'
-  document.body.appendChild(canvas)
-  const dpr = window.devicePixelRatio || 1
-  const w = window.innerWidth
-  const h = window.innerHeight
-  canvas.width = w * dpr
-  canvas.height = h * dpr
-  const g = canvas.getContext('2d')
-  if (!g) { canvas.remove(); return }
-  g.scale(dpr, dpr)
-  const colors = ['#3b82f6', '#22c55e', '#f59e0b', '#e11d48', '#6366f1']
-  const bits = Array.from({ length: 110 }, () => ({
-    x: w / 2 + (Math.random() - 0.5) * 80, y: h * 0.3,
-    vx: (Math.random() - 0.5) * 9, vy: -Math.random() * 9 - 3,
-    r: Math.random() * 6.28, vr: (Math.random() - 0.5) * 0.3,
-    s: 5 + Math.random() * 5, c: colors[Math.floor(Math.random() * colors.length)],
-  }))
-  const t0 = performance.now()
-  const frame = (now: number) => {
-    g.clearRect(0, 0, w, h)
-    for (const b of bits) {
-      b.vy += 0.25; b.vx *= 0.99; b.x += b.vx; b.y += b.vy; b.r += b.vr
-      g.save(); g.translate(b.x, b.y); g.rotate(b.r); g.fillStyle = b.c; g.fillRect(-b.s / 2, -b.s / 4, b.s, b.s / 2); g.restore()
-    }
-    if (now - t0 < 2600) requestAnimationFrame(frame)
-    else canvas.remove()
-  }
-  requestAnimationFrame(frame)
-}
-
 /** Full-screen call: the 3-2-1 before the start, はじめてください, 時間です. */
 function Call({ big, sub, count, shake }: { big: string; sub?: string; count?: boolean; shake?: boolean }) {
   return (
-    <div className="fixed inset-0 z-[60] bg-gray-50 flex items-center justify-center text-center p-6 jlpt-fade">
+    <div className="fixed inset-0 z-[60] bg-gray-50 flex items-center justify-center text-center p-6 anim-fade">
       <div className="flex flex-col items-center gap-2">
-        <div key={big} className={`${count ? 'text-7xl font-bold text-blue-500 tabular-nums' : 'font-serif text-4xl font-semibold'} jlpt-stamp ${shake ? 'jlpt-stamp-shake' : ''}`}>{big}</div>
+        <div key={big} className={`${count ? 'text-7xl font-bold text-blue-500 tabular-nums' : 'font-serif text-4xl font-semibold'} anim-stamp ${shake ? 'anim-stamp-shake' : ''}`}>{big}</div>
         {sub && <div className="text-sm text-gray-500">{sub}</div>}
       </div>
     </div>
@@ -127,8 +75,8 @@ function Call({ big, sub, count, shake }: { big: string; sub?: string; count?: b
 
 function Sheet({ children, onClose }: { children: ReactNode; onClose: () => void }) {
   return (
-    <div className="fixed inset-0 z-[55] bg-black/40 flex items-end justify-center jlpt-fade" onClick={onClose}>
-      <div className="w-full max-w-lg bg-white rounded-t-3xl p-5 pb-8 safe-bottom flex flex-col gap-4 jlpt-sheet" onClick={(e) => e.stopPropagation()}>
+    <div className="fixed inset-0 z-[55] bg-black/40 flex items-end justify-center anim-fade" onClick={onClose}>
+      <div className="w-full max-w-lg bg-white rounded-t-3xl p-5 pb-8 safe-bottom flex flex-col gap-4 anim-sheet" onClick={(e) => e.stopPropagation()}>
         {children}
       </div>
     </div>
@@ -351,7 +299,7 @@ export default function JlptPractice() {
     setCardsAdded(true)
   }
 
-  const enterClass = enter === 'fwd' ? 'jlpt-enter-fwd' : 'jlpt-enter-back'
+  const enterClass = enter === 'fwd' ? 'anim-enter-fwd' : 'anim-enter-back'
 
   // ---------------------------------------------------------------- hub
   function renderHub() {
@@ -375,17 +323,17 @@ export default function JlptPractice() {
             ))}
           </div>
         </div>
-        <h2 className="text-xl font-bold -mt-3 jlpt-stag">{t('jlpt.title')}</h2>
+        <h2 className="text-xl font-bold -mt-3 anim-stag">{t('jlpt.title')}</h2>
 
         {o?.open_session && (
-          <div className="bg-amber-50 border border-amber-100 rounded-xl p-4 flex items-center gap-3 jlpt-stag">
+          <div className="bg-amber-50 border border-amber-100 rounded-xl p-4 flex items-center gap-3 anim-stag">
             <div className="flex-1 text-sm text-amber-800">{t('jlpt.openSession')}</div>
             <button className={`${primaryBtn} py-2`} onClick={() => resume(o.open_session!)}>{t('jlpt.resume')}</button>
           </div>
         )}
 
         {o && next && (
-          <div className="jlpt-hero rounded-2xl p-5 text-white flex flex-col gap-3 jlpt-stag" style={{ ['--i' as string]: 1 }}>
+          <div className="anim-hero rounded-2xl p-5 text-white flex flex-col gap-3 anim-stag" style={{ ['--i' as string]: 1 }}>
             <div className="text-xs uppercase tracking-wider text-blue-100">
               {o.done_today ? t('jlpt.doneTodayNext') : t('jlpt.todaysSession')} · {t('jlpt.rotation', { n: o.cycle })}
             </div>
@@ -395,14 +343,14 @@ export default function JlptPractice() {
               <span className="bg-white/20 rounded-full px-2.5 py-0.5">{t('jlpt.limit', { time: clock(next.time_limit) })}</span>
               <span className="bg-white/20 rounded-full px-2.5 py-0.5">{t('jlpt.realMinutes', { n: next.real_minutes })}</span>
             </div>
-            <button onClick={() => openBrief(next.section)} className={`${btn} bg-white text-blue-700 font-bold relative overflow-hidden jlpt-shine`}>
+            <button onClick={() => openBrief(next.section)} className={`${btn} bg-white text-blue-700 font-bold relative overflow-hidden anim-shine`}>
               {o.done_today ? t('jlpt.practiceMore') : t('jlpt.startSession')}
             </button>
           </div>
         )}
 
         {o && (
-          <div className="flex flex-col gap-2 jlpt-stag" style={{ ['--i' as string]: 2 }}>
+          <div className="flex flex-col gap-2 anim-stag" style={{ ['--i' as string]: 2 }}>
             <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wide px-1">{t('jlpt.rotationTitle')}</h3>
             <div className="grid gap-1.5" style={{ gridTemplateColumns: `repeat(${o.rotation.length}, minmax(0, 1fr))` }}>
               {o.rotation.map((step, i) => (
@@ -410,11 +358,11 @@ export default function JlptPractice() {
                   key={i}
                   onClick={() => openBrief(step.section)}
                   className={`rounded-xl border-[1.5px] py-2.5 px-1 flex flex-col items-center gap-0.5 transition-transform active:scale-95
-                    ${step.state === 'next' ? 'border-blue-500 bg-blue-50 jlpt-halo' : 'border-gray-200 bg-white'}`}
+                    ${step.state === 'next' ? 'border-blue-500 bg-blue-50 anim-halo' : 'border-gray-200 bg-white'}`}
                 >
                   <span className="text-[13px] font-bold">{SECTION_JA[step.section]}</span>
                   <span className="text-[10.5px] text-gray-400 truncate max-w-full">{t(`jlpt.section.${step.section}`)}</span>
-                  <span className={`text-[10.5px] tabular-nums ${step.state === 'next' ? 'text-blue-600 font-medium' : step.state === 'done' ? 'text-green-600' : 'text-gray-400'} ${justDone === step.section && step.state === 'done' ? 'jlpt-pop' : ''}`}>
+                  <span className={`text-[10.5px] tabular-nums ${step.state === 'next' ? 'text-blue-600 font-medium' : step.state === 'done' ? 'text-green-600' : 'text-gray-400'} ${justDone === step.section && step.state === 'done' ? 'anim-pop' : ''}`}>
                     {step.state === 'next' ? t('jlpt.next') : step.last ? `${step.state === 'done' ? '✓ ' : ''}${step.last.correct}/${step.last.total}` : '—'}
                   </span>
                 </button>
@@ -425,7 +373,7 @@ export default function JlptPractice() {
         )}
 
         {o && (
-          <div className="bg-white rounded-xl p-4 shadow-sm flex flex-col gap-3 jlpt-stag" style={{ ['--i' as string]: 3 }}>
+          <div className="bg-white rounded-xl p-4 shadow-sm flex flex-col gap-3 anim-stag" style={{ ['--i' as string]: 3 }}>
             <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wide">{t('jlpt.estimateTitle')}</h3>
             {o.estimate ? (
               <>
@@ -436,7 +384,7 @@ export default function JlptPractice() {
                       <span className="font-bold tabular-nums"><CountUp value={p.score} /><span className="text-gray-400 font-normal text-xs">/{p.max}</span></span>
                     </div>
                     <div className="relative h-2 rounded-full bg-gray-100">
-                      <div className="absolute inset-y-0 left-0 rounded-full bg-blue-500 jlpt-grow" style={{ width: `${(p.score / p.max) * 100}%` }} />
+                      <div className="absolute inset-y-0 left-0 rounded-full bg-blue-500 anim-grow" style={{ width: `${(p.score / p.max) * 100}%` }} />
                       <div className="absolute -top-1 -bottom-1 w-0.5 bg-gray-700/60" style={{ left: `${(p.min / p.max) * 100}%` }} title={t('jlpt.minimum', { n: p.min })} />
                     </div>
                   </div>
@@ -460,13 +408,13 @@ export default function JlptPractice() {
         )}
 
         {o && (
-          <div className="bg-white rounded-xl p-4 shadow-sm flex flex-col gap-3 jlpt-stag" style={{ ['--i' as string]: 4 }}>
+          <div className="bg-white rounded-xl p-4 shadow-sm flex flex-col gap-3 anim-stag" style={{ ['--i' as string]: 4 }}>
             <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wide">{t('jlpt.week')}</h3>
             <div className="grid grid-cols-7 gap-1.5">
               {o.week.map((on, i) => (
                 <div
                   key={i}
-                  className={`aspect-square rounded-lg flex items-center justify-center text-xs ${on ? 'bg-green-50 text-green-600 font-bold jlpt-pop' : 'bg-gray-100'} ${i === 6 ? 'ring-2 ring-blue-400 ring-inset' : ''}`}
+                  className={`aspect-square rounded-lg flex items-center justify-center text-xs ${on ? 'bg-green-50 text-green-600 font-bold anim-pop' : 'bg-gray-100'} ${i === 6 ? 'ring-2 ring-blue-400 ring-inset' : ''}`}
                   style={{ animationDelay: `${300 + i * 60}ms` }}
                 >
                   {on ? <CheckOutlined /> : null}
@@ -492,7 +440,7 @@ export default function JlptPractice() {
           </button>
           <span className="text-xs px-2.5 py-1 rounded-full bg-blue-50 text-blue-600 font-medium">{level} · {t(`jlpt.section.${section}`)}</span>
         </div>
-        <div className="bg-white border-[1.5px] border-gray-800 rounded p-5 font-serif flex flex-col gap-3 jlpt-stag">
+        <div className="bg-white border-[1.5px] border-gray-800 rounded p-5 font-serif flex flex-col gap-3 anim-stag">
           <div className="text-4xl font-semibold tracking-wide">{level}</div>
           <div className="text-xl font-semibold">{SECTION_JA[section]}</div>
           {plan && (
@@ -512,14 +460,14 @@ export default function JlptPractice() {
             </>
           )}
         </div>
-        <ul className="list-disc pl-5 text-sm flex flex-col gap-1.5 text-gray-700 jlpt-stag" style={{ ['--i' as string]: 1 }}>
+        <ul className="list-disc pl-5 text-sm flex flex-col gap-1.5 text-gray-700 anim-stag" style={{ ['--i' as string]: 1 }}>
           <li>{t('jlpt.rule.clock')}</li>
           <li>{t('jlpt.rule.skip')}</li>
           <li>{t('jlpt.rule.noFeedback')}</li>
           {section === 'listening' && <li>{t('jlpt.rule.listening')}</li>}
           <li>{t('jlpt.rule.leave')}</li>
         </ul>
-        <label className="bg-white rounded-xl p-4 shadow-sm flex items-center justify-between gap-3 jlpt-stag" style={{ ['--i' as string]: 2 }}>
+        <label className="bg-white rounded-xl p-4 shadow-sm flex items-center justify-between gap-3 anim-stag" style={{ ['--i' as string]: 2 }}>
           <span>
             <span className="block text-sm font-medium">{t('jlpt.gloss')}</span>
             <span className="block text-xs text-gray-400">{t('jlpt.glossHint')}</span>
@@ -559,8 +507,8 @@ export default function JlptPractice() {
             <span
               key={left <= 10 ? left : 'steady'}
               className={`tabular-nums font-bold text-base px-3 py-1 rounded-full border-[1.5px] transition-colors
-                ${warn === 'red' ? 'text-red-600 border-red-500 bg-red-50 jlpt-pulse' : warn === 'amber' ? 'text-amber-600 border-amber-500 bg-amber-50' : 'bg-white border-gray-200'}
-                ${left <= 10 && left > 0 ? 'jlpt-shake' : ''}`}
+                ${warn === 'red' ? 'text-red-600 border-red-500 bg-red-50 anim-pulse' : warn === 'amber' ? 'text-amber-600 border-amber-500 bg-amber-50' : 'bg-white border-gray-200'}
+                ${left <= 10 && left > 0 ? 'anim-shake' : ''}`}
             >
               {clock(left)}
             </span>
@@ -573,7 +521,7 @@ export default function JlptPractice() {
           </div>
         </div>
 
-        <div key={index} className={`flex flex-col gap-4 pt-2 pb-4 ${qDir === 'next' ? 'jlpt-enter-fwd' : qDir === 'prev' ? 'jlpt-enter-back' : ''}`}>
+        <div key={index} className={`flex flex-col gap-4 pt-2 pb-4 ${qDir === 'next' ? 'anim-enter-fwd' : qDir === 'prev' ? 'anim-enter-back' : ''}`}>
           <div className="flex flex-col gap-1">
             <div className="flex gap-2 items-baseline">
               <span className="font-serif font-semibold border-[1.5px] border-gray-800 px-2 text-sm shrink-0">{`問題${cur.partNo + 1}`}</span>
@@ -594,7 +542,7 @@ export default function JlptPractice() {
                 <button
                   onClick={play}
                   disabled={!!play_}
-                  className={`w-12 h-12 rounded-full flex items-center justify-center text-lg shrink-0 ${play_ ? 'bg-gray-200 text-gray-400' : 'bg-blue-500 text-white jlpt-halo'}`}
+                  className={`w-12 h-12 rounded-full flex items-center justify-center text-lg shrink-0 ${play_ ? 'bg-gray-200 text-gray-400' : 'bg-blue-500 text-white anim-halo'}`}
                   aria-label={t('jlpt.play')}
                 >
                   {play_ === 'playing' ? <LoadingOutlined /> : <CaretRightFilled />}
@@ -621,10 +569,10 @@ export default function JlptPractice() {
                   key={k}
                   onClick={() => pick(k)}
                   className={`flex items-center gap-3 text-left w-full bg-white rounded-xl border-[1.5px] px-3 py-2.5 transition-colors
-                    ${on ? 'border-gray-900' : 'border-gray-200 hover:border-blue-300'} ${on && justPicked ? 'jlpt-press' : ''}`}
+                    ${on ? 'border-gray-900' : 'border-gray-200 hover:border-blue-300'} ${on && justPicked ? 'anim-press' : ''}`}
                 >
                   <span className={`relative w-7 h-7 rounded-full border-[1.5px] flex items-center justify-center text-xs font-bold shrink-0
-                    ${on ? 'bg-gray-900 border-gray-900 text-white' : 'border-gray-400 text-gray-500'} ${on && justPicked ? 'jlpt-ink' : ''}`}>
+                    ${on ? 'bg-gray-900 border-gray-900 text-white' : 'border-gray-400 text-gray-500'} ${on && justPicked ? 'anim-ink' : ''}`}>
                     {k + 1}
                   </span>
                   <span className={spoken ? 'text-sm text-gray-400' : 'font-serif text-base'}>{spoken ? t('jlpt.spokenChoice', { n: k + 1 }) : <Marked text={o} />}</span>
@@ -712,12 +660,12 @@ export default function JlptPractice() {
           <span className="text-xs px-2.5 py-1 rounded-full bg-blue-50 text-blue-600 font-medium">{r.level} · {t(`jlpt.section.${r.section}`)}</span>
         </div>
 
-        <div className="relative bg-white rounded-2xl shadow-sm p-4 pr-24 flex items-center gap-4 jlpt-stag">
+        <div className="relative bg-white rounded-2xl shadow-sm p-4 pr-24 flex items-center gap-4 anim-stag">
           <svg viewBox="0 0 120 120" className="w-28 h-28 shrink-0" role="img" aria-label={t('jlpt.scoreAria', { correct: r.correct, total: r.total })}>
             <circle cx="60" cy="60" r="50" fill="none" stroke="#f3f4f6" strokeWidth="10" />
             <circle
               cx="60" cy="60" r="50" fill="none" stroke="#3b82f6" strokeWidth="10" strokeLinecap="round"
-              className="jlpt-ring" transform="rotate(-90 60 60)"
+              className="anim-ring" transform="rotate(-90 60 60)"
               style={{ strokeDasharray: `${circumference * pct} ${circumference}`, ['--ring-len' as string]: `${circumference}` }}
             />
             <text x="60" y="64" textAnchor="middle" fontSize="26" fontWeight="700" fill="#111827"><CountUp value={r.correct} />/{r.total}</text>
@@ -727,12 +675,12 @@ export default function JlptPractice() {
             <span className="text-gray-500 text-xs">{r.timed_out ? t('jlpt.timedOutNote') : t('jlpt.handedInWith', { time: clock(r.time_limit - r.time_used) })}</span>
             <span className="text-xs">{t('jlpt.lastTime', { score: r.prev ? `${r.prev.correct}/${r.prev.total}` : '—' })}</span>
           </div>
-          <div className="jlpt-seal absolute top-3 right-3 w-[76px] h-[76px] rounded-full border-[2.5px] border-red-600 text-red-600 flex items-center justify-center text-center font-serif font-semibold text-[11px] leading-tight whitespace-pre-line p-1.5" aria-hidden="true">
+          <div className="anim-seal absolute top-3 right-3 w-[76px] h-[76px] rounded-full border-[2.5px] border-red-600 text-red-600 flex items-center justify-center text-center font-serif font-semibold text-[11px] leading-tight whitespace-pre-line p-1.5" aria-hidden="true">
             {seal}
           </div>
         </div>
 
-        <div className="grid grid-cols-3 gap-2 jlpt-stag" style={{ ['--i' as string]: 1 }}>
+        <div className="grid grid-cols-3 gap-2 anim-stag" style={{ ['--i' as string]: 1 }}>
           {[
             [clock(r.time_used), t('jlpt.timeUsed', { time: clock(r.time_limit) })],
             [`${r.answered ? Math.round(r.time_used / r.answered) : 0}s`, t('jlpt.perQuestion', { n: Math.round(r.time_limit / Math.max(1, r.total)) })],
@@ -745,26 +693,26 @@ export default function JlptPractice() {
           ))}
         </div>
 
-        <div className="bg-white rounded-xl shadow-sm p-4 flex flex-col gap-2.5 jlpt-stag" style={{ ['--i' as string]: 2 }}>
+        <div className="bg-white rounded-xl shadow-sm p-4 flex flex-col gap-2.5 anim-stag" style={{ ['--i' as string]: 2 }}>
           <h3 className="text-sm font-medium text-gray-500 uppercase tracking-wide">{t('jlpt.byPart')}</h3>
           {r.parts.map((p, i) => (
             <div key={i} className="flex flex-col gap-1 text-sm">
               <div className="flex justify-between"><span>{`問題${i + 1}`} <span className="text-gray-400">{t(`jlpt.part.${p.part}`)}</span></span><b className="tabular-nums">{p.correct}/{p.total}</b></div>
               <div className="h-1.5 rounded-full bg-gray-100 overflow-hidden">
-                <div className={`h-full rounded-full jlpt-grow ${p.correct === p.total ? 'bg-green-500' : p.correct === 0 ? 'bg-red-400' : 'bg-blue-500'}`} style={{ width: `${(p.correct / p.total) * 100}%` }} />
+                <div className={`h-full rounded-full anim-grow ${p.correct === p.total ? 'bg-green-500' : p.correct === 0 ? 'bg-red-400' : 'bg-blue-500'}`} style={{ width: `${(p.correct / p.total) * 100}%` }} />
               </div>
             </div>
           ))}
         </div>
 
         {r.missed_words.length > 0 && (
-          <div className="bg-white rounded-xl shadow-sm p-4 flex items-center gap-3 jlpt-stag" style={{ ['--i' as string]: 3 }}>
+          <div className="bg-white rounded-xl shadow-sm p-4 flex items-center gap-3 anim-stag" style={{ ['--i' as string]: 3 }}>
             <div className="flex-1 min-w-0">
               <b className="text-sm">{t('jlpt.missedWords', { count: r.missed_words.length })}</b>
               <div className="text-xs text-gray-500 truncate">{r.missed_words.join('、')}</div>
             </div>
             <button className={cardsAdded ? secondaryBtn : primaryBtn} disabled={cardsAdded} onClick={addMissedWords}>
-              {cardsAdded ? <><CheckOutlined className="mr-1 jlpt-pop" />{t('jlpt.added')}</> : t('jlpt.addToCards')}
+              {cardsAdded ? <><CheckOutlined className="mr-1 anim-pop" />{t('jlpt.added')}</> : t('jlpt.addToCards')}
             </button>
           </div>
         )}
