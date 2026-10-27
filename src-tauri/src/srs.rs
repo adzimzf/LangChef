@@ -1,9 +1,9 @@
 use crate::db::open_db;
 use crate::furigana::{lemma_of, FuriganaAnnotator};
-use crate::grammar_review::{enroll_for_today, grammar_slots, new_grammar_kind, ITEM_GRAMMAR};
+use crate::grammar_review::{enroll_for_today, grammar_slots, new_grammar_kind, GRAMMAR_REVIEWS_PER_DAY, ITEM_GRAMMAR};
 use crate::locale::effective_detail_sql;
 use crate::quiz::{cards_missing_meaning, clear_task, issue_task, QuizTask};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
 
@@ -959,14 +959,16 @@ pub(crate) fn top_up_queue(
     max_review: i64,
     max_new: i64,
 ) -> Result<(), String> {
-    let (n_review, n_new): (i64, i64) = conn.query_row(
+    let (n_review, n_new, n_grammar_review): (i64, i64, i64) = conn.query_row(
         "SELECT
-            COALESCE(SUM(CASE WHEN kind='review' THEN 1 ELSE 0 END), 0),
-            COALESCE(SUM(CASE WHEN kind='new'    THEN 1 ELSE 0 END), 0)
-         FROM study_card WHERE study_id = ?1",
+            COALESCE(SUM(CASE WHEN sc.kind='review' THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN sc.kind='new'    THEN 1 ELSE 0 END), 0),
+            COALESCE(SUM(CASE WHEN sc.kind='review' AND r.item_type = 'grammar' THEN 1 ELSE 0 END), 0)
+         FROM study_card sc LEFT JOIN review_items r ON r.id = sc.review_item_id
+         WHERE sc.study_id = ?1",
         params![study_id],
-        |row| Ok((row.get(0)?, row.get(1)?)),
-    ).unwrap_or((0, 0));
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+    ).unwrap_or((0, 0, 0));
 
     let mut review_slots = (max_review - n_review).max(0);
     let mut new_slots = (max_new - n_new).max(0);
@@ -995,6 +997,14 @@ pub(crate) fn top_up_queue(
         .filter_map(|r| r.ok())
         .collect();
 
+    // Due grammar gets up to GRAMMAR_REVIEWS_PER_DAY of the review slots before words take the rest.
+    let due_grammar = candidates
+        .iter()
+        .filter(|(_, state, item_type, _)| item_type == ITEM_GRAMMAR && classify_kind(state) == "review")
+        .count() as i64;
+    let mut grammar_review_slots = (GRAMMAR_REVIEWS_PER_DAY - n_grammar_review).max(0).min(due_grammar).min(review_slots);
+    review_slots -= grammar_review_slots;
+
     let now_ms = chrono::Utc::now().timestamp_millis();
     let mut insert_stmt = conn.prepare(
         "INSERT INTO study_card (study_id, review_item_id, kind, status, create_time, update_time)
@@ -1010,6 +1020,7 @@ pub(crate) fn top_up_queue(
             kind = new_grammar_kind(placement);
         }
         let slots = match kind {
+            "review" if item_type == ITEM_GRAMMAR => &mut grammar_review_slots,
             "review" => &mut review_slots,
             "new" => &mut new_slots,
             "grammar_new" => &mut grammar_new_slots,
@@ -1025,33 +1036,99 @@ pub(crate) fn top_up_queue(
     Ok(())
 }
 
+/// Fresh cards one round of today's queue hands out, after the cards the previous round left over.
+const ROUND_SIZE: i64 = 25;
+/// Among a day's fresh cards, a new card (word or grammar) follows this many reviews.
+const REVIEWS_PER_NEW: i64 = 4;
+/// `study_card.kind` of cards seen for the first time today.
+const NEW_KINDS: &str = "('new', 'grammar_new', 'grammar_check')";
+
+/// Today's queue is served in rounds. A round starts with what the previous round left over
+/// (new cards just met, meanings just saved, wrong answers), then hands out up to ROUND_SIZE
+/// fresh cards, a new one after every REVIEWS_PER_NEW reviews. A card still being learned goes
+/// to the next round, so it comes back a few minutes later instead of after the whole queue.
 fn fetch_next_pending(
     conn: &rusqlite::Connection,
     study_id: i64,
-    now: i64,
 ) -> Result<Option<ReviewItem>, String> {
-    let result = conn.query_row(
-        &format!("SELECT {}
-         FROM study_card sc
-         JOIN review_items r ON r.id = sc.review_item_id
-         WHERE sc.study_id = ?1 AND sc.status = 'pending'
-         ORDER BY
-            sc.update_time ASC,
-            CASE
-                WHEN r.state IN ('learning','relearning') AND r.next_review IS NOT NULL AND r.next_review <= ?2 THEN 0
-                WHEN r.state = 'review' THEN 1
-                WHEN r.state IN ('learning','relearning') THEN 2
-                ELSE 3
-            END,
-            r.created_at DESC
-         LIMIT 1", review_cols("r.")),
-        params![study_id, now],
-        row_to_review_item,
-    );
-    match result {
-        Ok(item) => Ok(Some(item)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(e.to_string()),
+    loop {
+        let (round, fresh_served): (i64, i64) = conn
+            .query_row(
+                "SELECT round, round_fresh FROM study WHERE study_id = ?1",
+                params![study_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .map_err(|e| e.to_string())?;
+        // Left over from the previous round first, then the fresh card already shown in this one.
+        let in_round = conn
+            .query_row(
+                &format!("SELECT {}
+                 FROM study_card sc
+                 JOIN review_items r ON r.id = sc.review_item_id
+                 WHERE sc.study_id = ?1 AND sc.status = 'pending' AND sc.round <= ?2
+                 ORDER BY sc.update_time ASC, r.created_at DESC
+                 LIMIT 1", review_cols("r.")),
+                params![study_id, round],
+                row_to_review_item,
+            )
+            .optional()
+            .map_err(|e| e.to_string())?;
+        if in_round.is_some() {
+            return Ok(in_round);
+        }
+        if fresh_served < ROUND_SIZE {
+            if let Some(id) = next_fresh_card(conn, study_id)? {
+                conn.execute(
+                    "UPDATE study_card SET round = ?1 WHERE study_id = ?2 AND review_item_id = ?3",
+                    params![round, study_id, id],
+                ).map_err(|e| e.to_string())?;
+                conn.execute("UPDATE study SET round_fresh = round_fresh + 1 WHERE study_id = ?1", params![study_id])
+                    .map_err(|e| e.to_string())?;
+                return fetch_review_item(conn, &id);
+            }
+        }
+        // This round is over: start the next one if anything is still waiting.
+        if count_pending(conn, study_id)? == 0 {
+            return Ok(None);
+        }
+        conn.execute("UPDATE study SET round = round + 1, round_fresh = 0 WHERE study_id = ?1", params![study_id])
+            .map_err(|e| e.to_string())?;
+    }
+}
+
+/// The next card not shown yet today: a new card after every REVIEWS_PER_NEW reviews, and
+/// whichever side is left once the other runs out. Cards still learning from earlier days lead the reviews.
+fn next_fresh_card(conn: &rusqlite::Connection, study_id: i64) -> Result<Option<String>, String> {
+    let (new_shown, reviews_shown): (i64, i64) = conn
+        .query_row(
+            &format!("SELECT COALESCE(SUM(kind IN {NEW_KINDS}), 0), COALESCE(SUM(kind NOT IN {NEW_KINDS}), 0)
+             FROM study_card WHERE study_id = ?1 AND round IS NOT NULL"),
+            params![study_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .map_err(|e| e.to_string())?;
+    let next = |new: bool| -> Result<Option<String>, String> {
+        conn.query_row(
+            &format!("SELECT sc.review_item_id
+             FROM study_card sc
+             JOIN review_items r ON r.id = sc.review_item_id
+             WHERE sc.study_id = ?1 AND sc.status = 'pending' AND sc.round IS NULL AND (sc.kind IN {NEW_KINDS}) = ?2
+             ORDER BY
+                CASE WHEN r.state IN ('learning','relearning') THEN 0 ELSE 1 END,
+                r.next_review ASC NULLS LAST,
+                -- New cards: the most recently added come first.
+                r.created_at DESC
+             LIMIT 1"),
+            params![study_id, new],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|e| e.to_string())
+    };
+    let new_turn = reviews_shown >= REVIEWS_PER_NEW * (new_shown + 1);
+    match next(new_turn)? {
+        Some(id) => Ok(Some(id)),
+        None => next(!new_turn),
     }
 }
 
@@ -1114,6 +1191,18 @@ pub(crate) fn set_card_status(
     Ok(())
 }
 
+/// Puts a card back in today's queue for the next round, behind what is already waiting there.
+pub(crate) fn requeue_card(conn: &rusqlite::Connection, study_id: i64, card_id: &str) -> Result<(), String> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    conn.execute(
+        "UPDATE study_card SET status = 'pending', update_time = ?1,
+                round = (SELECT round FROM study WHERE study_id = ?2) + 1
+         WHERE study_id = ?2 AND review_item_id = ?3",
+        params![now_ms, study_id, card_id],
+    ).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 pub(crate) fn fetch_review_item(conn: &rusqlite::Connection, id: &str) -> Result<Option<ReviewItem>, String> {
     let result = conn.query_row(
         &format!("SELECT {} FROM review_items WHERE id = ?1", review_cols("")),
@@ -1137,7 +1226,7 @@ pub(crate) fn apply_session_grade(
     let result = grade_card_in_db(conn, card_id, grade)?;
     set_card_status(conn, study_id, card_id, "graded")?;
     if result.state == "learning" || result.state == "relearning" {
-        set_card_status(conn, study_id, card_id, "pending")?;
+        requeue_card(conn, study_id, card_id)?;
     }
     Ok(result)
 }
@@ -1161,13 +1250,12 @@ pub struct SessionProgress {
 }
 
 pub(crate) fn session_progress(conn: &rusqlite::Connection, study_id: i64) -> Result<SessionProgress, String> {
-    let now = chrono::Utc::now().timestamp();
     let reviews_completed = count_reviewed(conn, study_id)?;
     let new_cards_seen = count_new_seen(conn, study_id)?;
     let remaining_count = count_pending(conn, study_id)?;
     let queue_total = count_total(conn, study_id)?;
     let (grammar_done, grammar_total) = count_grammar(conn, study_id)?;
-    let next_card = fetch_next_pending(conn, study_id, now)?;
+    let next_card = fetch_next_pending(conn, study_id)?;
     let (next_task, grade_options) = match &next_card {
         Some(card) => (
             Some(issue_task(conn, study_id, card)?),
@@ -1252,4 +1340,68 @@ pub fn db_session_grade(
     let progress = session_progress(&conn, study_id)?;
 
     Ok(SessionGradeResult { result, progress })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Plays today's queue: reviews are answered right except `wrong`, new cards are met once.
+    fn play(conn: &rusqlite::Connection, study: i64, wrong: &str, n: usize) -> Vec<String> {
+        let mut served = Vec::new();
+        for _ in 0..n {
+            let Some(card) = fetch_next_pending(conn, study).unwrap() else { break };
+            let grade = if card.state == "new" || card.id == wrong { "again" } else { "good" };
+            apply_session_grade(conn, study, &card.id, grade).unwrap();
+            served.push(card.id);
+        }
+        served
+    }
+
+    #[test]
+    fn queue_is_served_in_rounds_with_new_cards_mixed_in() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::prepare_db(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO app_settings(key, value) VALUES ('grammar_new_per_day', '0'), ('grammar_checks_per_day', '0');",
+        )
+        .unwrap();
+        for i in 0..30 {
+            conn.execute(
+                "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, language, created_at,
+                   fsrs_stability, fsrs_difficulty)
+                 VALUES (?1, ?1, 2.5, 3, 1, 'review', 0, 0, ?2, 'ja', 0, 3.0, 5.0)",
+                params![format!("r{i:02}"), i],
+            )
+            .unwrap();
+        }
+        for i in 0..10 {
+            conn.execute(
+                "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, language, created_at)
+                 VALUES (?1, ?1, -1.0, 0, 0, 'new', 0, 0, 'ja', ?2)",
+                params![format!("n{i}"), 100 - i],
+            )
+            .unwrap();
+        }
+        let study = ensure_study(&conn, "2026-01-01", "ja", 100, 20).unwrap();
+        top_up_queue(&conn, study, "ja", i64::MAX, 100, 20).unwrap();
+
+        let served = play(&conn, study, "r01", ROUND_SIZE as usize);
+        let pattern: String = served.iter().map(|id| &id[..1]).collect();
+        // Round 1: a new card after every 4 reviews, the most recently added first.
+        assert_eq!(pattern, "rrrrn".repeat(5));
+        assert_eq!(&served[..5], ["r00", "r01", "r02", "r03", "n0"]);
+
+        // Round 2 starts with what round 1 left over, in the order it was left: wrong answers and new cards.
+        let served = play(&conn, study, "", 6);
+        assert_eq!(served, ["r01", "n0", "n1", "n2", "n3", "n4"]);
+        // Then fresh cards again, carrying on with the mix.
+        let served = play(&conn, study, "", 5);
+        assert_eq!(served, ["r20", "r21", "r22", "r23", "n5"]);
+
+        // Every card comes back until it is no longer learning; the day still ends.
+        play(&conn, study, "", 1000);
+        assert_eq!(count_pending(&conn, study).unwrap(), 0);
+        assert!(fetch_next_pending(&conn, study).unwrap().is_none());
+    }
 }

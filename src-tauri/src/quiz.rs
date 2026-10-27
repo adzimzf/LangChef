@@ -8,7 +8,7 @@ use crate::grammar_review::{generate_card_back, parse_grammar_detail, GrammarDet
 use crate::locale::{app_error, effective_detail_sql, explain_lang};
 use crate::srs::{
     apply_session_grade, ensure_study, fetch_review_item, format_next_review_minutes,
-    session_progress, set_card_status, ReviewItem, SessionProgress,
+    requeue_card, session_progress, set_card_status, ReviewItem, SessionProgress,
 };
 use crate::words::is_cjk;
 use rand::seq::SliceRandom;
@@ -89,6 +89,36 @@ pub fn parse_detail(detail: Option<&str>) -> CardDetail {
 
 fn normalize(s: &str) -> String {
     s.trim().to_lowercase()
+}
+
+/// The separate senses in a meaning: "to travel; trip (abroad)" → {travel, trip}.
+/// Notes in brackets and a leading "to"/"a"/"the" don't count.
+fn glosses(meaning: &str) -> HashSet<String> {
+    let mut plain = String::new();
+    let mut depth = 0;
+    for c in meaning.chars() {
+        match c {
+            '(' | '（' | '[' => depth += 1,
+            ')' | '）' | ']' => depth = (depth - 1).max(0),
+            _ if depth == 0 => plain.push(c),
+            _ => {}
+        }
+    }
+    plain
+        .split([';', ',', '/', '、', '；', '，'])
+        .map(|g| {
+            let g = g.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase();
+            let g = ["to ", "a ", "an ", "the "].iter().find_map(|p| g.strip_prefix(p)).map(str::to_string).unwrap_or(g);
+            g.trim().to_string()
+        })
+        .filter(|g| !g.is_empty())
+        .collect()
+}
+
+/// Two meanings sharing a sense ("travel; trip" and "travel; journey; trip") are both right,
+/// so one is never a wrong option for the other.
+fn meanings_overlap(a: &HashSet<String>, b: &HashSet<String>) -> bool {
+    !a.is_disjoint(b)
 }
 
 fn is_mature(card: &ReviewItem) -> bool {
@@ -249,6 +279,8 @@ fn load_confusions(conn: &Connection, id: &str) -> Result<HashMap<String, i64>, 
 
 /// Wrong meanings that are hard to rule out: words mixed up before, words sharing a kanji,
 /// words with the same part of speech and grammar of the same level come first.
+/// A meaning sharing a sense with the answer (or with another option) is never offered,
+/// so a shared kanji only ranks up words that mean something else (旅館 for 旅行, not 旅).
 fn meaning_distractors(
     card: &ReviewItem,
     detail: &CardDetail,
@@ -257,16 +289,14 @@ fn meaning_distractors(
     n: usize,
     rng: &mut impl Rng,
 ) -> Vec<QuizOption> {
-    let target_meaning = normalize(&detail.meaning);
+    let target_glosses = glosses(&detail.meaning);
     let target_chars: HashSet<char> = card.content.chars().filter(|c| is_cjk(*c)).collect();
     let target_pos = normalize(&detail.part_of_speech);
 
-    let mut seen: HashSet<String> = HashSet::new();
-    seen.insert(target_meaning);
-    let mut scored: Vec<(f64, QuizOption)> = Vec::new();
+    let mut scored: Vec<(f64, HashSet<String>, QuizOption)> = Vec::new();
     for c in candidates {
-        let key = normalize(&c.detail.meaning);
-        if key.is_empty() || !seen.insert(key) {
+        let g = glosses(&c.detail.meaning);
+        if g.is_empty() || meanings_overlap(&g, &target_glosses) {
             continue;
         }
         let mut score: f64 = rng.gen_range(0.0..3.0);
@@ -278,10 +308,22 @@ fn meaning_distractors(
         if card.level.is_some() && c.level == card.level {
             score += 5.0;
         }
-        scored.push((score, QuizOption { text: c.detail.meaning.clone(), item_id: Some(c.id.clone()) }));
+        scored.push((score, g, QuizOption { text: c.detail.meaning.clone(), item_id: Some(c.id.clone()) }));
     }
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-    scored.into_iter().take(n).map(|(_, o)| o).collect()
+    let mut taken: Vec<HashSet<String>> = Vec::new();
+    let mut out = Vec::new();
+    for (_, g, option) in scored {
+        if out.len() == n {
+            break;
+        }
+        if taken.iter().any(|t| meanings_overlap(t, &g)) {
+            continue;
+        }
+        taken.push(g);
+        out.push(option);
+    }
+    out
 }
 
 const VOICING_PAIRS: &str = "かがきぎくぐけげこごさざしじすずせぜそぞただちぢつづてでとどはばひびふぶへべほぼ";
@@ -536,11 +578,13 @@ fn build_grammar_task(conn: &Connection, card: &ReviewItem, meaning_just_shown: 
     let confusions = load_confusions(conn, &card.id)?;
     let mut pool = meaning_distractors(card, &detail, &candidates, &confusions, 4, rng);
     // Too little grammar in the deck yet: the pattern's own look-alikes fill in.
-    let mut seen: HashSet<String> = pool.iter().map(|o| normalize(&o.text)).collect();
-    seen.insert(normalize(&g.meaning));
+    let mut taken: Vec<HashSet<String>> = pool.iter().map(|o| glosses(&o.text)).collect();
+    taken.push(glosses(&g.meaning));
     for c in &g.confusables {
-        if pool.len() < 4 && seen.insert(normalize(&c.meaning)) {
+        let cg = glosses(&c.meaning);
+        if pool.len() < 4 && !cg.is_empty() && !taken.iter().any(|t| meanings_overlap(t, &cg)) {
             pool.push(QuizOption { text: c.meaning.clone(), item_id: None });
+            taken.push(cg);
         }
     }
     let example = g.examples.choose(rng).cloned().unwrap_or_default();
@@ -1256,8 +1300,8 @@ pub fn db_session_save_meaning(
     let study_id = ensure_study(&conn, &today(), &language, max_reviews, max_new_cards)?;
     let card = fetch_review_item(&conn, &card_id)?.ok_or_else(|| app_error("card_gone", ""))?;
     store_new_task(&conn, study_id, &card, true)?;
-    // Re-marking it pending bumps update_time, which puts it behind every other pending card.
-    set_card_status(&conn, study_id, &card_id, "pending")?;
+    // It comes back in the next round, while the meaning is still fresh.
+    requeue_card(&conn, study_id, &card_id)?;
     session_progress(&conn, study_id)
 }
 
@@ -1634,6 +1678,37 @@ mod tests {
         assert!(!ids.contains(&"g".to_string()), "another form of the word");
         assert!(!ids.contains(&"h".to_string()), "the word in kana");
         assert!(ids.contains(&"b".to_string()));
+    }
+
+    #[test]
+    fn meanings_sharing_a_sense_are_never_wrong_options() {
+        let g = glosses("To travel; trip (abroad), a journey");
+        assert_eq!(g, ["travel", "trip", "journey"].iter().map(|s| s.to_string()).collect::<HashSet<String>>());
+        assert!(meanings_overlap(&glosses("travel; trip"), &glosses("travel; journey; trip")));
+        assert!(!meanings_overlap(&glosses("travel; trip"), &glosses("inn; hotel")));
+
+        let conn = deck();
+        conn.execute_batch(
+            "INSERT INTO review_items(id, content, language, detail) VALUES
+               ('t', '旅行', 'ja', '{\"reading\":\"りょこう\",\"meaning\":\"travel; trip\"}'),
+               ('u', '旅', 'ja', '{\"reading\":\"たび\",\"meaning\":\"travel; journey; trip\"}'),
+               ('v', '旅館', 'ja', '{\"reading\":\"りょかん\",\"meaning\":\"inn\"}'),
+               ('w', '歩く', 'ja', '{\"reading\":\"あるく\",\"meaning\":\"to walk\"}'),
+               ('x', '散策', 'ja', '{\"reading\":\"さんさく\",\"meaning\":\"stroll; walk\"}');",
+        )
+        .unwrap();
+        let c = card("t", "旅行", "review", Some(r#"{"reading":"りょこう","meaning":"travel; trip"}"#));
+        let detail = parse_detail(c.detail.as_deref());
+        let cands = load_candidates(&conn, &c).unwrap();
+        // 旅 was confused before: a shared sense still keeps it out.
+        let confusions = HashMap::from([("u".to_string(), 3)]);
+        for _ in 0..20 {
+            let opts = meaning_distractors(&c, &detail, &cands, &confusions, 4, &mut rand::thread_rng());
+            let ids: Vec<String> = opts.iter().filter_map(|o| o.item_id.clone()).collect();
+            assert!(!ids.contains(&"u".to_string()), "same meaning as the answer");
+            assert_eq!(ids[0], "v", "shared kanji, other meaning ranks first");
+            assert!(!(ids.contains(&"w".to_string()) && ids.contains(&"x".to_string())), "two options with one sense");
+        }
     }
 
     #[test]

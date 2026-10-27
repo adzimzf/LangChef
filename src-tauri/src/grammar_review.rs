@@ -22,6 +22,9 @@ const DEFAULT_NEW_PER_DAY: i64 = 3;
 const DEFAULT_CHECKS_PER_DAY: i64 = 5;
 const MAX_NEW_PER_DAY: i64 = 20;
 const MAX_CHECKS_PER_DAY: i64 = 50;
+/// Due grammar reviews kept in today's queue ahead of words, so word reviews can't crowd them out.
+/// They come out of the review limit; more due grammar waits for a later day.
+pub const GRAMMAR_REVIEWS_PER_DAY: i64 = 3;
 /// Share of the learner's level that must be known before moving up is suggested.
 const MOVE_UP_PCT: i64 = 80;
 /// With "speed up", checks go twice as fast while at least this many of the last `SPEED_UP_SAMPLE` passed.
@@ -800,6 +803,47 @@ mod tests {
         conn.execute("INSERT INTO review_answers VALUES ('ja', 1, 0, 100), ('ja', 1, 0, 101)", []).unwrap();
         assert_eq!(checks_today(&conn, "ja", &lim), 5);
         assert_eq!(checks_today(&conn, "ja", &Limits { speed_up: false, ..lim }), 5);
+    }
+
+    #[test]
+    fn due_grammar_keeps_its_review_slots_ahead_of_words() {
+        use crate::srs::{ensure_study, top_up_queue};
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::prepare_db(&conn).unwrap();
+        set_setting(&conn, "grammar_new_per_day", "0").unwrap();
+        set_setting(&conn, "grammar_checks_per_day", "0").unwrap();
+        // Words are due earlier, so they would fill the review limit on their own.
+        for i in 0..10 {
+            conn.execute(
+                "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, language, created_at)
+                 VALUES (?1, ?1, 2.5, 1, 1, 'review', 0, 0, ?2, 'ja', 0)",
+                params![format!("w{i}"), i],
+            )
+            .unwrap();
+        }
+        for i in 0..5 {
+            conn.execute(
+                "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, language, created_at, item_type)
+                 VALUES (?1, ?1, 2.5, 1, 1, 'review', 0, 0, 100, 'ja', 0, 'grammar')",
+                params![format!("g{i}")],
+            )
+            .unwrap();
+        }
+        let queued = |item_type: &str| -> i64 {
+            conn.query_row(
+                "SELECT COUNT(*) FROM study_card sc JOIN review_items r ON r.id = sc.review_item_id
+                 WHERE sc.kind = 'review' AND r.item_type = ?1",
+                params![item_type],
+                |r| r.get(0),
+            )
+            .unwrap()
+        };
+        let study = ensure_study(&conn, "2026-01-01", "ja", 5, 0).unwrap();
+        top_up_queue(&conn, study, "ja", i64::MAX, 5, 0).unwrap();
+        assert_eq!((queued(ITEM_GRAMMAR), queued("word")), (GRAMMAR_REVIEWS_PER_DAY, 5 - GRAMMAR_REVIEWS_PER_DAY));
+        // A bigger limit later today adds words, never more grammar.
+        top_up_queue(&conn, study, "ja", i64::MAX, 20, 0).unwrap();
+        assert_eq!((queued(ITEM_GRAMMAR), queued("word")), (GRAMMAR_REVIEWS_PER_DAY, 10));
     }
 
     #[test]

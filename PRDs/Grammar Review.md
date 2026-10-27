@@ -25,7 +25,7 @@ Grammar patterns become review cards in the **same daily queue as words**, with 
 - Lower levels are checked easiest first (all of N5, then N4).
 - **Level check:** right → graded Easy, straight to review (about two weeks out), counts as known. Wrong or "Don't know" → Again, and from then on it is taught like a new pattern; the result screen shows how the pattern works.
 - **Speed up easy levels** (on by default): while at least 9 of the last 10 checks were right, checks per day double.
-- Grammar has its own daily slots (`study_card.kind` `grammar_new` / `grammar_check`), so it never uses up new-word slots. Due grammar shares the review limit with words.
+- Grammar has its own daily slots (`study_card.kind` `grammar_new` / `grammar_check`), so it never uses up new-word slots. Due grammar takes up to 3 of the review limit each day before words fill the rest, so grammar always gets reviewed; more due grammar waits for a later day.
 
 ### Questions by card stage
 

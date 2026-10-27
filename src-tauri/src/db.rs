@@ -191,6 +191,11 @@ pub fn prepare_db(conn: &Connection) -> Result<(), String> {
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN lapse_count INTEGER DEFAULT 0", []);
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN mnemonic TEXT", []);
     let _ = conn.execute("ALTER TABLE study_card ADD COLUMN task TEXT", []);
+    // Today's queue is served in rounds: the round a card is in (NULL until first shown), and per day
+    // the current round and how many fresh cards it has handed out.
+    let _ = conn.execute("ALTER TABLE study_card ADD COLUMN round INTEGER", []);
+    let _ = conn.execute("ALTER TABLE study ADD COLUMN round INTEGER NOT NULL DEFAULT 1", []);
+    let _ = conn.execute("ALTER TABLE study ADD COLUMN round_fresh INTEGER NOT NULL DEFAULT 0", []);
     // Seconds spent on a reading article, from opening it to the last question.
     let _ = conn.execute("ALTER TABLE reading_sessions ADD COLUMN elapsed_seconds INTEGER NOT NULL DEFAULT 0", []);
     // AI-generated back of a card waiting for the user to approve it in review.
