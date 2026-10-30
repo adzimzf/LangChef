@@ -821,6 +821,7 @@
   "settings.title": "Pengaturan",
   "settings.useChatModel": "(pakai model chat)",
   "settings.vocabModel": "Model kosakata",
+  "settings.version": "Versi {version}",
   "settings.vocabModelHint": "Model untuk detail kata dan jembatan keledai. Kosongkan untuk memakai model chat.",
   "settings.yourLanguage": "Bahasa Anda",
   "stats.activity": "Aktivitas",

@@ -821,6 +821,7 @@
   "settings.title": "Settings",
   "settings.useChatModel": "(use chat model)",
   "settings.vocabModel": "Vocabulary model",
+  "settings.version": "Version {version}",
   "settings.vocabModelHint": "Model for word details and mnemonics. Leave empty to use the chat model.",
   "settings.yourLanguage": "Your language",
   "stats.activity": "Activity",

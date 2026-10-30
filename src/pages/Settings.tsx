@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
+import { getVersion } from '@tauri-apps/api/app'
 import {
   ApiOutlined,
   KeyOutlined,
@@ -55,6 +56,11 @@ export default function Settings() {
   const [romajiInput, setRomajiInput] = useState(() => readFlag(ROMAJI_INPUT_KEY))
   const [kanaMessage, setKanaMessage] = useState('')
   const [aidsOpen, setAidsOpen] = useState(false)
+  const [appVersion, setAppVersion] = useState('')
+
+  useEffect(() => {
+    getVersion().then(setAppVersion).catch(() => {})
+  }, [])
 
   // Track the last-saved values to detect changes and enable cancel
   const savedValues = useRef({ apiHost: '', apiKey: '', model: '', vocabModel: '', maxReviews: String(MAX_REVIEWS_DEFAULT), maxNewCards: String(MAX_NEW_CARDS_DEFAULT), maxDifficultWords: String(MAX_DIFFICULT_WORDS_DEFAULT), maxKnownWords: String(MAX_KNOWN_WORDS_DEFAULT), chatCustomPrompt: '' })
@@ -540,6 +546,10 @@ export default function Settings() {
           )}
         </div>
       </div>
+
+      {appVersion && (
+        <p className="text-center text-xs text-gray-400">{t('settings.version', { version: appVersion })}</p>
+      )}
 
       {/* Sticky save/cancel bar when there are unsaved changes */}
       {dirty && (

@@ -159,6 +159,7 @@ DB path: `~/.app-data/langchef/langchef.db`. Schema created in `open_db()` in `s
 - `src/lib/intl-segmenter.d.ts` provides TS declarations for `Intl.Segmenter`
 - PRD is in `PRD.md`; feature specs in `PRDs/`, technical specs in `TRDs/`
 - Android release signing: keystore and credentials are never committed. Copy `keystore.properties.example` to `keystore.properties` (gitignored) or set `LANGCHEF_KEYSTORE_FILE` / `LANGCHEF_KEYSTORE_PASSWORD` / `LANGCHEF_KEY_ALIAS` / `LANGCHEF_KEY_PASSWORD`. Without them the release APK is built unsigned.
+- Releases: push a `v*` tag (or run the `release` workflow with a tag) → `.github/workflows/release.yml` builds macOS DMGs (arm64, Intel) and a signed universal Android APK, version taken from the tag, and publishes a GitHub Release. Needs secrets `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `ANDROID_KEYSTORE_BASE64`, `ANDROID_KEYSTORE_PASSWORD`, `ANDROID_KEY_ALIAS` (`ANDROID_KEY_PASSWORD` optional).
 - Google OAuth tokens stored at `~/.app-data/langchef/google_tokens.json`
 
 <!-- rtk-instructions v2 -->
