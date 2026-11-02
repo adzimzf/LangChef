@@ -22,6 +22,7 @@ import { t, lang, switchExplainLang, errorText, type ExplainLang } from '../lib/
 import { PROVIDER_PRESETS, TRANSLATION_REPORT_URL, type ProviderPreset } from '../lib/providers'
 import { readFlag, writeFlag, CHAT_HINTS_KEY, ROMAJI_KEY, ROMAJI_INPUT_KEY } from '../lib/prefs'
 import GrammarPlanSettings from '../components/GrammarPlanSettings'
+import OfflineVoiceSettings from '../components/OfflineVoiceSettings'
 import { useBackHandler } from '../lib/backNav'
 
 const MAX_REVIEWS_DEFAULT = 100
@@ -404,6 +405,8 @@ export default function Settings() {
       </div>
 
       <GrammarPlanSettings />
+
+      <OfflineVoiceSettings />
 
       {/* Chat settings */}
       <div className="space-y-3">
