@@ -1,7 +1,8 @@
 name: 'release'
 
 # Builds a signed release and publishes it as a GitHub Release:
-#   macOS Apple Silicon + Intel (DMG, unsigned), Android universal APK (signed with the release key).
+#   macOS Apple Silicon + Intel (DMG, unsigned), Android arm64 APK (signed with the release key).
+# Android is arm64-only: open_jtalk-sys bindgen yields empty bindings for armv7/i686.
 #
 # Start it by pushing a version tag:   git tag v0.2.0 && git push origin v0.2.0
 # or from the Actions tab (workflow_dispatch) with the tag to create.
@@ -76,7 +77,7 @@ jobs:
             rust-target: x86_64-apple-darwin
           - platform: 'ubuntu-22.04'
             target: 'android'
-            rust-target: aarch64-linux-android,armv7-linux-androideabi,i686-linux-android,x86_64-linux-android
+            rust-target: aarch64-linux-android
 
     runs-on: ${{ matrix.platform }}
     env:
@@ -175,7 +176,7 @@ jobs:
         if: matrix.target == 'android'
         env:
           NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.0.11902837
-        run: npm run tauri -- android build --apk --config "$RUNNER_TEMP/tauri.release.conf.json"
+        run: npm run tauri -- android build --apk --target aarch64 --config "$RUNNER_TEMP/tauri.release.conf.json"
 
       - name: Collect artifacts
         run: |
@@ -186,7 +187,7 @@ jobs:
               echo "::error::No release APK found"
               exit 1
             fi
-            cp "$APK" "./release-assets/LangChef_${VERSION}_android_universal.apk"
+            cp "$APK" "./release-assets/LangChef_${VERSION}_android_arm64.apk"
           else
             case "${{ matrix.rust-target }}" in
               aarch64-apple-darwin) ARCH=aarch64 ;;
