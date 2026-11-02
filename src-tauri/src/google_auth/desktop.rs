@@ -1,4 +1,4 @@
-use super::{DEFAULT_REDIRECT_HOST, DRIVE_SCOPE, GOOGLE_AUTH_URL, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REVOKE_URL, GOOGLE_TOKEN_URL, LOCALHOST_ADDR, SUCCESS_HTML, TokenData};
+use super::{DEFAULT_REDIRECT_HOST, DRIVE_SCOPE, GOOGLE_AUTH_URL, GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_REVOKE_URL, GOOGLE_TOKEN_URL, LOCALHOST_ADDR, REDIRECT_PORTS, SUCCESS_HTML, TokenData};
 use oauth2::basic::BasicClient;
 use oauth2::{AuthUrl, CsrfToken, PkceCodeChallenge, RedirectUrl, Scope, TokenUrl};
 use std::io::{BufRead, BufReader, Write};
@@ -9,13 +9,11 @@ use std::net::TcpListener;
 /// Opens the system browser for the user to authenticate, then listens on a local
 /// port for the OAuth callback to receive the authorization code.
 pub fn sign_in() -> Result<TokenData, String> {
-    // Bind TCP listener first to get actual port
-    let listener =
-        TcpListener::bind(format!("{LOCALHOST_ADDR}:0")).map_err(|e| format!("Failed to bind to local port: {}", e))?;
-    let actual_port = listener
-        .local_addr()
-        .map_err(|e| format!("Failed to get local address: {}", e))?
-        .port();
+    // Bind one of the pre-registered ports; a random port can never match the OAuth client.
+    let (listener, actual_port) = REDIRECT_PORTS
+        .iter()
+        .find_map(|p| TcpListener::bind(format!("{LOCALHOST_ADDR}:{p}")).ok().map(|l| (l, *p)))
+        .ok_or_else(|| format!("All sign-in ports are in use: {REDIRECT_PORTS:?}"))?;
     let redirect_url = format!("http://{DEFAULT_REDIRECT_HOST}:{actual_port}");
 
     // Generate PKCE challenge

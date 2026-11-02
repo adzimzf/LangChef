@@ -15,6 +15,10 @@ const GOOGLE_TOKEN_URL: &str = "https://oauth2.googleapis.com/token";
 const GOOGLE_REVOKE_URL: &str = "https://oauth2.googleapis.com/revoke";
 pub const DRIVE_SCOPE: &str = "https://www.googleapis.com/auth/drive.file";
 const LOCALHOST_ADDR: &str = "127.0.0.1";
+// Google Web OAuth clients only accept exactly-registered redirect URIs, so the loopback
+// port cannot be random. Every port here must be registered on the OAuth client as
+// http://localhost:<port>; the first free one is used.
+const REDIRECT_PORTS: [u16; 3] = [47936, 47937, 47938];
 const DEFAULT_REDIRECT_HOST: &str = "localhost";
 const SUCCESS_HTML: &str = "Go back to your app :)";
 
