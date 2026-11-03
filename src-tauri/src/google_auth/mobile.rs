@@ -52,7 +52,7 @@ pub struct GoogleAuthHandle<R: Runtime> {
 
 impl<R: Runtime> GoogleAuthHandle<R> {
     /// Execute a method on the native mobile plugin and deserialize the response.
-    fn run(&self, method: &str, payload: impl Serialize) -> Result<TokenResponse, String> {
+    fn run<T: DeserializeOwned>(&self, method: &str, payload: impl Serialize) -> Result<T, String> {
         self.inner
             .run_mobile_plugin(method, payload)
             .map_err(|e| format!("Mobile plugin error: {}", e))
@@ -85,7 +85,7 @@ tauri::ios_plugin_binding!(init_ios_plugin);
 
 /// Sign in via the native mobile flow (CredentialManager → AuthorizationClient).
 pub fn sign_in<R: Runtime>(handle: &GoogleAuthHandle<R>) -> Result<TokenData, String> {
-    let response = handle.run(
+    let response: TokenResponse = handle.run(
         "signIn",
         SignInRequest {
             client_id: GOOGLE_CLIENT_ID.to_string(),
@@ -109,7 +109,7 @@ pub fn refresh_token<R: Runtime>(
 ) -> Result<TokenData, String> {
     eprintln!("[mobile] refresh_token called: refresh_token_len={}, is_empty={}",
         refresh_token.len(), refresh_token.is_empty());
-    let response = handle.run(
+    let response: TokenResponse = handle.run(
         "refreshToken",
         RefreshTokenRequest {
             refresh_token: Some(refresh_token.to_string()),
@@ -135,7 +135,7 @@ pub fn refresh_token<R: Runtime>(
 /// Revoke an access token and sign out via the native mobile plugin.
 pub fn revoke_token<R: Runtime>(handle: &GoogleAuthHandle<R>, access_token: String) -> Result<(), String> {
     let _ = handle
-        .run(
+        .run::<TokenResponse>(
             "signOut",
             SignOutRequest {
                 access_token: Some(access_token),
@@ -144,6 +144,19 @@ pub fn revoke_token<R: Runtime>(handle: &GoogleAuthHandle<R>, access_token: Stri
         )
         .map_err(|_| "Sign-out failed".to_string())?;
     Ok(())
+}
+
+/// Active network as Android sees it (used for "Wi-Fi only" automatic backup).
+#[cfg(target_os = "android")]
+#[derive(Debug, Clone, Deserialize)]
+pub struct NetworkStatus {
+    pub connected: bool,
+    pub unmetered: bool,
+}
+
+#[cfg(target_os = "android")]
+pub fn network_status<R: Runtime>(handle: &GoogleAuthHandle<R>) -> Result<NetworkStatus, String> {
+    handle.run("networkStatus", serde_json::json!({}))
 }
 
 // ─── Internal helpers ────────────────────────────────────────────────────

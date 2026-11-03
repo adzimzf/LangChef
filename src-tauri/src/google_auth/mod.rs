@@ -232,6 +232,7 @@ pub async fn google_sign_in(app: AppHandle) -> Result<serde_json::Value, String>
         }
     }
 
+    crate::google_drive::apply_auto_sync_service(&app);
     let email = get_user_email(&tokens.access_token, tokens.id_token.as_deref()).await.unwrap_or_else(|_| "Unknown".to_string());
     Ok(serde_json::json!({ "email": email }))
 }
@@ -251,7 +252,9 @@ pub async fn google_sign_out(app: AppHandle) -> Result<(), String> {
             }
         }
     }
-    delete_tokens(&app)
+    delete_tokens(&app)?;
+    crate::google_drive::apply_auto_sync_service(&app);
+    Ok(())
 }
 
 #[tauri::command]

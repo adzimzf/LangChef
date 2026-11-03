@@ -1,7 +1,10 @@
 package com.langchef
 
 import android.app.Activity
+import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.util.Log
 import android.webkit.WebView
 import androidx.activity.result.ActivityResult
@@ -342,6 +345,19 @@ class GoogleSignInPlugin(private val activity: Activity) : Plugin(activity) {
         val ret = JSObject()
         ret.put("success", true as Any)
         invoke.resolve(ret)
+    }
+
+    /** Active network for "Wi-Fi only" automatic backup: connected, and not metered (Wi-Fi, Ethernet, or anything the user hasn't marked as metered). */
+    @Command
+    fun networkStatus(invoke: Invoke) {
+        val cm = activity.applicationContext.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val caps = cm.activeNetwork?.let { cm.getNetworkCapabilities(it) }
+        val connected = caps?.hasCapability(NetworkCapabilities.NET_CAPABILITY_INTERNET) == true
+        val unmetered = connected && !cm.isActiveNetworkMetered
+        invoke.resolve(JSObject().apply {
+            put("connected", connected)
+            put("unmetered", unmetered)
+        })
     }
 
     @Command

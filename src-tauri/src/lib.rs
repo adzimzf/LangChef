@@ -2,6 +2,7 @@ use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
 mod google_auth;
+mod backup;
 mod google_drive;
 mod background_sync;
 mod furigana;
@@ -153,6 +154,8 @@ pub fn run() {
             }
             app.manage(Mutex::new(initial));
             app.manage(tts::TtsState::default());
+            // Automatic Google Drive backup runs from app launch, not only once Settings is opened.
+            google_drive::apply_auto_sync_service(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -286,6 +289,7 @@ pub fn run() {
             google_auth::google_get_auth_status,
             // Google Drive
             google_drive::google_backup_db,
+            google_drive::google_backup_overwrite,
             google_drive::google_restore_db,
             google_drive::google_get_backup_status,
             google_drive::google_set_auto_sync,
