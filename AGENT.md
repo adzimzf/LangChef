@@ -38,6 +38,10 @@ The app ships in English and Bahasa Indonesia. Never hardcode UI text:
 
 All schema changes go in `open_db()` in `src-tauri/src/lib.rs`. Use `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` for additive migrations — the function runs on every app start and must be idempotent.
 
+## Sync
+
+A new table that holds learner data needs an entry in `TABLES` in `src-tauri/src/sync/spec.rs` (key, references to integer-id rows, counter columns), or it won't reach the learner's other devices. A new integer-id table gets `gid: true` and `legacy_fields`. Triggers follow the columns automatically. Rules are covered by `cargo test --lib sync`.
+
 ## SRS Changes
 
 FSRS 5.2.0 in `src-tauri/src/srs.rs` is the engine; SM-2 columns (EF, I, R) are legacy display-only. Desired retention constant: 90%. Review grades come from `src-tauri/src/quiz.rs` (`compute_grade`), not from the user; its rules are covered by `cargo test --lib quiz`.

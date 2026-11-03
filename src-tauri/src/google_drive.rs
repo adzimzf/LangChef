@@ -1,17 +1,17 @@
-//! Google Drive backup with incremental uploads and conflict handling.
+//! Google Drive sync and backup.
 //!
-//! Layout on Drive (`drive.file` scope, so only files this app made are visible):
-//! a folder `LangChef Backup` holding `manifest.json` and the chain files the backup engine
-//! (`backup::engine`) makes: `full_XXXX_*.db.zst` and `delta_XXXX_*.bin`. Each backup uploads only
-//! the pages that changed since the previous one; every `MAX_DELTA_CHAIN` deltas a new full backup
-//! starts a chain, and the two newest chains are kept.
+//! Everything lives in a `LangChef Backup` folder (`drive.file` scope: only files this app made
+//! are visible):
+//! - **Change files** `chg_<device>_<first>_<last>.jsonl.zst`: each device's row changes
+//!   (`sync::export`), written only by that device. Every device applies the others' files with
+//!   the row-level merge rules in `sync` — no device ever overwrites another device's data.
+//! - **Snapshots** per device: `manifest_<device>.json` plus `full_*.db.zst` / `delta_*.bin` from
+//!   the incremental backup engine (`backup::engine`). They let a new device start from a recent
+//!   state, let a device that was away longer than change files are kept catch up, and are what
+//!   "Restore" puts back.
 //!
-//! Conflicts: the manifest is a single line of backups that any of the user's devices may extend.
-//! A device only extends it when the newest backup in the cloud is the one it last uploaded or
-//! restored (`SyncConfig::synced_head`). Otherwise another device (or an earlier install) backed up
-//! in the meantime, and the device stops backing up and records a `Conflict` until the user picks:
-//! restore the cloud copy here, or keep this device's data (a new full backup on top; the cloud's
-//! previous state stays in the older chain).
+//! One sync: record this device's first sync if needed → export local changes → upload them →
+//! download and apply other devices' new changes → snapshot (only changed pages) → prune old files.
 //!
 //! The old single-file backup (`langchef_backup.db` in the Drive root) can still be restored.
 
@@ -19,7 +19,9 @@ use crate::backup::engine::{self, Plan};
 use crate::backup::manifest::{BackupEntry, BackupType, Manifest};
 use crate::google_auth::get_access_token;
 use crate::locale::app_error;
+use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use tauri::{AppHandle, Manager};
@@ -28,21 +30,21 @@ const DRIVE_UPLOAD_URL: &str = "https://www.googleapis.com/upload/drive/v3/files
 const DRIVE_FILES_URL: &str = "https://www.googleapis.com/drive/v3/files";
 const FOLDER_NAME: &str = "LangChef Backup";
 const FOLDER_MIME: &str = "application/vnd.google-apps.folder";
-const MANIFEST_NAME: &str = "manifest.json";
 const LEGACY_FILE_NAME: &str = "langchef_backup.db";
-/// Chains kept in Drive (each a full backup plus its deltas).
+/// Snapshot chains kept per device (each a full backup plus its deltas).
 const KEEP_CHAINS: usize = 2;
-/// After a failed automatic backup, wait at least this long before trying again.
+/// A device deletes its own change files this old, once it has a newer snapshot.
+const KEEP_CHANGES_DAYS: i64 = 60;
+/// After a failed automatic sync, wait at least this long before trying again.
 const RETRY_AFTER_SECS: i64 = 15 * 60;
 pub const SERVICE_LABEL: &str = "LangChef auto-backup";
 
-/// One sync at a time (background service, "Back up now" and restore share the files).
+/// One sync at a time (background service, "Sync now" and restore share the files).
 static SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-// ─── Data Structures ──────────────────────────────────────────────────────
+// ─── Settings and local files ─────────────────────────────────────────────
 
-/// Old single-file backup metadata (`google_backup_meta.json`). Still read to recognise a
-/// legacy backup this device made or restored.
+/// Old single-file backup metadata (`google_backup_meta.json`).
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct BackupMetadata {
     pub file_id: String,
@@ -51,35 +53,27 @@ pub struct BackupMetadata {
     pub backed_up_at: i64,
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-pub struct Conflict {
-    /// `cloud_newer`: another device backed up after this one last synced.
-    /// `never_synced`: the cloud has a backup this device never restored or made.
-    pub reason: String,
-    /// OS of the device that made the newest cloud backup (`android`, `macos`, …), if known.
-    pub device_os: String,
-    pub backed_up_at: i64,
-    pub size: u64,
-}
-
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SyncConfig {
     pub enabled: bool,
     pub interval_minutes: u64,
     pub last_sync_at: Option<i64>,
     pub wifi_only: bool,
-    /// Random id of this install, written into every backup it makes.
+    /// Random id of this install; names its change files and snapshots.
     #[serde(default)]
     pub device_id: String,
-    /// Checksum of the newest cloud backup this device made or restored.
-    #[serde(default)]
-    pub synced_head: Option<String>,
-    #[serde(default)]
-    pub conflict: Option<Conflict>,
+    /// Next sequence number for this device's change records. Kept here, not in the database,
+    /// so it never goes back when a backup is restored.
+    #[serde(default = "one")]
+    pub next_seq: u64,
     #[serde(default)]
     pub last_error: Option<String>,
     #[serde(default)]
     pub last_attempt_at: Option<i64>,
+}
+
+fn one() -> u64 {
+    1
 }
 
 impl Default for SyncConfig {
@@ -90,23 +84,12 @@ impl Default for SyncConfig {
             last_sync_at: None,
             wifi_only: true,
             device_id: String::new(),
-            synced_head: None,
-            conflict: None,
+            next_seq: 1,
             last_error: None,
             last_attempt_at: None,
         }
     }
 }
-
-#[derive(Clone, Copy, PartialEq)]
-enum Mode {
-    /// Extend the cloud chain; stop on a conflict.
-    Normal,
-    /// The user chose to keep this device's data: start a new chain on top of the cloud's.
-    Overwrite,
-}
-
-// ─── Local files ──────────────────────────────────────────────────────────
 
 fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app.path().app_data_dir().map_err(|e: tauri::Error| e.to_string())?;
@@ -114,11 +97,11 @@ fn app_dir(app: &AppHandle) -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-/// `<app data>/backup`: `baseline.db` (state of the newest backup this device knows),
-/// `baseline.head` (that backup's checksum), `manifest.json` (last manifest seen) and `work/`.
+/// `<app data>/backup`: `baseline.db` + `baseline.head` (state of this device's newest snapshot),
+/// `outgoing/` (change files waiting for upload), `work/`.
 fn backup_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let dir = app_dir(app)?.join("backup");
-    fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(dir.join("outgoing")).map_err(|e| e.to_string())?;
     Ok(dir)
 }
 
@@ -146,21 +129,11 @@ pub fn load_sync_config(app: &AppHandle) -> Result<SyncConfig, String> {
     Ok(config)
 }
 
-fn db_file_path(app: &AppHandle) -> Result<PathBuf, String> {
-    crate::db::db_file(app)
-}
-
-fn load_legacy_metadata(app: &AppHandle) -> Option<BackupMetadata> {
-    let path = app_dir(app).ok()?.join("google_backup_meta.json");
-    serde_json::from_str(&fs::read_to_string(path).ok()?).ok()
-}
-
 fn save_legacy_metadata(app: &AppHandle, meta: &BackupMetadata) -> Result<(), String> {
     let json = serde_json::to_string_pretty(meta).map_err(|e| e.to_string())?;
     fs::write(app_dir(app)?.join("google_backup_meta.json"), json).map_err(|e| e.to_string())
 }
 
-/// The baseline file, if it is the state of backup `head`.
 fn baseline_for(dir: &Path, head: Option<&str>) -> Option<PathBuf> {
     let head = head?;
     let stored = fs::read_to_string(dir.join("baseline.head")).ok()?;
@@ -168,19 +141,18 @@ fn baseline_for(dir: &Path, head: Option<&str>) -> Option<PathBuf> {
     (stored.trim() == head && path.exists()).then_some(path)
 }
 
-fn set_baseline_head(dir: &Path, head: &str) -> Result<(), String> {
-    fs::write(dir.join("baseline.head"), head).map_err(|e| e.to_string())
-}
-
-fn clear_baseline(dir: &Path) {
-    let _ = fs::remove_file(dir.join("baseline.db"));
-    let _ = fs::remove_file(dir.join("baseline.head"));
-}
-
-fn save_local_manifest(dir: &Path, m: &Manifest) {
-    if let Ok(json) = serde_json::to_vec_pretty(m) {
-        let _ = fs::write(dir.join(MANIFEST_NAME), json);
-    }
+/// Runs database work off the async runtime, on its own connection.
+async fn with_db<T: Send + 'static>(
+    app: &AppHandle,
+    f: impl FnOnce(&mut Connection) -> Result<T, String> + Send + 'static,
+) -> Result<T, String> {
+    let app = app.clone();
+    tokio::task::spawn_blocking(move || {
+        let mut conn = crate::db::open_db(&app)?;
+        f(&mut conn)
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 // ─── Google Drive API ─────────────────────────────────────────────────────
@@ -188,8 +160,15 @@ fn save_local_manifest(dir: &Path, m: &Manifest) {
 #[derive(Debug, Clone)]
 struct DriveFile {
     id: String,
+    name: String,
     modified_time: String,
     size: u64,
+}
+
+impl DriveFile {
+    fn modified(&self) -> i64 {
+        chrono::DateTime::parse_from_rfc3339(&self.modified_time).map_or(0, |t| t.timestamp())
+    }
 }
 
 fn client() -> reqwest::Client {
@@ -209,31 +188,40 @@ async fn check(resp: reqwest::Response, what: &str) -> Result<reqwest::Response,
 }
 
 async fn list_files(token: &str, query: &str) -> Result<Vec<DriveFile>, String> {
-    let url = format!(
-        "{DRIVE_FILES_URL}?q={}&orderBy=modifiedTime%20desc&fields=files(id,modifiedTime,size)&pageSize=100",
-        urlencoding::encode(query)
-    );
-    let resp = client()
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| format!("Network error searching Drive: {e}"))?;
-    let body: serde_json::Value = check(resp, "Drive search").await?.json().await.map_err(|e| e.to_string())?;
-    Ok(body["files"]
-        .as_array()
-        .map(|files| {
-            files
-                .iter()
-                .map(|f| DriveFile {
-                    id: f["id"].as_str().unwrap_or("").to_string(),
-                    modified_time: f["modifiedTime"].as_str().unwrap_or("").to_string(),
-                    size: f["size"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0),
-                })
-                .filter(|f| !f.id.is_empty())
-                .collect()
-        })
-        .unwrap_or_default())
+    let mut out = Vec::new();
+    let mut page: Option<String> = None;
+    loop {
+        let mut url = format!(
+            "{DRIVE_FILES_URL}?q={}&orderBy=modifiedTime%20desc&fields=nextPageToken,files(id,name,modifiedTime,size)&pageSize=1000",
+            urlencoding::encode(query)
+        );
+        if let Some(p) = &page {
+            url.push_str(&format!("&pageToken={}", urlencoding::encode(p)));
+        }
+        let resp = client()
+            .get(&url)
+            .bearer_auth(token)
+            .send()
+            .await
+            .map_err(|e| format!("Network error searching Drive: {e}"))?;
+        let body: serde_json::Value = check(resp, "Drive search").await?.json().await.map_err(|e| e.to_string())?;
+        for f in body["files"].as_array().into_iter().flatten() {
+            let id = f["id"].as_str().unwrap_or("").to_string();
+            if id.is_empty() {
+                continue;
+            }
+            out.push(DriveFile {
+                id,
+                name: f["name"].as_str().unwrap_or("").to_string(),
+                modified_time: f["modifiedTime"].as_str().unwrap_or("").to_string(),
+                size: f["size"].as_str().and_then(|s| s.parse().ok()).unwrap_or(0),
+            });
+        }
+        match body["nextPageToken"].as_str() {
+            Some(p) => page = Some(p.to_string()),
+            None => return Ok(out),
+        }
+    }
 }
 
 async fn find_folder(token: &str) -> Result<Option<String>, String> {
@@ -256,12 +244,16 @@ async fn ensure_folder(token: &str) -> Result<String, String> {
     body["id"].as_str().map(String::from).ok_or_else(|| "Drive folder has no id".into())
 }
 
+async fn list_in_folder(token: &str, folder: &str, name_part: &str) -> Result<Vec<DriveFile>, String> {
+    let q = format!("'{folder}' in parents and name contains '{name_part}' and trashed=false");
+    list_files(token, &q).await
+}
+
 async fn find_in_folder(token: &str, folder: &str, name: &str) -> Result<Option<DriveFile>, String> {
     let q = format!("name='{name}' and '{folder}' in parents and trashed=false");
     Ok(list_files(token, &q).await?.into_iter().next())
 }
 
-/// Old single-file backup in the Drive root.
 async fn find_legacy(token: &str) -> Result<Option<DriveFile>, String> {
     let q = format!("name='{LEGACY_FILE_NAME}' and trashed=false");
     Ok(list_files(token, &q).await?.into_iter().next())
@@ -328,22 +320,30 @@ async fn delete_file(token: &str, file_id: &str) {
         .await;
 }
 
-/// The manifest in Drive: (file id, manifest).
-async fn load_remote_manifest(token: &str, folder: &str) -> Result<Option<(String, Manifest)>, String> {
-    let Some(file) = find_in_folder(token, folder, MANIFEST_NAME).await? else {
-        return Ok(None);
-    };
-    let data = download(token, &file.id).await?;
-    let m: Manifest = serde_json::from_slice(&data).map_err(|e| format!("Unreadable backup manifest: {e}"))?;
-    Ok(Some((file.id, m)))
+// ─── Snapshots ────────────────────────────────────────────────────────────
+
+fn manifest_name(device: &str) -> String {
+    format!("manifest_{device}.json")
 }
 
-async fn write_remote_manifest(token: &str, folder: &str, file_id: Option<&str>, m: &Manifest) -> Result<(), String> {
-    let data = serde_json::to_vec_pretty(m).map_err(|e| e.to_string())?;
-    match file_id {
-        Some(id) => update_content(token, id, data, "application/json").await,
-        None => upload_new(token, folder, MANIFEST_NAME, data, "application/json").await.map(|_| ()),
+/// Every device's snapshot manifest: (device, manifest file id, manifest).
+async fn load_manifests(token: &str, folder: &str) -> Result<Vec<(String, String, Manifest)>, String> {
+    let mut out = Vec::new();
+    for f in list_in_folder(token, folder, "manifest_").await? {
+        let Some(dev) = f.name.strip_prefix("manifest_").and_then(|s| s.strip_suffix(".json")) else { continue };
+        let Ok(m) = serde_json::from_slice::<Manifest>(&download(token, &f.id).await?) else { continue };
+        out.push((dev.to_string(), f.id.clone(), m));
     }
+    Ok(out)
+}
+
+/// The newest snapshot among `manifests` (optionally leaving out one device).
+fn newest<'a>(manifests: &'a [(String, String, Manifest)], except: Option<&str>) -> Option<&'a Manifest> {
+    manifests
+        .iter()
+        .filter(|(d, _, m)| Some(d.as_str()) != except && m.latest().is_some())
+        .max_by_key(|(_, _, m)| m.latest().map(|e| e.timestamp))
+        .map(|(_, _, m)| m)
 }
 
 async fn download_entry(token: &str, folder: &str, entry: &BackupEntry) -> Result<Vec<u8>, String> {
@@ -357,94 +357,40 @@ async fn download_entry(token: &str, folder: &str, entry: &BackupEntry) -> Resul
     download(token, &id).await
 }
 
-// ─── Conflict detection ───────────────────────────────────────────────────
-
-fn conflict_with(entry: &BackupEntry, manifest: &Manifest, reason: &str) -> Conflict {
-    Conflict {
-        reason: reason.to_string(),
-        device_os: entry.device_os.clone(),
-        backed_up_at: entry.timestamp.timestamp(),
-        size: manifest.restore_chain().map_or(0, |c| c.iter().map(|e| e.file_size_bytes).sum()),
+/// Downloads a snapshot chain and rebuilds the database at `out` (checksums + integrity checked).
+async fn rebuild_snapshot(token: &str, folder: &str, manifest: &Manifest, out: PathBuf) -> Result<PathBuf, String> {
+    let chain = manifest.restore_chain().ok_or("snapshot has no full backup")?;
+    let mut files = Vec::with_capacity(chain.len());
+    for entry in chain {
+        files.push((entry.clone(), download_entry(token, folder, entry).await?));
     }
+    let path = out.clone();
+    tokio::task::spawn_blocking(move || engine::restore_chain(&files, &path)).await.map_err(|e| e.to_string())??;
+    Ok(out)
 }
 
-/// Whether this device may extend the cloud chain. `None` = go ahead.
-fn detect_conflict(synced_head: Option<&str>, remote: &Manifest) -> Option<Conflict> {
-    let head = remote.latest()?;
-    match synced_head {
-        Some(h) if h == head.blake3_checksum => None,
-        Some(_) => Some(conflict_with(head, remote, "cloud_newer")),
-        None => Some(conflict_with(head, remote, "never_synced")),
-    }
-}
-
-fn legacy_conflict(file: &DriveFile) -> Conflict {
-    Conflict {
-        reason: "never_synced".into(),
-        device_os: String::new(),
-        backed_up_at: chrono::DateTime::parse_from_rfc3339(&file.modified_time).map_or(0, |t| t.timestamp()),
-        size: file.size,
-    }
-}
-
-// ─── Backup / restore ─────────────────────────────────────────────────────
-
-#[derive(Debug, Serialize)]
-pub struct BackupOutcome {
-    /// `full`, `delta` or `none` (nothing changed since the last backup).
-    pub kind: String,
-    /// Bytes uploaded.
-    pub size: u64,
-    pub pages_changed: Option<u32>,
-    pub backed_up_at: i64,
-}
-
-fn record_conflict(app: &AppHandle, conflict: Conflict) -> String {
-    if let Ok(mut cfg) = load_sync_config(app) {
-        cfg.conflict = Some(conflict);
-        let _ = save_sync_config(app, &cfg);
-    }
-    app_error("backup_conflict", "")
-}
-
-async fn backup_locked(app: &AppHandle, mode: Mode) -> Result<BackupOutcome, String> {
-    let token = get_access_token(app).await?;
-    let folder = ensure_folder(&token).await?;
-    let cfg = load_sync_config(app)?;
+/// Uploads a snapshot of this device's database to its own chain (only changed pages).
+async fn snapshot_upload(app: &AppHandle, token: &str, folder: &str, cfg: &SyncConfig, manifests: &[(String, String, Manifest)]) -> Result<Option<BackupEntry>, String> {
     let dir = backup_dir(app)?;
-
-    let remote = load_remote_manifest(&token, &folder).await?;
-    let (manifest_id, mut manifest) = match remote {
-        Some((id, m)) => (Some(id), m),
-        None => (None, Manifest::new(0)),
-    };
-
-    if mode == Mode::Normal {
-        if manifest.is_empty() {
-            // Only an old single-file backup: fine if this device made or restored it.
-            if let Some(legacy) = find_legacy(&token).await? {
-                let ours = load_legacy_metadata(app).is_some_and(|m| m.file_id == legacy.id);
-                if !ours && cfg.synced_head.is_none() {
-                    return Err(record_conflict(app, legacy_conflict(&legacy)));
-                }
-            }
-        } else if let Some(c) = detect_conflict(cfg.synced_head.as_deref(), &manifest) {
-            return Err(record_conflict(app, c));
-        }
-    }
-
+    let me = cfg.device_id.clone();
+    let (manifest_id, mut manifest) = manifests
+        .iter()
+        .find(|(d, _, _)| *d == me)
+        .map(|(_, id, m)| (Some(id.clone()), m.clone()))
+        .unwrap_or((None, Manifest::new(0)));
     let head = manifest.latest().map(|e| e.blake3_checksum.clone());
     let baseline = baseline_for(&dir, head.as_deref());
-    let db_path = db_file_path(app)?;
+    let db_path = crate::db::db_file(app)?;
     let work = dir.join("work");
     let plan = {
-        let (manifest, device_id, force_full) = (manifest.clone(), cfg.device_id.clone(), mode == Mode::Overwrite);
+        let manifest = manifest.clone();
+        let me = me.clone();
         tokio::task::spawn_blocking(move || {
             let opts = engine::Options {
                 max_delta_chain: engine::MAX_DELTA_CHAIN,
                 compression_level: engine::COMPRESSION_LEVEL,
-                force_full,
-                device_id: &device_id,
+                force_full: false,
+                device_id: &me,
                 device_os: std::env::consts::OS,
             };
             engine::prepare_backup(&db_path, &work, &manifest, baseline.as_deref(), &opts)
@@ -452,22 +398,13 @@ async fn backup_locked(app: &AppHandle, mode: Mode) -> Result<BackupOutcome, Str
         .await
         .map_err(|e| e.to_string())??
     };
-
-    let now = chrono::Utc::now().timestamp();
     let prepared = match plan {
-        Plan::NoChanges => {
-            let mut cfg = load_sync_config(app)?;
-            cfg.last_sync_at = Some(now);
-            cfg.conflict = None;
-            save_sync_config(app, &cfg)?;
-            return Ok(BackupOutcome { kind: "none".into(), size: 0, pages_changed: Some(0), backed_up_at: now });
-        }
+        Plan::NoChanges => return Ok(None),
         Plan::Upload(p) => *p,
     };
-
     let data = fs::read(&prepared.file).map_err(|e| e.to_string())?;
     let mut entry = prepared.entry.clone();
-    let uploaded = match upload_new(&token, &folder, &entry.file_name, data, "application/octet-stream").await {
+    let uploaded = match upload_new(token, folder, &entry.file_name, data, "application/octet-stream").await {
         Ok(id) => id,
         Err(e) => {
             engine::discard(prepared);
@@ -475,71 +412,107 @@ async fn backup_locked(app: &AppHandle, mode: Mode) -> Result<BackupOutcome, Str
         }
     };
     entry.drive_file_id = Some(uploaded.clone());
-
-    // Another device may have written while we uploaded: re-read just before replacing the
-    // manifest and give up (keeping the cloud as it is) if its newest backup changed.
-    let latest_remote = load_remote_manifest(&token, &folder).await?;
-    let remote_head = latest_remote.as_ref().and_then(|(_, m)| m.latest()).map(|e| e.blake3_checksum.clone());
-    if remote_head != head {
-        delete_file(&token, &uploaded).await;
-        engine::discard(prepared);
-        let c = latest_remote
-            .as_ref()
-            .and_then(|(_, m)| m.latest().map(|e| conflict_with(e, m, "cloud_newer")))
-            .unwrap_or(Conflict { reason: "cloud_newer".into(), device_os: String::new(), backed_up_at: now, size: 0 });
-        return Err(record_conflict(app, c));
-    }
-
-    // The chain's page size follows its newest full backup.
     manifest.page_size = prepared.page_size;
     manifest.backups.push(entry.clone());
     let dropped = manifest.prune(KEEP_CHAINS);
-    if let Err(e) = write_remote_manifest(&token, &folder, manifest_id.as_deref(), &manifest).await {
-        delete_file(&token, &uploaded).await;
+    let json = serde_json::to_vec_pretty(&manifest).map_err(|e| e.to_string())?;
+    let written = match &manifest_id {
+        Some(id) => update_content(token, id, json, "application/json").await,
+        None => upload_new(token, folder, &manifest_name(&me), json, "application/json").await.map(|_| ()),
+    };
+    if let Err(e) = written {
+        delete_file(token, &uploaded).await;
         engine::discard(prepared);
         return Err(e);
     }
     for old in &dropped {
         if let Some(id) = &old.drive_file_id {
-            delete_file(&token, id).await;
+            delete_file(token, id).await;
         }
     }
-
     engine::commit(prepared, &dir.join("baseline.db"))?;
-    set_baseline_head(&dir, &entry.blake3_checksum)?;
-    save_local_manifest(&dir, &manifest);
-
-    let mut cfg = load_sync_config(app)?;
-    cfg.synced_head = Some(entry.blake3_checksum.clone());
-    cfg.last_sync_at = Some(now);
-    cfg.conflict = None;
-    cfg.last_error = None;
-    save_sync_config(app, &cfg)?;
-
-    Ok(BackupOutcome {
-        kind: if entry.backup_type == BackupType::Full { "full".into() } else { "delta".into() },
-        size: entry.file_size_bytes,
-        pages_changed: entry.pages_changed,
-        backed_up_at: now,
-    })
+    fs::write(dir.join("baseline.head"), &entry.blake3_checksum).map_err(|e| e.to_string())?;
+    Ok(Some(entry))
 }
 
-async fn backup_database(app: &AppHandle, mode: Mode) -> Result<BackupOutcome, String> {
-    let _guard = SYNC_LOCK.lock().await;
-    let result = backup_locked(app, mode).await;
-    let mut cfg = load_sync_config(app)?;
-    cfg.last_attempt_at = Some(chrono::Utc::now().timestamp());
-    match &result {
-        Err(e) if !e.contains("backup_conflict") => cfg.last_error = Some(e.clone()),
-        _ => cfg.last_error = None,
+// ─── Change files ─────────────────────────────────────────────────────────
+
+struct ChangeFile {
+    file: DriveFile,
+    device: String,
+    first: u64,
+    last: u64,
+}
+
+fn change_file_name(device: &str, first: u64, last: u64) -> String {
+    format!("chg_{device}_{first:010}_{last:010}.jsonl.zst")
+}
+
+fn parse_change_name(name: &str) -> Option<(String, u64, u64)> {
+    let stem = name.strip_prefix("chg_")?.strip_suffix(".jsonl.zst")?;
+    let mut parts = stem.rsplitn(3, '_');
+    let last = parts.next()?.parse().ok()?;
+    let first = parts.next()?.parse().ok()?;
+    Some((parts.next()?.to_string(), first, last))
+}
+
+/// Writes records to `outgoing/` (uploaded next, kept until then).
+fn queue_outgoing(dir: &Path, me: &str, records: &[crate::sync::Record]) -> Result<(), String> {
+    let (Some(first), Some(last)) = (records.first(), records.last()) else {
+        return Ok(());
+    };
+    let data = crate::sync::encode(me, records)?;
+    let name = change_file_name(me, first.s, last.s);
+    let tmp = dir.join("outgoing").join(format!("{name}.tmp"));
+    fs::write(&tmp, data).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, dir.join("outgoing").join(name)).map_err(|e| e.to_string())
+}
+
+async fn upload_outgoing(dir: &Path, token: &str, folder: &str) -> Result<usize, String> {
+    let mut names: Vec<String> = fs::read_dir(dir.join("outgoing"))
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok()?.file_name().into_string().ok())
+        .filter(|n| n.starts_with("chg_") && n.ends_with(".jsonl.zst"))
+        .collect();
+    names.sort();
+    for name in &names {
+        let path = dir.join("outgoing").join(name);
+        let data = fs::read(&path).map_err(|e| e.to_string())?;
+        upload_new(token, folder, name, data, "application/zstd").await?;
+        let _ = fs::remove_file(&path);
     }
-    save_sync_config(app, &cfg)?;
-    result
+    Ok(names.len())
 }
 
-/// Puts a restored database in place of the current one (the old one is kept as `.pre_restore`).
+async fn list_changes(token: &str, folder: &str) -> Result<Vec<ChangeFile>, String> {
+    let mut out: Vec<ChangeFile> = list_in_folder(token, folder, "chg_")
+        .await?
+        .into_iter()
+        .filter_map(|file| {
+            let (device, first, last) = parse_change_name(&file.name)?;
+            Some(ChangeFile { file, device, first, last })
+        })
+        .collect();
+    out.sort_by(|a, b| (a.device.as_str(), a.first).cmp(&(b.device.as_str(), b.first)));
+    Ok(out)
+}
+
+// ─── Sync ─────────────────────────────────────────────────────────────────
+
+#[derive(Debug, Serialize, Default)]
+pub struct SyncOutcome {
+    /// Change records sent / received.
+    pub sent: usize,
+    pub received: usize,
+    /// Snapshot uploaded this time: `full`, `delta` or `none`.
+    pub snapshot: String,
+    pub snapshot_size: u64,
+    pub synced_at: i64,
+}
+
+/// Puts a database file in place of the current one (the old one is kept as `.pre_restore`).
 fn replace_database(app: &AppHandle, restored: &Path) -> Result<u64, String> {
-    let db_path = db_file_path(app)?;
+    let db_path = crate::db::db_file(app)?;
     let tmp = db_path.with_extension("db.restoring");
     fs::copy(restored, &tmp).map_err(|e| format!("Failed to write restored database: {e}"))?;
     if db_path.exists() {
@@ -551,41 +524,169 @@ fn replace_database(app: &AppHandle, restored: &Path) -> Result<u64, String> {
     Ok(fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0))
 }
 
+/// Merges the newest snapshot of another device into this database, row by row.
+async fn merge_newest_snapshot(app: &AppHandle, token: &str, folder: &str, manifests: &[(String, String, Manifest)], me: &str) -> Result<bool, String> {
+    let Some(m) = newest(manifests, Some(me)) else { return Ok(false) };
+    let out = backup_dir(app)?.join("work").join("merge.db");
+    let path = rebuild_snapshot(token, folder, m, out).await?;
+    let me = me.to_string();
+    let p = path.clone();
+    let stats = with_db(app, move |conn| {
+        let snap = Connection::open(&p).map_err(|e| e.to_string())?;
+        crate::sync::merge_snapshot(conn, &snap, &me)
+    })
+    .await?;
+    eprintln!("[sync] merged snapshot: {stats:?}");
+    let _ = fs::remove_file(&path);
+    Ok(true)
+}
+
+/// First sync of this database as this device.
+async fn join(app: &AppHandle, token: &str, folder: &str, cfg: &mut SyncConfig, manifests: &[(String, String, Manifest)]) -> Result<(), String> {
+    let me = cfg.device_id.clone();
+    let (current, has_data) = with_db(app, |c| Ok((crate::sync::device(c), crate::sync::has_user_data(c)))).await?;
+    if current.as_deref() == Some(me.as_str()) {
+        return Ok(());
+    }
+    if current.is_some() {
+        // Restored from another device's snapshot: its rows are already known everywhere.
+        let me2 = me.clone();
+        return with_db(app, move |c| crate::sync::adopt(c, &me2)).await;
+    }
+    if !has_data {
+        if let Some(m) = newest(manifests, Some(&me)) {
+            // A fresh install: start from the newest snapshot instead of an empty database.
+            let out = backup_dir(app)?.join("work").join("join.db");
+            let path = rebuild_snapshot(token, folder, m, out).await?;
+            replace_database(app, &path)?;
+            let _ = fs::remove_file(&path);
+            let me2 = me.clone();
+            return with_db(app, move |c| crate::sync::adopt(c, &me2)).await;
+        }
+    }
+    // Data of its own: send all of it, then merge what the cloud has.
+    let dir = backup_dir(app)?;
+    let (me2, seq) = (me.clone(), cfg.next_seq);
+    let next = with_db(app, move |c| {
+        let mut seq = seq;
+        let records = crate::sync::initialize(c, &me2, &mut seq)?;
+        queue_outgoing(&dir, &me2, &records)?;
+        Ok(seq)
+    })
+    .await?;
+    cfg.next_seq = next;
+    save_sync_config(app, cfg)?;
+    merge_newest_snapshot(app, token, folder, manifests, &me).await?;
+    Ok(())
+}
+
+async fn sync_locked(app: &AppHandle) -> Result<SyncOutcome, String> {
+    let token = get_access_token(app).await?;
+    let folder = ensure_folder(&token).await?;
+    let mut cfg = load_sync_config(app)?;
+    let me = cfg.device_id.clone();
+    let dir = backup_dir(app)?;
+    let manifests = load_manifests(&token, &folder).await?;
+
+    join(app, &token, &folder, &mut cfg, &manifests).await?;
+
+    // Local changes → outgoing file → Drive.
+    let (me2, seq, d2) = (me.clone(), cfg.next_seq, dir.clone());
+    let (sent, next) = with_db(app, move |c| {
+        let mut seq = seq;
+        let records = crate::sync::export(c, &me2, &mut seq)?;
+        queue_outgoing(&d2, &me2, &records)?;
+        Ok((records.len(), seq))
+    })
+    .await?;
+    cfg.next_seq = next;
+    save_sync_config(app, &cfg)?;
+    upload_outgoing(&dir, &token, &folder).await?;
+
+    // Other devices' changes (and this device's own, after a restore).
+    let mut received = 0;
+    let changes = list_changes(&token, &folder).await?;
+    let mut cursors = with_db(app, |c| crate::sync::cursors(c)).await?;
+    let mut merged = false;
+    let mut by_device: HashMap<&str, Vec<&ChangeFile>> = HashMap::new();
+    for f in &changes {
+        by_device.entry(f.device.as_str()).or_default().push(f);
+    }
+    for (dev, files) in by_device {
+        let cur = cursors.get(dev).copied().unwrap_or(0);
+        let gap = files.iter().find(|f| f.last > cur).is_some_and(|f| f.first > cur + 1);
+        if gap && !merged && dev != me {
+            // Older changes were already removed from Drive: catch up from a snapshot first.
+            merged = merge_newest_snapshot(app, &token, &folder, &manifests, &me).await?;
+            cursors = with_db(app, |c| crate::sync::cursors(c)).await?;
+        }
+        let cur = cursors.get(dev).copied().unwrap_or(0);
+        for f in files.iter().filter(|f| f.last > cur) {
+            let data = download(&token, &f.file.id).await?;
+            let (_, records) = crate::sync::decode(&data)?;
+            let dev = dev.to_string();
+            let stats = with_db(app, move |c| crate::sync::apply(c, &dev, &records)).await?;
+            received += stats.applied;
+        }
+    }
+
+    // Snapshot after merging, then tidy up this device's old files.
+    let snapshot = snapshot_upload(app, &token, &folder, &cfg, &manifests).await?;
+    let snapshot_time = snapshot
+        .as_ref()
+        .map(|e| e.timestamp.timestamp())
+        .or_else(|| manifests.iter().find(|(d, _, _)| *d == me).and_then(|(_, _, m)| m.latest()).map(|e| e.timestamp.timestamp()));
+    if let Some(t) = snapshot_time {
+        let cutoff = t.min(chrono::Utc::now().timestamp()) - KEEP_CHANGES_DAYS * 86400;
+        for f in changes.iter().filter(|f| f.device == me && f.file.modified() < cutoff) {
+            delete_file(&token, &f.file.id).await;
+        }
+    }
+
+    let now = chrono::Utc::now().timestamp();
+    let mut cfg = load_sync_config(app)?;
+    cfg.last_sync_at = Some(now);
+    save_sync_config(app, &cfg)?;
+    Ok(SyncOutcome {
+        sent,
+        received,
+        snapshot: snapshot.as_ref().map_or("none".into(), |e| if e.backup_type == BackupType::Full { "full".into() } else { "delta".into() }),
+        snapshot_size: snapshot.as_ref().map_or(0, |e| e.file_size_bytes),
+        synced_at: now,
+    })
+}
+
+async fn sync_now(app: &AppHandle) -> Result<SyncOutcome, String> {
+    let _guard = SYNC_LOCK.lock().await;
+    let result = sync_locked(app).await;
+    let mut cfg = load_sync_config(app)?;
+    cfg.last_attempt_at = Some(chrono::Utc::now().timestamp());
+    cfg.last_error = result.as_ref().err().cloned();
+    save_sync_config(app, &cfg)?;
+    result
+}
+
+/// Replaces this device's data with the newest snapshot (any device), keeping nothing local
+/// that wasn't synced: local changes are sent first and come back with the other changes.
 async fn restore_locked(app: &AppHandle) -> Result<u64, String> {
     let token = get_access_token(app).await?;
     let dir = backup_dir(app)?;
     let work = dir.join("work");
     fs::create_dir_all(&work).map_err(|e| e.to_string())?;
-    let restored = work.join("restored.db");
+    let me = load_sync_config(app)?.device_id;
 
-    let folder = find_folder(&token).await?;
-    let remote = match &folder {
-        Some(f) => load_remote_manifest(&token, f).await?,
-        None => None,
-    };
-
-    if let (Some(folder), Some((_, manifest))) = (&folder, &remote) {
-        if let Some(chain) = manifest.restore_chain() {
-            let mut files = Vec::with_capacity(chain.len());
-            for entry in chain {
-                files.push((entry.clone(), download_entry(&token, folder, entry).await?));
-            }
-            let out = restored.clone();
-            tokio::task::spawn_blocking(move || engine::restore_chain(&files, &out))
-                .await
-                .map_err(|e| e.to_string())??;
-            let size = replace_database(app, &restored)?;
-
-            let head = chain.last().expect("non-empty chain").blake3_checksum.clone();
-            fs::rename(&restored, dir.join("baseline.db")).map_err(|e| e.to_string())?;
-            set_baseline_head(&dir, &head)?;
-            save_local_manifest(&dir, manifest);
-            let mut cfg = load_sync_config(app)?;
-            cfg.synced_head = Some(head);
-            cfg.conflict = None;
-            cfg.last_error = None;
-            cfg.last_sync_at = Some(chrono::Utc::now().timestamp());
-            save_sync_config(app, &cfg)?;
+    if let Some(folder) = find_folder(&token).await? {
+        let manifests = load_manifests(&token, &folder).await?;
+        if let Some(m) = newest(&manifests, None) {
+            // Send unsynced local changes first, so nothing is lost.
+            let _ = sync_locked(app).await;
+            let path = rebuild_snapshot(&token, &folder, m, work.join("restored.db")).await?;
+            let size = replace_database(app, &path)?;
+            let _ = fs::remove_file(&path);
+            let me2 = me.clone();
+            with_db(app, move |c| crate::sync::adopt(c, &me2)).await?;
+            // Changes made after that snapshot (this device's included).
+            let _ = sync_locked(app).await;
             return Ok(size);
         }
     }
@@ -596,10 +697,10 @@ async fn restore_locked(app: &AppHandle) -> Result<u64, String> {
     if data.is_empty() {
         return Err("Downloaded backup file is empty".into());
     }
+    let restored = work.join("restored.db");
     fs::write(&restored, &data).map_err(|e| e.to_string())?;
     let size = replace_database(app, &restored)?;
     let _ = fs::remove_file(&restored);
-    clear_baseline(&dir);
     save_legacy_metadata(
         app,
         &BackupMetadata {
@@ -609,11 +710,6 @@ async fn restore_locked(app: &AppHandle) -> Result<u64, String> {
             backed_up_at: chrono::Utc::now().timestamp(),
         },
     )?;
-    let mut cfg = load_sync_config(app)?;
-    cfg.synced_head = None;
-    cfg.conflict = None;
-    cfg.last_error = None;
-    save_sync_config(app, &cfg)?;
     Ok(size)
 }
 
@@ -622,75 +718,61 @@ pub async fn restore_database(app: &AppHandle) -> Result<u64, String> {
     restore_locked(app).await
 }
 
-/// Backup status for Settings: newest backup in the cloud, conflict, last error.
+/// Status for Settings: newest snapshot, devices that sync, last error.
 pub async fn get_backup_status(app: &AppHandle) -> Result<serde_json::Value, String> {
     let cfg = load_sync_config(app)?;
     if !crate::google_auth::get_auth_status(app)? {
         return Ok(serde_json::json!({ "signed_in": false, "has_backup": false, "last_backup": null, "backup_size": null }));
     }
-    let base = serde_json::json!({
-        "signed_in": true,
-        "conflict": cfg.conflict,
-        "last_error": cfg.last_error,
-    });
-    let with = |mut v: serde_json::Value, extra: serde_json::Value| {
-        if let (Some(o), Some(e)) = (v.as_object_mut(), extra.as_object()) {
-            o.extend(e.clone());
-        }
-        v
-    };
-
     let remote = async {
         let token = get_access_token(app).await?;
-        let manifest = match find_folder(&token).await? {
-            Some(f) => load_remote_manifest(&token, &f).await?.map(|(_, m)| m),
-            None => None,
+        let Some(folder) = find_folder(&token).await? else {
+            return Ok::<_, String>((Vec::new(), find_legacy(&token).await?));
         };
-        let legacy = if manifest.as_ref().is_none_or(|m| m.is_empty()) { find_legacy(&token).await? } else { None };
-        Ok::<_, String>((manifest, legacy))
+        let manifests = load_manifests(&token, &folder).await?;
+        let legacy = if manifests.is_empty() { find_legacy(&token).await? } else { None };
+        Ok((manifests, legacy))
     }
     .await;
-
-    // Offline: fall back to what this device last saw.
-    let (manifest, legacy) = match remote {
+    let (manifests, legacy) = match remote {
         Ok(r) => r,
-        Err(_) => {
-            let local = fs::read(backup_dir(app)?.join(MANIFEST_NAME)).ok().and_then(|d| serde_json::from_slice::<Manifest>(&d).ok());
-            (local, None)
+        Err(e) => {
+            return Ok(serde_json::json!({
+                "signed_in": true, "has_backup": false, "last_backup": null, "backup_size": null,
+                "offline": true, "last_error": cfg.last_error, "detail": e,
+            }))
         }
     };
-
-    if let Some(m) = manifest.filter(|m| !m.is_empty()) {
-        let head = m.latest().expect("non-empty");
-        let chain = m.restore_chain().unwrap_or(&[]);
-        return Ok(with(
-            base,
-            serde_json::json!({
-                "has_backup": true,
-                "last_backup": head.timestamp.timestamp(),
-                "backup_size": chain.iter().map(|e| e.file_size_bytes).sum::<u64>(),
-                "last_kind": if head.backup_type == BackupType::Full { "full" } else { "delta" },
-                "last_device_os": head.device_os,
-                "last_from_this_device": head.device_id == cfg.device_id,
-                "chain_length": chain.len(),
-            }),
-        ));
+    let devices: Vec<serde_json::Value> = manifests
+        .iter()
+        .filter_map(|(d, _, m)| {
+            let head = m.latest()?;
+            Some(serde_json::json!({ "os": head.device_os, "last_backup": head.timestamp.timestamp(), "this_device": *d == cfg.device_id }))
+        })
+        .collect();
+    if let Some(m) = newest(&manifests, None) {
+        let head = m.latest().expect("has a backup");
+        return Ok(serde_json::json!({
+            "signed_in": true,
+            "has_backup": true,
+            "last_backup": head.timestamp.timestamp(),
+            "backup_size": m.restore_chain().map_or(0, |c| c.iter().map(|e| e.file_size_bytes).sum::<u64>()),
+            "last_device_os": head.device_os,
+            "last_from_this_device": head.device_id == cfg.device_id,
+            "devices": devices,
+            "last_error": cfg.last_error,
+        }));
     }
     if let Some(f) = legacy {
-        return Ok(with(
-            base,
-            serde_json::json!({
-                "has_backup": true,
-                "last_backup": chrono::DateTime::parse_from_rfc3339(&f.modified_time).map_or(0, |t| t.timestamp()),
-                "backup_size": f.size,
-                "last_kind": "legacy",
-            }),
-        ));
+        return Ok(serde_json::json!({
+            "signed_in": true, "has_backup": true, "last_backup": f.modified(), "backup_size": f.size,
+            "last_kind": "legacy", "devices": devices, "last_error": cfg.last_error,
+        }));
     }
-    Ok(with(base, serde_json::json!({ "has_backup": false, "last_backup": null, "backup_size": null })))
+    Ok(serde_json::json!({ "signed_in": true, "has_backup": false, "last_backup": null, "backup_size": null, "devices": devices, "last_error": cfg.last_error }))
 }
 
-// ─── Automatic backup ─────────────────────────────────────────────────────
+// ─── Automatic sync ───────────────────────────────────────────────────────
 
 /// Network state: (connected, unmetered). Desktop connections count as unmetered.
 async fn network_state(app: &AppHandle) -> (bool, bool) {
@@ -725,7 +807,22 @@ pub fn update_sync_config(app: &AppHandle, enabled: Option<bool>, interval_minut
     Ok(config)
 }
 
-/// Called every minute by the background service: backs up when due, allowed and safe.
+fn sync_result(r: Result<SyncOutcome, String>) -> serde_json::Value {
+    match r {
+        Ok(o) => serde_json::json!({
+            "synced": true,
+            "reason": "synced",
+            "sent": o.sent,
+            "received": o.received,
+            "snapshot": o.snapshot,
+            "size": o.snapshot_size,
+            "synced_at": o.synced_at,
+        }),
+        Err(e) => serde_json::json!({ "synced": false, "reason": "error", "error": e }),
+    }
+}
+
+/// Called every minute by the background service: syncs when due and allowed.
 pub async fn trigger_auto_sync(app: &AppHandle) -> Result<serde_json::Value, String> {
     let config = load_sync_config(app)?;
     let skip = |reason: &str| Ok(serde_json::json!({ "synced": false, "reason": reason }));
@@ -734,9 +831,6 @@ pub async fn trigger_auto_sync(app: &AppHandle) -> Result<serde_json::Value, Str
     }
     if !crate::google_auth::get_auth_status(app)? {
         return skip("not_signed_in");
-    }
-    if config.conflict.is_some() {
-        return skip("conflict");
     }
     let now = chrono::Utc::now().timestamp();
     let interval = config.interval_minutes as i64 * 60;
@@ -755,25 +849,11 @@ pub async fn trigger_auto_sync(app: &AppHandle) -> Result<serde_json::Value, Str
     if config.wifi_only && !unmetered {
         return skip("waiting_for_wifi");
     }
-    Ok(sync_result(backup_database(app, Mode::Normal).await))
+    Ok(sync_result(sync_now(app).await))
 }
 
-fn sync_result(r: Result<BackupOutcome, String>) -> serde_json::Value {
-    match r {
-        Ok(o) => serde_json::json!({
-            "synced": o.kind != "none",
-            "reason": if o.kind == "none" { "no_changes" } else { "backup_completed" },
-            "kind": o.kind,
-            "size": o.size,
-            "backed_up_at": o.backed_up_at,
-        }),
-        Err(e) if e.contains("backup_conflict") => serde_json::json!({ "synced": false, "reason": "conflict" }),
-        Err(e) => serde_json::json!({ "synced": false, "reason": "error", "error": e }),
-    }
-}
-
-/// Starts the background backup service when automatic backup is on (at app launch on every
-/// platform, and when the user turns it on), or stops it.
+/// Starts the background sync service when automatic sync is on (at app launch, sign-in and when
+/// the user turns it on), or stops it.
 pub fn apply_auto_sync_service(app: &AppHandle) {
     use tauri_plugin_background_service::{ServiceError, ServiceManagerHandle, StartConfig};
     let app = app.clone();
@@ -790,7 +870,7 @@ pub fn apply_auto_sync_service(app: &AppHandle) {
             };
             match manager.start(app.clone(), config).await {
                 Ok(()) | Err(ServiceError::AlreadyRunning) => {}
-                Err(e) => eprintln!("[google_drive] couldn't start auto-backup service: {e}"),
+                Err(e) => eprintln!("[google_drive] couldn't start auto-sync service: {e}"),
             }
         } else if manager.is_running().await {
             let _ = manager.stop().await;
@@ -800,17 +880,11 @@ pub fn apply_auto_sync_service(app: &AppHandle) {
 
 // ─── Tauri Commands ───────────────────────────────────────────────────────
 
+/// "Sync now": send and receive changes, then snapshot.
 #[tauri::command]
 pub async fn google_backup_db(app: AppHandle) -> Result<serde_json::Value, String> {
-    let o = backup_database(&app, Mode::Normal).await?;
-    Ok(serde_json::json!({ "success": true, "kind": o.kind, "backed_up_at": o.backed_up_at, "size": o.size }))
-}
-
-/// Conflict resolved by keeping this device's data: back up over the cloud copy.
-#[tauri::command]
-pub async fn google_backup_overwrite(app: AppHandle) -> Result<serde_json::Value, String> {
-    let o = backup_database(&app, Mode::Overwrite).await?;
-    Ok(serde_json::json!({ "success": true, "kind": o.kind, "backed_up_at": o.backed_up_at, "size": o.size }))
+    let o = sync_now(&app).await?;
+    Ok(serde_json::json!({ "success": true, "sent": o.sent, "received": o.received, "snapshot": o.snapshot, "size": o.snapshot_size, "synced_at": o.synced_at }))
 }
 
 #[tauri::command]
@@ -830,7 +904,6 @@ fn sync_config_json(config: &SyncConfig) -> serde_json::Value {
         "interval_minutes": config.interval_minutes,
         "wifi_only": config.wifi_only,
         "last_sync_at": config.last_sync_at,
-        "conflict": config.conflict,
         "last_error": config.last_error,
         // Only Android can tell Wi-Fi from mobile data.
         "wifi_only_supported": cfg!(target_os = "android"),
@@ -849,41 +922,21 @@ pub fn google_get_auto_sync(app: AppHandle) -> Result<serde_json::Value, String>
     Ok(sync_config_json(&load_sync_config(&app)?))
 }
 
-/// "Sync now": backs up right away, whatever the schedule or network.
+/// "Sync now" from the automatic sync card: right away, whatever the schedule or network.
 #[tauri::command]
 pub async fn google_trigger_sync(app: AppHandle) -> Result<serde_json::Value, String> {
-    Ok(sync_result(backup_database(&app, Mode::Normal).await))
+    Ok(sync_result(sync_now(&app).await))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn entry(sum: &str) -> BackupEntry {
-        BackupEntry {
-            id: 1,
-            backup_type: BackupType::Full,
-            timestamp: chrono::Utc::now(),
-            file_name: "f".into(),
-            file_size_bytes: 10,
-            blake3_checksum: sum.into(),
-            pages_changed: None,
-            parent_id: None,
-            page_count: 1,
-            device_id: "other".into(),
-            device_os: "android".into(),
-            drive_file_id: None,
-        }
-    }
-
     #[test]
-    fn conflicts() {
-        let mut m = Manifest::new(4096);
-        assert_eq!(detect_conflict(None, &m), None, "empty cloud");
-        m.backups.push(entry("abc"));
-        assert_eq!(detect_conflict(Some("abc"), &m), None, "cloud is what we last synced");
-        assert_eq!(detect_conflict(Some("old"), &m).unwrap().reason, "cloud_newer");
-        let c = detect_conflict(None, &m).unwrap();
-        assert_eq!((c.reason.as_str(), c.device_os.as_str(), c.size), ("never_synced", "android", 10));
+    fn change_file_names_round_trip() {
+        let dev = "3f2a-41c9-b0d1";
+        let name = change_file_name(dev, 12, 340);
+        assert_eq!(parse_change_name(&name), Some((dev.to_string(), 12, 340)));
+        assert_eq!(parse_change_name("manifest_x.json"), None);
     }
 }

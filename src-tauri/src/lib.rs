@@ -3,6 +3,7 @@ use tauri::{Emitter, Manager};
 
 mod google_auth;
 mod backup;
+mod sync;
 mod google_drive;
 mod background_sync;
 mod furigana;
@@ -289,7 +290,6 @@ pub fn run() {
             google_auth::google_get_auth_status,
             // Google Drive
             google_drive::google_backup_db,
-            google_drive::google_backup_overwrite,
             google_drive::google_restore_db,
             google_drive::google_get_backup_status,
             google_drive::google_set_auto_sync,

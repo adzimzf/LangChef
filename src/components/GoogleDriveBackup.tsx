@@ -13,21 +13,14 @@ import {
   InfoCircleOutlined,
   CloseOutlined,
   ThunderboltOutlined,
-  WarningOutlined,
+  LaptopOutlined,
 } from '@ant-design/icons'
-import { t, errorWithDetail, formatAgo, formatDate, formatNumber, parseError } from '../lib/i18n'
+import { t, errorWithDetail, formatAgo, formatDate, formatNumber } from '../lib/i18n'
 import { useBackHandler } from '../lib/backNav'
 
 type AuthStatus = {
   signed_in: boolean
   email?: string
-}
-
-type Conflict = {
-  reason: 'cloud_newer' | 'never_synced'
-  device_os: string
-  backed_up_at: number
-  size: number
 }
 
 type BackupStatus = {
@@ -38,7 +31,7 @@ type BackupStatus = {
   last_kind?: 'full' | 'delta' | 'legacy'
   last_device_os?: string
   last_from_this_device?: boolean
-  conflict?: Conflict | null
+  devices?: SyncDevice[]
   last_error?: string | null
 }
 
@@ -47,12 +40,13 @@ type SyncConfig = {
   interval_minutes: number
   wifi_only: boolean
   last_sync_at: number | null
-  conflict?: Conflict | null
   last_error?: string | null
   wifi_only_supported?: boolean
 }
 
-type BackupResult = { success: boolean; kind: 'full' | 'delta' | 'none'; backed_up_at: number; size: number }
+type SyncDevice = { os: string; last_backup: number; this_device: boolean }
+
+type SyncResult = { sent: number; received: number; snapshot: 'full' | 'delta' | 'none'; size: number }
 
 const RECOVERY = { serviceLabel: 'LangChef auto-backup' }
 
@@ -91,8 +85,6 @@ export default function GoogleDriveBackup() {
   const [backupAction, setBackupAction] = useState<'idle' | 'backing_up' | 'restoring'>('idle')
   const [showRestoreConfirm, setShowRestoreConfirm] = useState(false)
   useBackHandler(showRestoreConfirm, () => setShowRestoreConfirm(false))
-  const [showOverwriteConfirm, setShowOverwriteConfirm] = useState(false)
-  useBackHandler(showOverwriteConfirm, () => setShowOverwriteConfirm(false))
 
   // Auto-sync state
   const [syncConfig, setSyncConfig] = useState<SyncConfig>({
@@ -189,32 +181,23 @@ export default function GoogleDriveBackup() {
 
   // ─── Backup & Restore ──────────────────────────────────────────────
 
-  function backupResultText(result: BackupResult): string {
-    if (result.kind === 'none') return t('backup.upToDate')
-    const size = formatFileSize(result.size)
-    return result.kind === 'delta' ? t('backup.backedUpChanges', { size }) : t('backup.backedUp', { size })
+  function syncResultText(result: SyncResult): string {
+    if (!result.sent && !result.received) return t('backup.upToDate')
+    return t('backup.synced', { sent: formatNumber(result.sent), received: formatNumber(result.received) })
   }
 
-  async function runBackup(command: 'google_backup_db' | 'google_backup_overwrite') {
-    setShowOverwriteConfirm(false)
+  async function handleBackup() {
     setBackupAction('backing_up')
     try {
-      const result = await invoke<BackupResult>(command)
-      showToast(backupResultText(result), 'success')
+      showToast(syncResultText(await invoke<SyncResult>('google_backup_db')), 'success')
     } catch (e) {
-      if (parseError(e).code === 'backup_conflict') {
-        showToast(t('backup.conflictFound'), 'info')
-      } else {
-        showToast(t('backup.backupFailed', { error: errorWithDetail(e) }), 'error')
-      }
+      showToast(t('backup.backupFailed', { error: errorWithDetail(e) }), 'error')
     } finally {
       setBackupAction('idle')
       loadBackupStatus()
       loadSyncConfig()
     }
   }
-
-  const handleBackup = () => runBackup('google_backup_db')
 
   async function handleRestore() {
     setShowRestoreConfirm(false)
@@ -289,19 +272,15 @@ export default function GoogleDriveBackup() {
     setBackupAction('backing_up')
     setSyncError('')
     try {
-      const result = await invoke<{
+      const result = await invoke<SyncResult & {
         synced: boolean
         reason: string
         error?: string
       }>('google_trigger_sync')
       if (result.synced) {
-        showToast(t('backup.syncDone'), 'success')
+        showToast(syncResultText(result), 'success')
       } else {
-        if (result.reason === 'no_changes') {
-          showToast(t('backup.upToDate'), 'success')
-        } else if (result.reason === 'conflict') {
-          showToast(t('backup.conflictFound'), 'info')
-        } else if (result.error) {
+        if (result.error) {
           const msg = t('backup.syncError', { error: errorWithDetail(result.error) })
           setSyncError(msg)
           showToast(msg, 'error')
@@ -322,7 +301,6 @@ export default function GoogleDriveBackup() {
 
   // ─── Helpers ────────────────────────────────────────────────────────
 
-  const conflict = backupStatus?.conflict ?? syncConfig.conflict ?? null
 
   function formatTimestamp(ts: number | null): string {
     if (!ts) return t('backup.never')
@@ -451,37 +429,18 @@ export default function GoogleDriveBackup() {
               </div>
             )}
 
-            {/* Conflict: the cloud has a backup this device didn't make or restore */}
-            {conflict && (
-              <div className="mb-3 rounded-xl border border-amber-200 bg-amber-50 p-3">
-                <p className="flex items-center gap-2 text-sm font-semibold text-amber-800">
-                  <WarningOutlined /> {t('backup.conflictTitle')}
+            {/* Devices that sync through this Google account */}
+            {backupStatus?.devices && backupStatus.devices.length > 1 && (
+              <div className="mb-3 rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500">
+                <p className="mb-1 flex items-center gap-1.5 font-medium text-gray-600">
+                  <LaptopOutlined /> {t('backup.devicesTitle', { count: backupStatus.devices.length })}
                 </p>
-                <p className="mt-1 text-xs leading-relaxed text-amber-800">
-                  {conflict.reason === 'cloud_newer'
-                    ? t('backup.conflictCloudNewer', {
-                        device: deviceName(conflict.device_os),
-                        when: formatTimestamp(conflict.backed_up_at),
-                      })
-                    : t('backup.conflictNeverSynced', { when: formatTimestamp(conflict.backed_up_at) })}
-                </p>
-                <p className="mt-1 text-xs leading-relaxed text-amber-700">{t('backup.conflictPaused')}</p>
-                <div className="mt-3 flex flex-col gap-2 sm:flex-row">
-                  <button
-                    onClick={() => setShowRestoreConfirm(true)}
-                    disabled={backupAction !== 'idle'}
-                    className="flex-1 rounded-lg bg-white py-2 text-sm font-medium text-amber-800 shadow-sm disabled:opacity-50"
-                  >
-                    <CloudDownloadOutlined /> {t('backup.conflictUseCloud')}
-                  </button>
-                  <button
-                    onClick={() => setShowOverwriteConfirm(true)}
-                    disabled={backupAction !== 'idle'}
-                    className="flex-1 rounded-lg bg-white py-2 text-sm font-medium text-amber-800 shadow-sm disabled:opacity-50"
-                  >
-                    <CloudUploadOutlined /> {t('backup.conflictKeepDevice')}
-                  </button>
-                </div>
+                {backupStatus.devices.map((d, i) => (
+                  <p key={i}>
+                    {d.this_device ? t('backup.thisDevice') : deviceName(d.os)} ·{' '}
+                    {t('backup.lastBackup', { when: formatTimestamp(d.last_backup) })}
+                  </p>
+                ))}
               </div>
             )}
 
@@ -546,29 +505,6 @@ export default function GoogleDriveBackup() {
                       className="flex-1 py-2.5 rounded-xl bg-orange-500 text-white font-medium text-sm hover:bg-orange-600 transition-colors"
                     >
                       {t('backup.restoreConfirm')}
-                    </button>
-                  </div>
-                </div>
-              </div>
-            )}
-            {/* Keep this device's data confirmation */}
-            {showOverwriteConfirm && (
-              <div className="anim-backdrop fixed inset-0 z-[100] flex items-end sm:items-center justify-center bg-black/40 p-4">
-                <div className="bg-white rounded-2xl p-5 w-full max-w-sm shadow-xl anim-sheet">
-                  <h4 className="text-base font-semibold mb-2">{t('backup.overwriteTitle')}</h4>
-                  <p className="text-sm text-gray-500 leading-relaxed mb-4">{t('backup.overwriteBody')}</p>
-                  <div className="flex gap-2">
-                    <button
-                      onClick={() => setShowOverwriteConfirm(false)}
-                      className="flex-1 py-2.5 rounded-xl bg-gray-100 text-gray-700 font-medium text-sm hover:bg-gray-200 transition-colors"
-                    >
-                      {t('common.cancel')}
-                    </button>
-                    <button
-                      onClick={() => runBackup('google_backup_overwrite')}
-                      className="flex-1 py-2.5 rounded-xl bg-orange-500 text-white font-medium text-sm hover:bg-orange-600 transition-colors"
-                    >
-                      {t('backup.overwriteConfirm')}
                     </button>
                   </div>
                 </div>
