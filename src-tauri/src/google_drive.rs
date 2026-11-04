@@ -24,7 +24,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use tauri::{AppHandle, Manager};
+use std::sync::atomic::{AtomicBool, Ordering};
+use tauri::{AppHandle, Emitter, Manager};
 
 const DRIVE_UPLOAD_URL: &str = "https://www.googleapis.com/upload/drive/v3/files";
 const DRIVE_FILES_URL: &str = "https://www.googleapis.com/drive/v3/files";
@@ -37,9 +38,16 @@ const KEEP_CHAINS: usize = 2;
 const KEEP_CHANGES_DAYS: i64 = 60;
 /// After a failed automatic sync, wait at least this long before trying again.
 const RETRY_AFTER_SECS: i64 = 15 * 60;
-pub const SERVICE_LABEL: &str = "LangChef auto-backup";
+/// Shortest automatic sync interval the user can pick.
+pub const MIN_INTERVAL_MINUTES: u64 = 5;
+/// How often the foreground timer asks whether a sync is due.
+const TICK_SECS: u64 = 60;
+/// Opening (or returning to) the app syncs right away, unless the last sync is this recent.
+const OPEN_GRACE_SECS: i64 = 2 * 60;
+/// Event telling the UI an automatic sync started (`{"state":"syncing"}`) or ended (sync result).
+pub const AUTO_SYNC_EVENT: &str = "auto-sync";
 
-/// One sync at a time (background service, "Sync now" and restore share the files).
+/// One sync at a time (automatic sync, "Sync now" and restore share the files).
 static SYNC_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 // ─── Settings and local files ─────────────────────────────────────────────
@@ -798,7 +806,7 @@ pub fn update_sync_config(app: &AppHandle, enabled: Option<bool>, interval_minut
         config.enabled = e;
     }
     if let Some(i) = interval_minutes {
-        config.interval_minutes = i.max(5);
+        config.interval_minutes = i.max(MIN_INTERVAL_MINUTES);
     }
     if let Some(w) = wifi_only {
         config.wifi_only = w;
@@ -822,25 +830,41 @@ fn sync_result(r: Result<SyncOutcome, String>) -> serde_json::Value {
     }
 }
 
-/// Called every minute by the background service: syncs when due and allowed.
-pub async fn trigger_auto_sync(app: &AppHandle) -> Result<serde_json::Value, String> {
+/// Automatic sync only runs while the app is in use: on Android between `onResume` and
+/// `onPause`, on desktop while the app is open.
+static FOREGROUND: AtomicBool = AtomicBool::new(true);
+
+/// Syncs when allowed and due. `opened`: the app was just opened or brought back, which syncs
+/// right away (downloading the other devices' changes) instead of waiting for the interval.
+pub async fn trigger_auto_sync(app: &AppHandle, opened: bool) -> Result<serde_json::Value, String> {
     let config = load_sync_config(app)?;
     let skip = |reason: &str| Ok(serde_json::json!({ "synced": false, "reason": reason }));
     if !config.enabled {
         return skip("auto_sync_disabled");
     }
+    if !FOREGROUND.load(Ordering::Relaxed) {
+        return skip("in_background");
+    }
     if !crate::google_auth::get_auth_status(app)? {
         return skip("not_signed_in");
     }
     let now = chrono::Utc::now().timestamp();
-    let interval = config.interval_minutes as i64 * 60;
-    if let Some(last) = config.last_sync_at {
-        if now - last < interval {
-            return Ok(serde_json::json!({ "synced": false, "reason": "not_due_yet", "next_sync_in_seconds": interval - (now - last) }));
+    let since_last = config.last_sync_at.map(|last| now - last);
+    if opened {
+        if since_last.is_some_and(|d| d < OPEN_GRACE_SECS) {
+            return skip("recently_synced");
+        }
+    } else {
+        let interval = config.interval_minutes.max(MIN_INTERVAL_MINUTES) as i64 * 60;
+        if let Some(d) = since_last.filter(|d| *d < interval) {
+            return Ok(serde_json::json!({ "synced": false, "reason": "not_due_yet", "next_sync_in_seconds": interval - d }));
+        }
+        if config.last_error.is_some() && config.last_attempt_at.is_some_and(|t| now - t < RETRY_AFTER_SECS.min(interval)) {
+            return skip("backing_off");
         }
     }
-    if config.last_error.is_some() && config.last_attempt_at.is_some_and(|t| now - t < RETRY_AFTER_SECS.min(interval)) {
-        return skip("backing_off");
+    if SYNC_LOCK.try_lock().is_err() {
+        return skip("busy");
     }
     let (connected, unmetered) = network_state(app).await;
     if !connected {
@@ -849,33 +873,53 @@ pub async fn trigger_auto_sync(app: &AppHandle) -> Result<serde_json::Value, Str
     if config.wifi_only && !unmetered {
         return skip("waiting_for_wifi");
     }
-    Ok(sync_result(sync_now(app).await))
+    let _ = app.emit(AUTO_SYNC_EVENT, serde_json::json!({ "state": "syncing" }));
+    let mut result = sync_result(sync_now(app).await);
+    result["state"] = serde_json::json!(if result["synced"] == true { "done" } else { "error" });
+    let _ = app.emit(AUTO_SYNC_EVENT, &result);
+    Ok(result)
 }
 
-/// Starts the background sync service when automatic sync is on (at app launch, sign-in and when
-/// the user turns it on), or stops it.
-pub fn apply_auto_sync_service(app: &AppHandle) {
-    use tauri_plugin_background_service::{ServiceError, ServiceManagerHandle, StartConfig};
+fn spawn_auto_sync(app: &AppHandle, opened: bool) {
     let app = app.clone();
     tauri::async_runtime::spawn(async move {
-        let enabled = load_sync_config(&app).map(|c| c.enabled).unwrap_or(false)
-            && crate::google_auth::get_auth_status(&app).unwrap_or(false);
-        let Some(manager) = app.try_state::<ServiceManagerHandle<tauri::Wry>>() else {
-            return;
-        };
-        if enabled {
-            let config = StartConfig {
-                service_label: SERVICE_LABEL.to_string(),
-                foreground_service_type: "dataSync".to_string(),
-            };
-            match manager.start(app.clone(), config).await {
-                Ok(()) | Err(ServiceError::AlreadyRunning) => {}
-                Err(e) => eprintln!("[google_drive] couldn't start auto-sync service: {e}"),
-            }
-        } else if manager.is_running().await {
-            let _ = manager.stop().await;
+        if let Err(e) = trigger_auto_sync(&app, opened).await {
+            eprintln!("[auto_sync] {e}");
         }
     });
+}
+
+/// Started once at launch: syncs shortly after the app opens (once the UI can show it), then
+/// checks every minute whether a sync is due. Does nothing while the app is in the background.
+pub fn start_auto_sync(app: &AppHandle) {
+    let app = app.clone();
+    tauri::async_runtime::spawn(async move {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        let _ = trigger_auto_sync(&app, true).await;
+        let mut tick = tokio::time::interval(std::time::Duration::from_secs(TICK_SECS));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        tick.tick().await;
+        loop {
+            tick.tick().await;
+            if FOREGROUND.load(Ordering::Relaxed) {
+                let _ = trigger_auto_sync(&app, false).await;
+            }
+        }
+    });
+}
+
+/// The app went to the background (`false`) or came back (`true`, which syncs right away).
+#[cfg(mobile)]
+pub fn set_foreground(app: &AppHandle, active: bool) {
+    let was = FOREGROUND.swap(active, Ordering::Relaxed);
+    if active && !was {
+        spawn_auto_sync(app, true);
+    }
+}
+
+/// Signing in or turning automatic sync on syncs right away.
+pub fn auto_sync_now(app: &AppHandle) {
+    spawn_auto_sync(app, true);
 }
 
 // ─── Tauri Commands ───────────────────────────────────────────────────────
@@ -912,8 +956,11 @@ fn sync_config_json(config: &SyncConfig) -> serde_json::Value {
 
 #[tauri::command]
 pub fn google_set_auto_sync(app: AppHandle, enabled: bool, interval_minutes: u64, wifi_only: bool) -> Result<serde_json::Value, String> {
+    let was_enabled = load_sync_config(&app)?.enabled;
     let config = update_sync_config(&app, Some(enabled), Some(interval_minutes), Some(wifi_only))?;
-    apply_auto_sync_service(&app);
+    if enabled && !was_enabled {
+        auto_sync_now(&app);
+    }
     Ok(sync_config_json(&config))
 }
 

@@ -5,8 +5,6 @@
   "windows": ["main"],
   "permissions": [
     "core:default",
-    "notification:default",
-    "background-service:default",
-    "background-service:allow-configure-recovery"
+    "notification:default"
   ]
 }

@@ -109,4 +109,6 @@ including this device's own.
   earlier review is kept in the history but doesn't change the schedule.
 - A change written in the moment between a device's export and its snapshot may have its counter
   part counted twice by a device that later joins from that snapshot.
-- Changes are exchanged only during a sync (automatic interval or "Sync now"), not live.
+- Changes are exchanged only during a sync, not live. Automatic sync runs only while the app is
+  open: right after opening it (or returning to it on Android), then on the chosen interval
+  (5 minutes at least). Nothing syncs while the app is closed or in the background.

@@ -5,7 +5,6 @@ mod google_auth;
 mod backup;
 mod sync;
 mod google_drive;
-mod background_sync;
 mod furigana;
 mod db;
 mod chat;
@@ -119,10 +118,7 @@ fn get_lindera_dict_status(app: tauri::AppHandle) -> bool {
 pub fn run() {
     #[allow(unused_mut)]
     let mut app = tauri::Builder::default()
-        .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_background_service::init_with_service(
-            || background_sync::AutoSyncService::new(),
-        ));
+        .plugin(tauri_plugin_notification::init());
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
     {
@@ -155,8 +151,8 @@ pub fn run() {
             }
             app.manage(Mutex::new(initial));
             app.manage(tts::TtsState::default());
-            // Automatic Google Drive backup runs from app launch, not only once Settings is opened.
-            google_drive::apply_auto_sync_service(app.handle());
+            // Automatic Google Drive sync: right after launch, then on its interval while the app is open.
+            google_drive::start_auto_sync(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -296,6 +292,17 @@ pub fn run() {
             google_drive::google_get_auto_sync,
             google_drive::google_trigger_sync,
         ])
+        .on_window_event(|window, event| {
+            // Android: sync only while the app is on screen; coming back syncs right away.
+            #[cfg(mobile)]
+            match event {
+                tauri::WindowEvent::Suspended => google_drive::set_foreground(window.app_handle(), false),
+                tauri::WindowEvent::Resumed => google_drive::set_foreground(window.app_handle(), true),
+                _ => {}
+            }
+            #[cfg(not(mobile))]
+            let _ = (window, event);
+        })
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

@@ -1,5 +1,5 @@
 import { useLocation, useNavigate } from 'react-router-dom'
-import { useMemo, useEffect, useRef, useState } from 'react'
+import { Fragment, useMemo, useEffect, useRef, useState } from 'react'
 import {
   HomeOutlined,
   MessageOutlined,
@@ -11,11 +11,13 @@ import {
   LoadingOutlined,
   CheckCircleOutlined,
   WarningOutlined,
+  CloudSyncOutlined,
 } from '@ant-design/icons'
 import { invoke } from '@tauri-apps/api/core'
 import { listen } from '@tauri-apps/api/event'
 import { useActiveTimeHeartbeat } from '../hooks/useActiveTimeHeartbeat'
-import { t } from '../lib/i18n'
+import { t, errorWithDetail } from '../lib/i18n'
+import { syncResultText, type AutoSyncEvent } from '../lib/sync'
 import { afterHome, openTab } from '../lib/backNav'
 
 type LinderaStage = 'idle' | 'downloading' | 'extracting' | 'building' | 'ready' | 'error'
@@ -25,6 +27,10 @@ interface LinderaProgress {
   message: string
   percent: number
 }
+
+/** Pages that simply show stored data: reloaded when a sync brings changes from another device.
+ * Pages with work in progress (chat, review, reading, breakdown, JLPT) pick them up next time. */
+const RELOAD_AFTER_SYNC = ['/', '/chats', '/words', '/stats', '/grammar']
 
 const NAV_ITEMS = [
   { key: 'home', label: t('nav.home'), icon: HomeOutlined, path: '/' },
@@ -68,6 +74,29 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     }
   }, [])
 
+  // Automatic sync with Google Drive (runs in Rust while the app is open).
+  const [sync, setSync] = useState<AutoSyncEvent | null>(null)
+  const [dataVersion, setDataVersion] = useState(0)
+  const pathRef = useRef(location.pathname)
+  pathRef.current = location.pathname
+  useEffect(() => {
+    let hide: ReturnType<typeof setTimeout> | undefined
+    const unlisten = listen<AutoSyncEvent>('auto-sync', (event) => {
+      const e = event.payload
+      clearTimeout(hide)
+      setSync(e)
+      if (e.state === 'syncing') return
+      if (e.state === 'done' && e.received > 0 && RELOAD_AFTER_SYNC.includes(pathRef.current)) {
+        setDataVersion((v) => v + 1)
+      }
+      hide = setTimeout(() => setSync(null), e.state === 'error' ? 6000 : 3000)
+    })
+    return () => {
+      clearTimeout(hide)
+      unlisten.then((fn) => fn())
+    }
+  }, [])
+
   const showBanner = linderaStage !== 'idle' && linderaStage !== 'ready'
   const isActive = linderaStage === 'downloading' || linderaStage === 'extracting' || linderaStage === 'building'
 
@@ -104,8 +133,43 @@ export default function Layout({ children }: { children: React.ReactNode }) {
     <div className="h-dvh bg-gray-50 flex flex-col">
       {/* Content */}
       <main className={`flex-1 overflow-hidden ${isChatPage ? '' : 'px-4 pb-[50px]'}`}>
-        {!switchingTab && <div key={location.pathname} className={`h-full ${page.current.dir}`}>{children}</div>}
+        {!switchingTab && (
+          <div key={location.pathname} className={`h-full ${page.current.dir}`}>
+            <Fragment key={dataVersion}>{children}</Fragment>
+          </div>
+        )}
       </main>
+
+      {/* Automatic sync notification */}
+      {sync && (
+        <div className="fixed top-0 left-0 right-0 z-50 flex justify-center pointer-events-none safe-top">
+          <div
+            role="status"
+            onClick={() => sync.state !== 'syncing' && setSync(null)}
+            className={`pointer-events-auto mt-2 mx-4 max-w-sm flex items-center gap-2 px-3 py-2 rounded-full shadow-sm text-xs font-medium border animate-in fade-in slide-in-from-top-2
+              ${sync.state === 'error'
+                ? 'bg-red-50 text-red-700 border-red-100'
+                : sync.state === 'done'
+                  ? 'bg-green-50 text-green-700 border-green-100'
+                  : 'bg-white text-gray-600 border-gray-100'}`}
+          >
+            <span className="shrink-0">
+              {sync.state === 'syncing'
+                ? <LoadingOutlined spin />
+                : sync.state === 'done'
+                  ? <CloudSyncOutlined />
+                  : <WarningOutlined />}
+            </span>
+            <span className="truncate">
+              {sync.state === 'syncing'
+                ? t('sync.syncing')
+                : sync.state === 'done'
+                  ? `${t('sync.done')} · ${syncResultText(sync)}`
+                  : t('sync.failed', { error: errorWithDetail(sync.error ?? '') })}
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* Lindera dict download/build progress banner */}
       {showBanner && (

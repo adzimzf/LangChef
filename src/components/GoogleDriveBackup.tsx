@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import { configureRecovery } from 'tauri-plugin-background-service'
+import { listen } from '@tauri-apps/api/event'
 import {
   CloudUploadOutlined,
   CloudDownloadOutlined,
@@ -17,6 +17,7 @@ import {
 } from '@ant-design/icons'
 import { t, errorWithDetail, formatAgo, formatDate, formatNumber } from '../lib/i18n'
 import { useBackHandler } from '../lib/backNav'
+import { syncResultText, type AutoSyncEvent, type SyncResult } from '../lib/sync'
 
 type AuthStatus = {
   signed_in: boolean
@@ -46,9 +47,6 @@ type SyncConfig = {
 
 type SyncDevice = { os: string; last_backup: number; this_device: boolean }
 
-type SyncResult = { sent: number; received: number; snapshot: 'full' | 'delta' | 'none'; size: number }
-
-const RECOVERY = { serviceLabel: 'LangChef auto-backup' }
 
 function deviceName(os: string | undefined): string {
   const key = `backup.device.${os || 'other'}`
@@ -65,6 +63,8 @@ interface Toast {
 }
 
 const SYNC_INTERVAL_OPTIONS = [
+  { label: t('backup.every5m'), value: 5 },
+  { label: t('backup.every10m'), value: 10 },
   { label: t('backup.every15m'), value: 15 },
   { label: t('backup.every30m'), value: 30 },
   { label: t('backup.everyHour'), value: 60 },
@@ -134,7 +134,6 @@ export default function GoogleDriveBackup() {
 
   const loadSyncConfig = useCallback(async () => {
     try {
-      // The background service itself is started by Rust at app launch.
       setSyncConfig(await invoke<SyncConfig>('google_get_auto_sync'))
     } catch (e) {
       showToast(t('backup.loadSyncFailed', { error: errorWithDetail(e) }), 'error')
@@ -146,6 +145,16 @@ export default function GoogleDriveBackup() {
     loadBackupStatus()
     loadSyncConfig()
   }, [loadAuthStatus, loadBackupStatus, loadSyncConfig])
+
+  // An automatic sync finished while this card is open: show its result here too.
+  useEffect(() => {
+    const unlisten = listen<AutoSyncEvent>('auto-sync', (e) => {
+      if (e.payload.state === 'syncing') return
+      loadBackupStatus()
+      loadSyncConfig()
+    })
+    return () => { unlisten.then((fn) => fn()) }
+  }, [loadBackupStatus, loadSyncConfig])
 
   // ─── Google Sign In / Out ──────────────────────────────────────────
 
@@ -169,10 +178,6 @@ export default function GoogleDriveBackup() {
       await invoke('google_sign_out')
       setAuthStatus({ signed_in: false, email: undefined })
       setBackupStatus(null)
-      // Rust stops the background service on sign-out.
-      try {
-        await configureRecovery({ enabled: false })
-      } catch {}
       showToast(t('backup.signedOut'), 'success')
     } catch (e) {
       showToast(t('backup.signOutFailed', { error: errorWithDetail(e) }), 'error')
@@ -180,11 +185,6 @@ export default function GoogleDriveBackup() {
   }
 
   // ─── Backup & Restore ──────────────────────────────────────────────
-
-  function syncResultText(result: SyncResult): string {
-    if (!result.sent && !result.received) return t('backup.upToDate')
-    return t('backup.synced', { sent: formatNumber(result.sent), received: formatNumber(result.received) })
-  }
 
   async function handleBackup() {
     setBackupAction('backing_up')
@@ -233,16 +233,6 @@ export default function GoogleDriveBackup() {
         wifiOnly: syncConfig.wifi_only,
       })
       setSyncConfig(config)
-      try {
-        // Rust starts / stops the service; this only sets restart after the OS kills it.
-        await configureRecovery(enabled ? { enabled: true, config: RECOVERY } : { enabled: false })
-      } catch (svcErr) {
-        const msg = t('backup.serviceError', { error: errorWithDetail(svcErr) })
-        setSyncError(msg)
-        showToast(msg, 'error')
-        setSyncToggled(false)
-        return
-      }
       showToast(enabled ? t('backup.autoOn') : t('backup.autoOff'), 'success')
     } catch (e) {
       const msg = t('backup.saveSyncFailed', { error: errorWithDetail(e) })
