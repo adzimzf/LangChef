@@ -514,8 +514,8 @@ export default function GoogleDriveBackup() {
             </label>
 
             {/* Toggle row */}
-            <div className="flex items-center justify-between py-2">
-              <div>
+            <div className="flex items-center justify-between gap-3 py-2">
+              <div className="min-w-0">
                 <p className="text-sm font-medium">{t('backup.automatic')}</p>
                 <p className="text-xs text-gray-400 mt-0.5">
                   {t('backup.automaticHint')}
@@ -527,7 +527,7 @@ export default function GoogleDriveBackup() {
                 aria-checked={syncConfig.enabled}
                 aria-label={t('backup.automatic')}
                 disabled={syncToggled}
-                className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${
+                className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${
                   syncConfig.enabled ? 'bg-blue-500' : 'bg-gray-300'
                 } ${syncToggled ? 'opacity-50' : ''}`}
               >
@@ -584,8 +584,8 @@ export default function GoogleDriveBackup() {
 
                 {/* Wi-Fi only (Android can tell Wi-Fi from mobile data) */}
                 {syncConfig.wifi_only_supported && (
-                  <div className="flex items-center justify-between">
-                    <div>
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
                       <p className="text-sm font-medium">{t('backup.wifiOnly')}</p>
                       <p className="text-xs text-gray-400 mt-0.5">{t('backup.wifiOnlyHint')}</p>
                     </div>
