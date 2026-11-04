@@ -79,7 +79,9 @@ once, along with grammar cards, translated rows and chats' selected patterns.
 
 ## Not synced
 
-`study` / `study_card` (each device builds its own daily queue), `app_settings.explain_lang`
+`study` / `study_card` (each device builds its own daily queue; at session start
+`srs::absorb_remote_answers` counts cards answered on another device today as done, so a day
+finished on one device is finished on all of them and the daily limits are shared), `app_settings.explain_lang`
 (follows each device's UI language), `telemetry_days` (legacy).
 
 ## One sync (`google_drive::sync_now`)
