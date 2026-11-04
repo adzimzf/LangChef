@@ -131,6 +131,7 @@
 @keyframes animRing { from { stroke-dasharray: 0 var(--ring-len); } }
 @keyframes animWiggle { 0%, 92%, 100% { transform: rotate(0); } 94% { transform: rotate(-8deg); } 96% { transform: rotate(8deg); } 98% { transform: rotate(-4deg); } }
 @keyframes animPulse { 50% { opacity: .6; } }
+@keyframes animDrain { from { width: 100%; } to { width: 0; } }
 
 .anim-enter-fwd { animation: animInFwd .34s cubic-bezier(.2, .8, .2, 1) backwards; }
 .anim-enter-back { animation: animInBack .34s cubic-bezier(.2, .8, .2, 1) backwards; }
@@ -164,6 +165,7 @@
 .anim-shake { animation: animShake .4s; }
 .anim-pulse { animation: animPulse 1s infinite; }
 .anim-fade { animation: animFade .2s; }
+.anim-drain { animation: animDrain linear forwards; }
 .anim-sheet { animation: animSheet .3s cubic-bezier(.2, .8, .2, 1); }
 .anim-ring { animation: animRing 1.2s .2s cubic-bezier(.2, .8, .2, 1) backwards; }
 .anim-new { animation: animPop .5s .5s backwards, animWiggle 4s 2s ease-in-out infinite; display: inline-block; }

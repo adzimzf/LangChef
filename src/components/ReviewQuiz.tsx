@@ -297,13 +297,15 @@ export function ReviewQuiz({ task, submitting, onAnswer }: {
 }
 
 /** Result of an answer: what was right, the grade the backend picked and why. */
-export function QuizVerdictView({ task, result, details, onNext, onOverride, overriding }: {
+export function QuizVerdictView({ task, result, details, onNext, onOverride, overriding, autoAdvanceMs }: {
   task: QuizTask
   result: AnswerResult
   details: ReactNode
   onNext: () => void
   onOverride: () => void
   overriding: boolean
+  /** Set while the screen moves on by itself: the details and Next buttons wait until the user stays. */
+  autoAdvanceMs?: number | null
 }) {
   const v = result.verdict
   const [showDetails, setShowDetails] = useState(false)
@@ -386,30 +388,44 @@ export function QuizVerdictView({ task, result, details, onNext, onOverride, ove
         </button>
       )}
 
-      <button type="button" onClick={() => setShowDetails(s => !s)} className="py-1 text-xs text-gray-400 hover:text-gray-600">
-        {showDetails ? t('quiz.hideDetails') : t('quiz.showDetails')}
-      </button>
-      {showDetails && <div className="bg-white rounded-2xl shadow-sm px-4 pb-4">{details}</div>}
+      {autoAdvanceMs ? (
+        <div className="flex flex-col items-center gap-1.5 py-2">
+          <div className="w-24 h-1 rounded-full bg-gray-200 overflow-hidden">
+            <div className="h-full bg-gray-400 anim-drain" style={{ animationDuration: `${autoAdvanceMs}ms` }} />
+          </div>
+          <span className="text-xs text-gray-400">{t('quiz.autoNext')}</span>
+        </div>
+      ) : (
+        <>
+          <button type="button" onClick={() => setShowDetails(s => !s)} className="py-1 text-xs text-gray-400 hover:text-gray-600">
+            {showDetails ? t('quiz.hideDetails') : t('quiz.showDetails')}
+          </button>
+          {showDetails && <div className="bg-white rounded-2xl shadow-sm px-4 pb-4">{details}</div>}
 
-      <button type="button" className={primaryBtn} onClick={onNext}>
-        {result.next_card ? `${t('common.next')} →` : t('quiz.finish')}
-      </button>
+          <button type="button" className={`${primaryBtn} anim-fade`} onClick={onNext}>
+            {result.next_card ? `${t('common.next')} →` : t('quiz.finish')}
+          </button>
+        </>
+      )}
     </div>
   )
 }
 
-/** Moves on after a correct answer unless the user touches the result screen. */
+/** Moves on after a correct answer unless the user touches the result screen.
+ *  `active` is true while it is counting down, so the screen can hide its manual buttons. */
 export function useAutoAdvance(result: AnswerResult | null, onNext: () => void, delayMs = 1500) {
-  const cancelled = useRef(false)
   const next = useRef(onNext)
   next.current = onNext
+  // The result the user chose to stay on; derived per result so the buttons never flash in.
+  const [stayed, setStayed] = useState<AnswerResult | null>(null)
+  const auto = !!result && result.verdict.correct && result.verdict.grade !== 'hard'
+  const active = auto && stayed !== result
   useEffect(() => {
-    cancelled.current = false
-    if (!result || !result.verdict.correct || result.verdict.grade === 'hard') return
-    const t = setTimeout(() => { if (!cancelled.current) next.current() }, delayMs)
+    if (!active) return
+    const t = setTimeout(() => next.current(), delayMs)
     return () => clearTimeout(t)
-  }, [result, delayMs])
-  return () => { cancelled.current = true }
+  }, [active, delayMs])
+  return { active, delayMs, cancel: () => setStayed(result) }
 }
 
 export function SessionSummaryView({ summary }: { summary: SessionSummary }) {
