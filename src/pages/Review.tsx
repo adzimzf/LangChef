@@ -384,7 +384,7 @@ export default function Review() {
     if (answerResult) applyProgress(answerResult)
   }
 
-  const cancelAutoAdvance = useAutoAdvance(answerResult, handleNext)
+  const autoAdvance = useAutoAdvance(answerResult, handleNext)
 
   // End-of-session numbers come from Rust; refresh whenever the queue runs out
   useEffect(() => {
@@ -862,7 +862,7 @@ export default function Review() {
         </div>
       ) : (
         currentTask && currentTask.kind !== 'classic' ? (
-          <div className="flex-1 flex flex-col justify-center gap-3 pb-6" onPointerDown={cancelAutoAdvance}>
+          <div className="flex-1 flex flex-col justify-center gap-3 pb-6" onPointerDown={autoAdvance.cancel}>
             {missingMeaning.length > 0 && !bannerDismissed && getApiConfig().ready && (
               <div className="w-full max-w-sm mx-auto rounded-2xl bg-orange-50 p-3 flex flex-col gap-2">
                 <div className="text-sm font-semibold text-gray-700">
@@ -907,6 +907,7 @@ export default function Review() {
                 onNext={handleNext}
                 onOverride={handleOverride}
                 overriding={overriding}
+                autoAdvanceMs={autoAdvance.active ? autoAdvance.delayMs : null}
               />
             ) : (
               <ReviewQuiz

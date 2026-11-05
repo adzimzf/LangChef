@@ -615,6 +615,7 @@
   "quiz.grammar": "Tata bahasa",
   "quiz.grammarChip": "Tata bahasa · {level}",
   "quiz.grammarMeaningQuestion": "Apa arti bagian yang ditandai di kalimat ini?",
+  "quiz.autoNext": "Lanjut otomatis… ketuk untuk tetap di sini",
   "quiz.hideDetails": "Sembunyikan detail",
   "quiz.iKnowIt": "Saya tahu",
   "quiz.isRight": "benar",

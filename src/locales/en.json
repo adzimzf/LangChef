@@ -615,6 +615,7 @@
   "quiz.grammar": "Grammar",
   "quiz.grammarChip": "Grammar · {level}",
   "quiz.grammarMeaningQuestion": "What does the highlighted part mean here?",
+  "quiz.autoNext": "Moving on… tap to stay",
   "quiz.hideDetails": "Hide details",
   "quiz.iKnowIt": "I know it",
   "quiz.isRight": "is right",
