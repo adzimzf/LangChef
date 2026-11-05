@@ -259,6 +259,8 @@ pub fn prepare_db(conn: &Connection) -> Result<(), String> {
     link_bundled_translations(conn);
     migrate_sm2_to_fsrs(conn);
     migrate_telemetry_to_activity(conn)?;
+    // Last: sync triggers are built from the final columns.
+    crate::sync::prepare(conn)?;
     Ok(())
 }
 
@@ -453,8 +455,12 @@ fn seed_bundled_grammar_if_empty(conn: &Connection) {
         let items = parse_grammar_md(csv);
         eprintln!("[seed] grammar/{}/{level} ({explain}): parsed {} items", lang, items.len());
         let ai_translated = explain != "en";
+        // Same id on every device, so grammar cards and edits sync (`sync::bundled_grammar_id`).
+        let mut seen: std::collections::HashMap<String, usize> = std::collections::HashMap::new();
         for (pattern, detail) in items {
-            let id = uuid::Uuid::new_v4().to_string();
+            let n = seen.entry(pattern.clone()).or_insert(0);
+            let id = crate::sync::bundled_grammar_id(lang, level, explain, &pattern, *n);
+            *n += 1;
             match conn.execute(
                 "INSERT INTO grammar_items(id, pattern, detail, language, level, is_default, explain_lang, ai_translated)
                  VALUES (?1, ?2, ?3, ?4, ?5, 1, ?6, ?7)",

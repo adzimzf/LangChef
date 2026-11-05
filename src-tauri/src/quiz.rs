@@ -972,7 +972,7 @@ fn confused_word(conn: &Connection, other_id: Option<&str>) -> Result<Option<Con
     }))
 }
 
-fn start_of_today_ms() -> i64 {
+pub(crate) fn start_of_today_ms() -> i64 {
     let midnight = chrono::Local::now().date_naive().and_hms_opt(0, 0, 0).unwrap_or_default();
     midnight
         .and_local_timezone(chrono::Local)

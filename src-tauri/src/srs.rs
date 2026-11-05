@@ -2,7 +2,7 @@ use crate::db::open_db;
 use crate::furigana::{lemma_of, FuriganaAnnotator};
 use crate::grammar_review::{enroll_for_today, grammar_slots, new_grammar_kind, GRAMMAR_REVIEWS_PER_DAY, ITEM_GRAMMAR};
 use crate::locale::effective_detail_sql;
-use crate::quiz::{cards_missing_meaning, clear_task, issue_task, QuizTask};
+use crate::quiz::{cards_missing_meaning, clear_task, issue_task, start_of_today_ms, QuizTask};
 use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use std::sync::Mutex;
@@ -951,6 +951,62 @@ fn classify_kind(state: &str) -> &'static str {
     }
 }
 
+/// Each device builds its own daily queue, but answers sync between devices (`review_answers`
+/// and the card's schedule). Cards answered on another device today count as done here: a
+/// queued card that is no longer due today is marked graded, and one answered elsewhere that
+/// isn't queued here is added (graded, or still pending if it is due again today), so today's
+/// progress and limits are shared and a finished day stays finished on every device.
+fn absorb_remote_answers(conn: &rusqlite::Connection, study_id: i64, language: &str, eod: i64) -> Result<(), String> {
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    conn.execute(
+        "UPDATE study_card SET status = 'graded', update_time = ?3
+         WHERE study_id = ?1 AND status = 'pending'
+           AND review_item_id IN (SELECT id FROM review_items WHERE next_review > ?2)
+           AND EXISTS (SELECT 1 FROM review_answers ra
+                       WHERE ra.review_item_id = study_card.review_item_id AND ra.answered_at >= study_card.create_time)",
+        params![study_id, eod, now_ms],
+    )
+    .map_err(|e| e.to_string())?;
+
+    // Cards answered today that this device never queued were answered on another device.
+    let answered: Vec<(String, String, bool, String, bool)> = {
+        let mut stmt = conn
+            .prepare(
+                "SELECT r.id, COALESCE(ra.prev_state, 'new'), COALESCE(ra.placement, 0), r.item_type,
+                        COALESCE(r.next_review, 0) <= ?3
+                 FROM review_answers ra JOIN review_items r ON r.id = ra.review_item_id
+                 WHERE COALESCE(ra.language, r.language) = ?2 AND ra.answered_at >= ?4
+                   AND r.id NOT IN (SELECT review_item_id FROM study_card WHERE study_id = ?1)
+                   AND ra.answered_at = (SELECT MIN(answered_at) FROM review_answers
+                                         WHERE review_item_id = r.id AND answered_at >= ?4)
+                 GROUP BY r.id",
+            )
+            .map_err(|e| e.to_string())?;
+        let rows = stmt
+            .query_map(params![study_id, language, eod, start_of_today_ms()], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            })
+            .map_err(|e| e.to_string())?
+            .filter_map(Result::ok)
+            .collect();
+        rows
+    };
+    for (id, prev_state, placement, item_type, due) in answered {
+        let mut kind = classify_kind(&prev_state);
+        if kind == "new" && item_type == ITEM_GRAMMAR {
+            kind = new_grammar_kind(placement);
+        }
+        let status = if due { "pending" } else { "graded" };
+        conn.execute(
+            "INSERT INTO study_card (study_id, review_item_id, kind, status, create_time, update_time)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?5)",
+            params![study_id, id, kind, status, now_ms],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(())
+}
+
 pub(crate) fn top_up_queue(
     conn: &rusqlite::Connection,
     study_id: i64,
@@ -959,6 +1015,7 @@ pub(crate) fn top_up_queue(
     max_review: i64,
     max_new: i64,
 ) -> Result<(), String> {
+    absorb_remote_answers(conn, study_id, language, eod)?;
     let (n_review, n_new, n_grammar_review): (i64, i64, i64) = conn.query_row(
         "SELECT
             COALESCE(SUM(CASE WHEN sc.kind='review' THEN 1 ELSE 0 END), 0),
@@ -1356,6 +1413,55 @@ mod tests {
             served.push(card.id);
         }
         served
+    }
+
+    #[test]
+    fn answers_from_another_device_finish_the_day_here() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::prepare_db(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO app_settings(key, value) VALUES ('grammar_new_per_day', '0'), ('grammar_checks_per_day', '0');",
+        )
+        .unwrap();
+        for i in 0..4 {
+            conn.execute(
+                "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, language, created_at,
+                   fsrs_stability, fsrs_difficulty)
+                 VALUES (?1, ?1, 2.5, 3, 1, 'review', 0, 0, 0, 'ja', 0, 3.0, 5.0)",
+                params![format!("r{i}")],
+            )
+            .unwrap();
+        }
+        let eod = end_of_today();
+        let study = ensure_study(&conn, "2026-01-01", "ja", 3, 0).unwrap();
+        top_up_queue(&conn, study, "ja", eod, 3, 0).unwrap();
+        assert_eq!(count_pending(&conn, study).unwrap(), 3);
+
+        // The other device answers every card: r0..r2 (queued here) and r3 (not queued here).
+        // r1 came back as relearning and is due again today.
+        let later = chrono::Utc::now().timestamp_millis() + 1000;
+        for (id, next) in [("r0", eod + 86_400), ("r1", 0), ("r2", eod + 86_400), ("r3", eod + 86_400)] {
+            conn.execute("UPDATE review_items SET next_review = ?2 WHERE id = ?1", params![id, next]).unwrap();
+            conn.execute(
+                "INSERT INTO review_answers(review_item_id, language, task, correct, elapsed_ms, grade, prev_state, answered_at)
+                 VALUES (?1, 'ja', 'recall', 1, 900, 'good', 'review', ?2)",
+                params![id, later],
+            )
+            .unwrap();
+        }
+        top_up_queue(&conn, study, "ja", eod, 3, 0).unwrap();
+
+        // Only r1 is left, and r3 counts towards today's reviews, so nothing new is queued.
+        let pending: Vec<String> = conn
+            .prepare("SELECT review_item_id FROM study_card WHERE study_id = ?1 AND status = 'pending'")
+            .unwrap()
+            .query_map([study], |r| r.get(0))
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+        assert_eq!(pending, ["r1"]);
+        assert_eq!(count_reviewed(&conn, study).unwrap(), 3);
+        assert_eq!(count_total(&conn, study).unwrap(), 4);
     }
 
     #[test]

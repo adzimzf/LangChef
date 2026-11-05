@@ -1,11 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import { invoke } from '@tauri-apps/api/core'
-import {
-  startService,
-  stopService,
-  isServiceRunning,
-  configureRecovery,
-} from 'tauri-plugin-background-service'
+import { listen } from '@tauri-apps/api/event'
 import {
   CloudUploadOutlined,
   CloudDownloadOutlined,
@@ -18,9 +13,11 @@ import {
   InfoCircleOutlined,
   CloseOutlined,
   ThunderboltOutlined,
+  LaptopOutlined,
 } from '@ant-design/icons'
 import { t, errorWithDetail, formatAgo, formatDate, formatNumber } from '../lib/i18n'
 import { useBackHandler } from '../lib/backNav'
+import { syncResultText, type AutoSyncEvent, type SyncResult } from '../lib/sync'
 
 type AuthStatus = {
   signed_in: boolean
@@ -32,7 +29,11 @@ type BackupStatus = {
   has_backup: boolean
   last_backup: number | null
   backup_size: number | null
-  remote_modified?: string
+  last_kind?: 'full' | 'delta' | 'legacy'
+  last_device_os?: string
+  last_from_this_device?: boolean
+  devices?: SyncDevice[]
+  last_error?: string | null
 }
 
 type SyncConfig = {
@@ -40,6 +41,17 @@ type SyncConfig = {
   interval_minutes: number
   wifi_only: boolean
   last_sync_at: number | null
+  last_error?: string | null
+  wifi_only_supported?: boolean
+}
+
+type SyncDevice = { os: string; last_backup: number; this_device: boolean }
+
+
+function deviceName(os: string | undefined): string {
+  const key = `backup.device.${os || 'other'}`
+  const text = t(key)
+  return text === key ? t('backup.device.other') : text
 }
 
 type ToastSeverity = 'success' | 'error' | 'info'
@@ -51,6 +63,8 @@ interface Toast {
 }
 
 const SYNC_INTERVAL_OPTIONS = [
+  { label: t('backup.every5m'), value: 5 },
+  { label: t('backup.every10m'), value: 10 },
   { label: t('backup.every15m'), value: 15 },
   { label: t('backup.every30m'), value: 30 },
   { label: t('backup.everyHour'), value: 60 },
@@ -120,22 +134,7 @@ export default function GoogleDriveBackup() {
 
   const loadSyncConfig = useCallback(async () => {
     try {
-      const config = await invoke<SyncConfig>('google_get_auto_sync')
-      setSyncConfig(config)
-      if (config.enabled) {
-        try {
-          const running = await isServiceRunning()
-          if (!running) {
-            await startService({ serviceLabel: 'LangChef auto-backup' })
-          }
-          await configureRecovery({
-            enabled: true,
-            config: { serviceLabel: 'LangChef auto-backup' },
-          })
-        } catch (svcErr) {
-          showToast(t('backup.serviceUnavailable', { error: errorWithDetail(svcErr) }), 'error')
-        }
-      }
+      setSyncConfig(await invoke<SyncConfig>('google_get_auto_sync'))
     } catch (e) {
       showToast(t('backup.loadSyncFailed', { error: errorWithDetail(e) }), 'error')
     }
@@ -147,6 +146,16 @@ export default function GoogleDriveBackup() {
     loadSyncConfig()
   }, [loadAuthStatus, loadBackupStatus, loadSyncConfig])
 
+  // An automatic sync finished while this card is open: show its result here too.
+  useEffect(() => {
+    const unlisten = listen<AutoSyncEvent>('auto-sync', (e) => {
+      if (e.payload.state === 'syncing') return
+      loadBackupStatus()
+      loadSyncConfig()
+    })
+    return () => { unlisten.then((fn) => fn()) }
+  }, [loadBackupStatus, loadSyncConfig])
+
   // ─── Google Sign In / Out ──────────────────────────────────────────
 
   async function handleSignIn() {
@@ -157,6 +166,7 @@ export default function GoogleDriveBackup() {
       setSignInStep('idle')
       showToast(t('backup.signedInAs', { email: result.email ?? '' }), 'success')
       loadBackupStatus()
+      loadSyncConfig()
     } catch (e) {
       showToast(t('backup.signInFailed', { error: errorWithDetail(e) }), 'error')
       setSignInStep('idle')
@@ -168,11 +178,6 @@ export default function GoogleDriveBackup() {
       await invoke('google_sign_out')
       setAuthStatus({ signed_in: false, email: undefined })
       setBackupStatus(null)
-      setSyncConfig((prev) => ({ ...prev, enabled: false }))
-      try {
-        if (await isServiceRunning()) await stopService()
-        await configureRecovery({ enabled: false })
-      } catch {}
       showToast(t('backup.signedOut'), 'success')
     } catch (e) {
       showToast(t('backup.signOutFailed', { error: errorWithDetail(e) }), 'error')
@@ -184,21 +189,13 @@ export default function GoogleDriveBackup() {
   async function handleBackup() {
     setBackupAction('backing_up')
     try {
-      const result = await invoke<{
-        success: boolean
-        backed_up_at: number
-        size: number
-      }>('google_backup_db')
-      showToast(
-        t('backup.backedUp', { size: formatFileSize(result.size) }),
-        'success'
-      )
-      loadBackupStatus()
-      loadSyncConfig()
+      showToast(syncResultText(await invoke<SyncResult>('google_backup_db')), 'success')
     } catch (e) {
       showToast(t('backup.backupFailed', { error: errorWithDetail(e) }), 'error')
     } finally {
       setBackupAction('idle')
+      loadBackupStatus()
+      loadSyncConfig()
     }
   }
 
@@ -216,6 +213,7 @@ export default function GoogleDriveBackup() {
         'success'
       )
       loadBackupStatus()
+      loadSyncConfig()
     } catch (e) {
       showToast(t('backup.restoreFailed', { error: errorWithDetail(e) }), 'error')
     } finally {
@@ -235,26 +233,6 @@ export default function GoogleDriveBackup() {
         wifiOnly: syncConfig.wifi_only,
       })
       setSyncConfig(config)
-      try {
-        if (enabled) {
-          if (!(await isServiceRunning())) {
-            await startService({ serviceLabel: 'LangChef auto-backup' })
-          }
-          await configureRecovery({
-            enabled: true,
-            config: { serviceLabel: 'LangChef auto-backup' },
-          })
-        } else {
-          if (await isServiceRunning()) await stopService()
-          await configureRecovery({ enabled: false })
-        }
-      } catch (svcErr) {
-        const msg = t('backup.serviceError', { error: errorWithDetail(svcErr) })
-        setSyncError(msg)
-        showToast(msg, 'error')
-        setSyncToggled(false)
-        return
-      }
       showToast(enabled ? t('backup.autoOn') : t('backup.autoOff'), 'success')
     } catch (e) {
       const msg = t('backup.saveSyncFailed', { error: errorWithDetail(e) })
@@ -264,13 +242,13 @@ export default function GoogleDriveBackup() {
     setSyncToggled(false)
   }
 
-  async function changeSyncInterval(intervalMinutes: number) {
+  async function changeSyncSettings(intervalMinutes: number, wifiOnly: boolean) {
     setSyncError('')
     try {
       const config = await invoke<SyncConfig>('google_set_auto_sync', {
         enabled: syncConfig.enabled,
         intervalMinutes,
-        wifiOnly: syncConfig.wifi_only,
+        wifiOnly,
       })
       setSyncConfig(config)
     } catch (e) {
@@ -284,19 +262,15 @@ export default function GoogleDriveBackup() {
     setBackupAction('backing_up')
     setSyncError('')
     try {
-      const result = await invoke<{
+      const result = await invoke<SyncResult & {
         synced: boolean
         reason: string
         error?: string
       }>('google_trigger_sync')
       if (result.synced) {
-        showToast(t('backup.syncDone'), 'success')
+        showToast(syncResultText(result), 'success')
       } else {
-        if (result.reason === 'not_due_yet') {
-          showToast(t('backup.notDue'), 'info')
-        } else if (result.reason === 'auto_sync_disabled') {
-          showToast(t('backup.autoIsOff'), 'info')
-        } else if (result.error) {
+        if (result.error) {
           const msg = t('backup.syncError', { error: errorWithDetail(result.error) })
           setSyncError(msg)
           showToast(msg, 'error')
@@ -316,6 +290,7 @@ export default function GoogleDriveBackup() {
   }
 
   // ─── Helpers ────────────────────────────────────────────────────────
+
 
   function formatTimestamp(ts: number | null): string {
     if (!ts) return t('backup.never')
@@ -437,8 +412,25 @@ export default function GoogleDriveBackup() {
                 <span className="flex items-center gap-1">
                   <ClockCircleOutlined />
                   {t('backup.lastBackup', { when: formatTimestamp(backupStatus.last_backup) })}
+                  {backupStatus.last_from_this_device === false &&
+                    ` · ${t('backup.fromDevice', { device: deviceName(backupStatus.last_device_os) })}`}
                 </span>
                 <span>{formatFileSize(backupStatus.backup_size)}</span>
+              </div>
+            )}
+
+            {/* Devices that sync through this Google account */}
+            {backupStatus?.devices && backupStatus.devices.length > 1 && (
+              <div className="mb-3 rounded-lg bg-gray-50 px-3 py-2 text-xs text-gray-500">
+                <p className="mb-1 flex items-center gap-1.5 font-medium text-gray-600">
+                  <LaptopOutlined /> {t('backup.devicesTitle', { count: backupStatus.devices.length })}
+                </p>
+                {backupStatus.devices.map((d, i) => (
+                  <p key={i}>
+                    {d.this_device ? t('backup.thisDevice') : deviceName(d.os)} ·{' '}
+                    {t('backup.lastBackup', { when: formatTimestamp(d.last_backup) })}
+                  </p>
+                ))}
               </div>
             )}
 
@@ -522,8 +514,8 @@ export default function GoogleDriveBackup() {
             </label>
 
             {/* Toggle row */}
-            <div className="flex items-center justify-between py-2">
-              <div>
+            <div className="flex items-center justify-between gap-3 py-2">
+              <div className="min-w-0">
                 <p className="text-sm font-medium">{t('backup.automatic')}</p>
                 <p className="text-xs text-gray-400 mt-0.5">
                   {t('backup.automaticHint')}
@@ -535,7 +527,7 @@ export default function GoogleDriveBackup() {
                 aria-checked={syncConfig.enabled}
                 aria-label={t('backup.automatic')}
                 disabled={syncToggled}
-                className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors ${
+                className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${
                   syncConfig.enabled ? 'bg-blue-500' : 'bg-gray-300'
                 } ${syncToggled ? 'opacity-50' : ''}`}
               >
@@ -546,6 +538,14 @@ export default function GoogleDriveBackup() {
                 />
               </button>
             </div>
+
+            {/* Last automatic backup failed (it retries on its own) */}
+            {syncConfig.enabled && syncConfig.last_error && !syncError && (
+              <div className="flex items-start gap-2 mt-2 px-2.5 py-2 rounded-lg bg-red-50 text-red-600 text-xs">
+                <ExclamationCircleOutlined className="mt-0.5 shrink-0" />
+                <span>{t('backup.lastAutoFailed', { error: errorWithDetail(syncConfig.last_error) })}</span>
+              </div>
+            )}
 
             {/* Inline sync error */}
             {syncError && (
@@ -570,7 +570,7 @@ export default function GoogleDriveBackup() {
                   <select
                     value={syncConfig.interval_minutes}
                     onChange={(e) =>
-                      changeSyncInterval(Number(e.target.value))
+                      changeSyncSettings(Number(e.target.value), syncConfig.wifi_only)
                     }
                     className="w-full text-sm bg-transparent outline-none cursor-pointer"
                   >
@@ -582,9 +582,33 @@ export default function GoogleDriveBackup() {
                   </select>
                 </div>
 
+                {/* Wi-Fi only (Android can tell Wi-Fi from mobile data) */}
+                {syncConfig.wifi_only_supported && (
+                  <div className="flex items-center justify-between gap-3">
+                    <div className="min-w-0">
+                      <p className="text-sm font-medium">{t('backup.wifiOnly')}</p>
+                      <p className="text-xs text-gray-400 mt-0.5">{t('backup.wifiOnlyHint')}</p>
+                    </div>
+                    <button
+                      onClick={() => changeSyncSettings(syncConfig.interval_minutes, !syncConfig.wifi_only)}
+                      role="switch"
+                      aria-checked={syncConfig.wifi_only}
+                      aria-label={t('backup.wifiOnly')}
+                      className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors ${
+                        syncConfig.wifi_only ? 'bg-blue-500' : 'bg-gray-300'
+                      }`}
+                    >
+                      <span
+                        className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                          syncConfig.wifi_only ? 'translate-x-6' : 'translate-x-1'
+                        }`}
+                      />
+                    </button>
+                  </div>
+                )}
+
                 {/* Last sync info + manual trigger */}
-                {syncConfig.last_sync_at && (
-                  <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between">
                     <span className="text-xs text-gray-400">
                       {t('backup.lastSync', { when: formatTimestamp(syncConfig.last_sync_at) })}
                     </span>
@@ -604,7 +628,6 @@ export default function GoogleDriveBackup() {
                       )}
                     </button>
                   </div>
-                )}
               </div>
             )}
           </div>
