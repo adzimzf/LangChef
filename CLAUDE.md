@@ -21,6 +21,7 @@ npm run tauri:android:dev  # Android dev via Tauri
 npm run tauri:android:build # Android release build
 npx tsc --noEmit         # Type check only
 npm run i18n:check       # en.json / id.json in sync, no hardcoded UI text
+scripts/install.sh       # Install/update the released app (macOS, or --android via adb)
 ```
 
 No test framework configured.
