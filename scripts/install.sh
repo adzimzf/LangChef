@@ -203,8 +203,16 @@ if [ "$target" = "macos" ]; then
   run ditto "$mount_point/$APP_NAME.app" "$staged"
   run rm -rf "$app_path"
   run mv "$staged" "$app_path"
-  # The build isn't notarized: drop the download quarantine so Gatekeeper lets it open.
-  run xattr -dr com.apple.quarantine "$app_path" 2>/dev/null || true
+  # The build isn't notarized: drop the download quarantine (and any other extended
+  # attributes, which codesign refuses to sign over) so Gatekeeper lets it open.
+  run xattr -cr "$app_path" 2>/dev/null || true
+  # The bundle isn't signed either; Apple Silicon can call such an app "damaged".
+  # An ad-hoc signature (no developer identity) makes it valid on this Mac.
+  if command -v codesign >/dev/null; then
+    say "Signing $APP_NAME.app for this Mac (ad-hoc)"
+    run codesign --force --deep --sign - "$app_path" >/dev/null 2>&1 \
+      || warn "ad-hoc signing failed; if macOS says the app is damaged, run: codesign --force --deep --sign - \"$app_path\""
+  fi
 
   say "$APP_NAME $version installed. Open it from $install_dir or Launchpad."
 else
