@@ -41,6 +41,9 @@ pub const NONE_ANSWER: &str = "__none";
 const MATURE_DAYS: f64 = 21.0;
 /// Chance that recall → confirm leaves the right meaning out, so "None of these" is correct.
 const NONE_CORRECT_CHANCE: f64 = 0.15;
+/// Wrong options picked for being hard to rule out (mixed up before, shared kanji, same part
+/// of speech or level); the others are random, so the set changes from one question to the next.
+const HARD_OPTIONS: usize = 2;
 /// Mis-tap fixes allowed per language per day.
 const OVERRIDES_PER_DAY: i64 = 1;
 /// Past answers needed before the user's own usual time replaces the default.
@@ -311,17 +314,22 @@ fn meaning_distractors(
         scored.push((score, g, QuizOption { text: c.detail.meaning.clone(), item_id: Some(c.id.clone()) }));
     }
     scored.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    // The hardest few lead; the rest are drawn at random, so one word doesn't get
+    // the same set of options every time.
+    let (hard, rest) = scored.split_at(scored.len().min(HARD_OPTIONS));
+    let mut rest = rest.to_vec();
+    rest.shuffle(rng);
     let mut taken: Vec<HashSet<String>> = Vec::new();
     let mut out = Vec::new();
-    for (_, g, option) in scored {
+    for (_, g, option) in hard.iter().chain(rest.iter()) {
         if out.len() == n {
             break;
         }
-        if taken.iter().any(|t| meanings_overlap(t, &g)) {
+        if taken.iter().any(|t| meanings_overlap(t, g)) {
             continue;
         }
-        taken.push(g);
-        out.push(option);
+        taken.push(g.clone());
+        out.push(option.clone());
     }
     out
 }
@@ -481,7 +489,7 @@ fn build_task(conn: &Connection, card: &ReviewItem, meaning_just_shown: bool, rn
     match kind {
         KIND_INTRO_TF | KIND_TRUE_FALSE => {
             task.statement_true = rng.gen_bool(0.5);
-            task.statement = Some(if task.statement_true { correct } else { pool[0].clone() });
+            task.statement = Some(if task.statement_true { correct } else { pool.choose(rng).cloned().unwrap_or(correct) });
             task.answer = task.statement_true.to_string();
         }
         KIND_CHOICE | KIND_CONTEXT => {
@@ -634,7 +642,7 @@ fn build_grammar_task(conn: &Connection, card: &ReviewItem, meaning_just_shown: 
     match kind {
         KIND_INTRO_TF | KIND_TRUE_FALSE => {
             task.statement_true = rng.gen_bool(0.5);
-            task.statement = Some(if task.statement_true { correct } else { pool[0].clone() });
+            task.statement = Some(if task.statement_true { correct } else { pool.choose(rng).cloned().unwrap_or(correct) });
             task.answer = task.statement_true.to_string();
         }
         KIND_GRAMMAR_MEANING => {
@@ -1709,6 +1717,30 @@ mod tests {
             assert_eq!(ids[0], "v", "shared kanji, other meaning ranks first");
             assert!(!(ids.contains(&"w".to_string()) && ids.contains(&"x".to_string())), "two options with one sense");
         }
+    }
+
+    #[test]
+    fn wrong_options_vary_but_the_hardest_stay() {
+        let conn = deck();
+        let mut rows = vec!["('v', '旅館', 'ja', '{\"reading\":\"りょかん\",\"meaning\":\"inn\"}')".to_string()];
+        let meanings = ["to walk", "to eat", "river", "mountain", "book", "to sleep", "red", "dog", "school", "to write"];
+        for (i, m) in meanings.iter().enumerate() {
+            rows.push(format!("('w{i}', '語{i}', 'ja', '{{\"reading\":\"ご{i}\",\"meaning\":\"{m}\"}}')"));
+        }
+        conn.execute_batch(&format!("INSERT INTO review_items(id, content, language, detail) VALUES {};", rows.join(","))).unwrap();
+        let c = card("t", "旅行", "review", Some(r#"{"reading":"りょこう","meaning":"travel; trip"}"#));
+        let detail = parse_detail(c.detail.as_deref());
+        let cands = load_candidates(&conn, &c).unwrap();
+        let mut sets = HashSet::new();
+        for _ in 0..30 {
+            let opts = meaning_distractors(&c, &detail, &cands, &HashMap::new(), 4, &mut rand::thread_rng());
+            assert_eq!(opts.len(), 4);
+            assert_eq!(opts[0].item_id.as_deref(), Some("v"), "shared kanji keeps its place");
+            let mut ids: Vec<String> = opts.iter().filter_map(|o| o.item_id.clone()).collect();
+            ids.sort();
+            sets.insert(ids);
+        }
+        assert!(sets.len() > 1, "the same options every time");
     }
 
     #[test]
