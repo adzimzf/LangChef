@@ -216,6 +216,24 @@ mod tests {
     }
 
     #[test]
+    fn deleting_a_card_in_another_devices_study_queue() {
+        // study_card isn't synced and references review_items (foreign keys are on), so a card
+        // deleted on one device may still sit in the other's queue, even one from an earlier day.
+        let (mut a, mut b) = (Device::new("dev-a"), Device::new("dev-b"));
+        add_card(&a, "w1", "水");
+        sync_both(&mut a, &mut b);
+        b.exec(
+            "INSERT INTO study(date, language, max_review, max_new) VALUES ('2026-11-08', 'ja', 100, 10);
+             INSERT INTO study_card(study_id, review_item_id, kind, status, create_time, update_time)
+             VALUES (last_insert_rowid(), 'w1', 'review', 'done', 0, 0);",
+        );
+        a.exec("DELETE FROM review_items WHERE id = 'w1'");
+        sync_both(&mut a, &mut b);
+        assert_eq!(b.count("SELECT COUNT(*) FROM review_items WHERE id = 'w1'"), 0);
+        assert_eq!(b.count("SELECT COUNT(*) FROM study_card WHERE review_item_id = 'w1'"), 0);
+    }
+
+    #[test]
     fn shared_history_is_not_duplicated() {
         // One device used before sync existed; the second restored its backup back then.
         let a_conn = db();
