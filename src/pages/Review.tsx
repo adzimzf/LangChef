@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState, useRef } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { invoke } from '@tauri-apps/api/core'
+import { listen } from '@tauri-apps/api/event'
+import type { AutoSyncEvent } from '../lib/sync'
 import type { Grade } from '../lib/types'
 import {
   ImportOutlined,
@@ -123,16 +125,17 @@ export default function Review() {
     loadItems()
   }, [])
 
-  async function loadItems() {
-    setLoading(true)
+  async function loadItems(quiet = false) {
+    if (!quiet) setLoading(true)
     try {
       const items = await invoke<ReviewItem[]>('db_get_review_items')
       setAllItems(items)
     } catch {}
-    setLoading(false)
+    if (!quiet) setLoading(false)
   }
 
-  async function startSession(lang: string | null) {
+  /** `fresh`: a new session (counts this visit's answers from zero); false keeps the count, e.g. after a sync. */
+  async function startSession(lang: string | null, fresh = true) {
     if (!lang) return
     try {
       const result = await invoke<SessionStartResult>('db_session_start', {
@@ -151,10 +154,29 @@ export default function Review() {
       setGrammarTotal(result.grammar_total)
       setReviewedToday(result.reviews_completed)
       setNewCardsToday(result.new_cards_seen)
-      setSessionCompleted(0)
+      if (fresh) setSessionCompleted(0)
       setRevealed(false)
     } catch {}
   }
+
+  // Changes from another device (cards answered or edited there) arrive through automatic sync. Layout
+  // doesn't remount this page mid-session, so the queue is reloaded here once the learner is between
+  // questions; the question on screen stays the same unless that card was already answered elsewhere.
+  const [syncArrived, setSyncArrived] = useState(0)
+  const syncHandled = useRef(0)
+  useEffect(() => {
+    const unlisten = listen<AutoSyncEvent>('auto-sync', (event) => {
+      if (event.payload.state === 'done' && event.payload.received > 0) setSyncArrived((n) => n + 1)
+    })
+    return () => { unlisten.then((fn) => fn()) }
+  }, [])
+  useEffect(() => {
+    if (syncArrived === syncHandled.current || loading) return
+    if (answering || answerResult || overriding || meaningBusy || editingId || revealed || isGrading.current) return
+    syncHandled.current = syncArrived
+    loadItems(true)
+    startSession(selectedLang, false)
+  }, [syncArrived, loading, answering, answerResult, overriding, meaningBusy, editingId, revealed])
 
   // Group items by language for deck stats display
   const languageGroups = useMemo(() => {
