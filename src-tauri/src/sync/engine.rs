@@ -379,6 +379,12 @@ fn delete(tx: &Connection, spec: &Table, k: &[Value], ver: &Ver) -> Result<Outco
         return Ok(Outcome::Skipped);
     }
     if let Some(keyvals) = resolve_key(tx, spec, &lk)? {
+        if spec.name == "review_items" {
+            // study_card (not synced, so the other device couldn't clear it) references the card
+            // and foreign keys are on: leave this device's queues first, like `words::delete_card`.
+            tx.execute("DELETE FROM study_card WHERE review_item_id = ?1", params_from_iter(keyvals.iter()))
+                .map_err(err)?;
+        }
         tx.execute(&format!("DELETE FROM \"{}\" WHERE {}", spec.name, where_key(spec, 1)), params_from_iter(keyvals.iter()))
             .map_err(err)?;
     }
