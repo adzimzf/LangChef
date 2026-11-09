@@ -958,13 +958,15 @@ fn classify_kind(state: &str) -> &'static str {
 /// progress and limits are shared and a finished day stays finished on every device.
 fn absorb_remote_answers(conn: &rusqlite::Connection, study_id: i64, language: &str, eod: i64) -> Result<(), String> {
     let now_ms = chrono::Utc::now().timestamp_millis();
+    // Any answer from today counts, also one made before this queue was built: the other device may
+    // have answered before its changes reached this one.
     conn.execute(
         "UPDATE study_card SET status = 'graded', update_time = ?3
          WHERE study_id = ?1 AND status = 'pending'
            AND review_item_id IN (SELECT id FROM review_items WHERE next_review > ?2)
            AND EXISTS (SELECT 1 FROM review_answers ra
-                       WHERE ra.review_item_id = study_card.review_item_id AND ra.answered_at >= study_card.create_time)",
-        params![study_id, eod, now_ms],
+                       WHERE ra.review_item_id = study_card.review_item_id AND ra.answered_at >= ?4)",
+        params![study_id, eod, now_ms, start_of_today_ms()],
     )
     .map_err(|e| e.to_string())?;
 
@@ -1462,6 +1464,41 @@ mod tests {
         assert_eq!(pending, ["r1"]);
         assert_eq!(count_reviewed(&conn, study).unwrap(), 3);
         assert_eq!(count_total(&conn, study).unwrap(), 4);
+    }
+
+    #[test]
+    fn answers_made_elsewhere_before_this_queue_still_count() {
+        // The other device answered this morning; this device built its queue afterwards, before
+        // those answers had synced (the card was still due here), and only then received them.
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        crate::db::prepare_db(&conn).unwrap();
+        conn.execute_batch(
+            "INSERT INTO app_settings(key, value) VALUES ('grammar_new_per_day', '0'), ('grammar_checks_per_day', '0');",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO review_items(id, content, EF, I, R, state, step, lapse_count, next_review, language, created_at,
+               fsrs_stability, fsrs_difficulty)
+             VALUES ('r0', 'r0', 2.5, 3, 1, 'review', 0, 0, 0, 'ja', 0, 3.0, 5.0)",
+            [],
+        )
+        .unwrap();
+        let eod = end_of_today();
+        let study = ensure_study(&conn, "2026-01-01", "ja", 5, 0).unwrap();
+        top_up_queue(&conn, study, "ja", eod, 5, 0).unwrap();
+        assert_eq!(count_pending(&conn, study).unwrap(), 1);
+
+        let earlier = start_of_today_ms().max(chrono::Utc::now().timestamp_millis() - 60_000);
+        conn.execute("UPDATE review_items SET next_review = ?1 WHERE id = 'r0'", params![eod + 86_400]).unwrap();
+        conn.execute(
+            "INSERT INTO review_answers(review_item_id, language, task, correct, elapsed_ms, grade, prev_state, answered_at)
+             VALUES ('r0', 'ja', 'recall', 1, 900, 'good', 'review', ?1)",
+            params![earlier],
+        )
+        .unwrap();
+        top_up_queue(&conn, study, "ja", eod, 5, 0).unwrap();
+        assert_eq!(count_pending(&conn, study).unwrap(), 0);
+        assert_eq!(count_reviewed(&conn, study).unwrap(), 1);
     }
 
     #[test]
