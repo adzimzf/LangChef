@@ -142,6 +142,18 @@ fn save_legacy_metadata(app: &AppHandle, meta: &BackupMetadata) -> Result<(), St
     fs::write(app_dir(app)?.join("google_backup_meta.json"), json).map_err(|e| e.to_string())
 }
 
+/// True when nothing was written to the database since the baseline snapshot was taken, so a
+/// snapshot would find no changed pages. Skips copying and byte-diffing the whole database.
+/// ponytail: trusts the file mtime; a write that leaves the mtime alone is only picked up by the
+/// next sync after a real change. Swap for a `PRAGMA data_version` check if that ever bites.
+fn unchanged_since(baseline: &Path, db_path: &Path) -> bool {
+    let Ok(base) = fs::metadata(baseline).and_then(|m| m.modified()) else { return false };
+    ["db", "db-wal"]
+        .iter()
+        .filter_map(|ext| fs::metadata(db_path.with_extension(ext)).and_then(|m| m.modified()).ok())
+        .all(|t| t <= base)
+}
+
 fn baseline_for(dir: &Path, head: Option<&str>) -> Option<PathBuf> {
     let head = head?;
     let stored = fs::read_to_string(dir.join("baseline.head")).ok()?;
@@ -179,11 +191,17 @@ impl DriveFile {
     }
 }
 
-fn client() -> reqwest::Client {
-    reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(300))
-        .build()
-        .unwrap_or_default()
+/// One shared client for the whole process: a sync is ~15 requests, and building a client per
+/// request means a new TLS handshake per request.
+fn client() -> &'static reqwest::Client {
+    static CLIENT: std::sync::OnceLock<reqwest::Client> = std::sync::OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(std::time::Duration::from_secs(300))
+            .pool_idle_timeout(std::time::Duration::from_secs(90))
+            .build()
+            .unwrap_or_default()
+    })
 }
 
 async fn check(resp: reqwest::Response, what: &str) -> Result<reqwest::Response, String> {
@@ -336,10 +354,17 @@ fn manifest_name(device: &str) -> String {
 
 /// Every device's snapshot manifest: (device, manifest file id, manifest).
 async fn load_manifests(token: &str, folder: &str) -> Result<Vec<(String, String, Manifest)>, String> {
+    let files: Vec<DriveFile> = list_in_folder(token, folder, "manifest_")
+        .await?
+        .into_iter()
+        .filter(|f| f.name.starts_with("manifest_") && f.name.ends_with(".json"))
+        .collect();
+    let ids: Vec<String> = files.iter().map(|f| f.id.clone()).collect();
+    let bodies = download_many(token, &ids).await?;
     let mut out = Vec::new();
-    for f in list_in_folder(token, folder, "manifest_").await? {
+    for (f, body) in files.iter().zip(bodies) {
         let Some(dev) = f.name.strip_prefix("manifest_").and_then(|s| s.strip_suffix(".json")) else { continue };
-        let Ok(m) = serde_json::from_slice::<Manifest>(&download(token, &f.id).await?) else { continue };
+        let Ok(m) = serde_json::from_slice::<Manifest>(&body) else { continue };
         out.push((dev.to_string(), f.id.clone(), m));
     }
     Ok(out)
@@ -352,6 +377,26 @@ fn newest<'a>(manifests: &'a [(String, String, Manifest)], except: Option<&str>)
         .filter(|(d, _, m)| Some(d.as_str()) != except && m.latest().is_some())
         .max_by_key(|(_, _, m)| m.latest().map(|e| e.timestamp))
         .map(|(_, _, m)| m)
+}
+
+/// Downloads several files with up to `LIMIT` requests in flight, keeping the given order.
+/// A sync used to download every manifest and change file one after another.
+async fn download_many(token: &str, ids: &[String]) -> Result<Vec<Vec<u8>>, String> {
+    const LIMIT: usize = 6;
+    let mut out = Vec::with_capacity(ids.len());
+    for chunk in ids.chunks(LIMIT) {
+        let tasks: Vec<_> = chunk
+            .iter()
+            .map(|id| {
+                let (token, id) = (token.to_string(), id.clone());
+                tauri::async_runtime::spawn(async move { download(&token, &id).await })
+            })
+            .collect();
+        for t in tasks {
+            out.push(t.await.map_err(|e| e.to_string())??);
+        }
+    }
+    Ok(out)
 }
 
 async fn download_entry(token: &str, folder: &str, entry: &BackupEntry) -> Result<Vec<u8>, String> {
@@ -389,6 +434,9 @@ async fn snapshot_upload(app: &AppHandle, token: &str, folder: &str, cfg: &SyncC
     let head = manifest.latest().map(|e| e.blake3_checksum.clone());
     let baseline = baseline_for(&dir, head.as_deref());
     let db_path = crate::db::db_file(app)?;
+    if baseline.as_deref().is_some_and(|b| unchanged_since(b, &db_path)) {
+        return Ok(None);
+    }
     let work = dir.join("work");
     let plan = {
         let manifest = manifest.clone();
@@ -527,7 +575,9 @@ fn replace_database(app: &AppHandle, restored: &Path) -> Result<u64, String> {
         let _ = fs::copy(&db_path, db_path.with_extension("db.pre_restore"));
         fs::remove_file(&db_path).map_err(|e| format!("Failed to remove old database: {e}"))?;
     }
-    let _ = fs::remove_file(db_path.with_extension("db-journal"));
+    for ext in ["db-journal", "db-wal", "db-shm"] {
+        let _ = fs::remove_file(db_path.with_extension(ext));
+    }
     fs::rename(&tmp, &db_path).map_err(|e| format!("Failed to rename restored database: {e}"))?;
     Ok(fs::metadata(&db_path).map(|m| m.len()).unwrap_or(0))
 }
@@ -612,7 +662,6 @@ async fn sync_locked(app: &AppHandle) -> Result<SyncOutcome, String> {
     upload_outgoing(&dir, &token, &folder).await?;
 
     // Other devices' changes (and this device's own, after a restore).
-    let mut received = 0;
     let changes = list_changes(&token, &folder).await?;
     let mut cursors = with_db(app, |c| crate::sync::cursors(c)).await?;
     let mut merged = false;
@@ -620,23 +669,35 @@ async fn sync_locked(app: &AppHandle) -> Result<SyncOutcome, String> {
     for f in &changes {
         by_device.entry(f.device.as_str()).or_default().push(f);
     }
-    for (dev, files) in by_device {
-        let cur = cursors.get(dev).copied().unwrap_or(0);
+    for (dev, files) in &by_device {
+        let cur = cursors.get(*dev).copied().unwrap_or(0);
         let gap = files.iter().find(|f| f.last > cur).is_some_and(|f| f.first > cur + 1);
-        if gap && !merged && dev != me {
+        if gap && !merged && *dev != me {
             // Older changes were already removed from Drive: catch up from a snapshot first.
             merged = merge_newest_snapshot(app, &token, &folder, &manifests, &me).await?;
             cursors = with_db(app, |c| crate::sync::cursors(c)).await?;
         }
-        let cur = cursors.get(dev).copied().unwrap_or(0);
-        for f in files.iter().filter(|f| f.last > cur) {
-            let data = download(&token, &f.file.id).await?;
-            let (_, records) = crate::sync::decode(&data)?;
-            let dev = dev.to_string();
-            let stats = with_db(app, move |c| crate::sync::apply(c, &dev, &records)).await?;
-            received += stats.applied;
-        }
     }
+    // All new files at once (`list_changes` sorted them per device), then one database pass.
+    let wanted: Vec<(String, String)> = by_device
+        .iter()
+        .flat_map(|(dev, files)| {
+            let cur = cursors.get(*dev).copied().unwrap_or(0);
+            files.iter().filter(move |f| f.last > cur).map(|f| (dev.to_string(), f.file.id.clone()))
+        })
+        .collect();
+    let ids: Vec<String> = wanted.iter().map(|(_, id)| id.clone()).collect();
+    let bodies = download_many(&token, &ids).await?;
+    let devices: Vec<String> = wanted.into_iter().map(|(dev, _)| dev).collect();
+    let received = with_db(app, move |c| {
+        let mut applied = 0;
+        for (dev, data) in devices.iter().zip(&bodies) {
+            let (_, records) = crate::sync::decode(data)?;
+            applied += crate::sync::apply(c, dev, &records)?.applied;
+        }
+        Ok(applied)
+    })
+    .await?;
 
     // Snapshot after merging, then tidy up this device's old files.
     let snapshot = snapshot_upload(app, &token, &folder, &cfg, &manifests).await?;
