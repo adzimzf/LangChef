@@ -78,7 +78,7 @@ pub fn snapshot(db_path: &Path, dest: &Path) -> Result<(u32, u32), String> {
         let mut dst = Connection::open(dest).map_err(err)?;
         Backup::new(&src, &mut dst)
             .map_err(err)?
-            .run_to_completion(128, Duration::from_millis(5), None)
+            .run_to_completion(1024, Duration::ZERO, None)
             .map_err(err)?;
     }
     let dst = Connection::open(dest).map_err(err)?;

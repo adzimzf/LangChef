@@ -14,6 +14,10 @@ pub fn open_db(app: &tauri::AppHandle) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
     // Breakdown sections are written by parallel requests; wait for a lock instead of failing.
     conn.busy_timeout(std::time::Duration::from_secs(5)).map_err(|e| e.to_string())?;
+    // WAL lets readers run during a write, and NORMAL skips an fsync per commit: sync applies one
+    // transaction per change file, which was the bulk of its time.
+    let _ = conn.pragma_update(None, "journal_mode", "WAL");
+    let _ = conn.pragma_update(None, "synchronous", "NORMAL");
     prepare_db(&conn)?;
     Ok(conn)
 }
