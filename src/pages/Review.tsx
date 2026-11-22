@@ -14,6 +14,7 @@ import {
 import type { AnswerResult, CardDetail, GradePreview, QuizAnswer, QuizTask, ReviewItem, SessionProgress, SessionSummary } from '../lib/types'
 import { parseDetailJson } from '../lib/types'
 import EditWordForm from '../components/EditWordForm'
+import { getApiConfig } from '../lib/providers'
 import { GRADE_COLORS, GrammarInfoView, MeaningSetup, QuizVerdictView, ReviewQuiz, SessionSummaryView, useAutoAdvance } from '../components/ReviewQuiz'
 import { t, lang as explainLang, errorText, partOfSpeechLabel as posLabel, formatInMinutes, formatDate, formatNumber, languageName, type ExplainLang } from '../lib/i18n'
 import { TARGET_LANGUAGES, languageLabel } from '../lib/languages'
@@ -51,13 +52,6 @@ type SessionStartResult = {
 }
 
 type SessionGradeResult = SessionProgress & { lapsed: boolean; graduated: boolean }
-
-function getApiConfig() {
-  const apiHost = localStorage.getItem('api_host') || ''
-  const apiKey = localStorage.getItem('api_key') || ''
-  const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
-  return { apiHost, apiKey, model, ready: !!apiHost && !!apiKey }
-}
 
 function toGradeOptions(previews: GradePreview[]): GradeOption[] {
   return previews.map(p => ({

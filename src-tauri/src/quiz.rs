@@ -884,9 +884,12 @@ pub struct QuizAnswer {
 
 #[derive(Serialize)]
 pub struct ConfusedWord {
+    pub id: String,
     pub word: String,
     pub reading: String,
     pub meaning: String,
+    /// How often this pair was mixed up, both ways, this time included.
+    pub count: i64,
 }
 
 #[derive(Serialize)]
@@ -967,16 +970,17 @@ fn bump_confusion(conn: &Connection, card_id: &str, other_id: &str, delta: i64) 
     Ok(())
 }
 
-fn confused_word(conn: &Connection, other_id: Option<&str>) -> Result<Option<ConfusedWord>, String> {
+fn confused_word(conn: &Connection, card_id: &str, other_id: Option<&str>) -> Result<Option<ConfusedWord>, String> {
     let Some(id) = other_id else { return Ok(None) };
+    let count = crate::mixup::pair_mixups(conn, card_id, id)?;
     Ok(fetch_review_item(conn, id)?.map(|c| {
         if c.is_grammar() {
             let g = parse_grammar_detail(c.detail.as_deref());
             let word = if g.title.is_empty() { c.content } else { g.title };
-            return ConfusedWord { word, reading: String::new(), meaning: g.meaning };
+            return ConfusedWord { id: c.id, word, reading: String::new(), meaning: g.meaning, count };
         }
         let d = parse_detail(c.detail.as_deref());
-        ConfusedWord { word: c.content, reading: d.reading, meaning: d.meaning }
+        ConfusedWord { id: c.id, word: c.content, reading: d.reading, meaning: d.meaning, count }
     }))
 }
 
@@ -1138,7 +1142,7 @@ pub fn db_session_answer(
         next_minutes: srs.next_minutes,
         can_override: !correct && !answer.dont_know && overrides_left(&conn, &language)?,
         overridden: false,
-        confused_with: if record_confusion { confused_word(&conn, other_id.as_deref())? } else { None },
+        confused_with: if record_confusion { confused_word(&conn, &card_id, other_id.as_deref())? } else { None },
     };
 
     Ok(AnswerResult {

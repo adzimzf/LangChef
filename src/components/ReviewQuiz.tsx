@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 import { BulbOutlined } from '@ant-design/icons'
 import { NONE_ANSWER } from '../lib/types'
 import { burstConfetti } from './Motion'
+import { MixupDiff } from './MixupDiff'
 import type { AnswerResult, CardDetail, GradeReason, GrammarInfo, QuizAnswer, QuizTask, SessionSummary } from '../lib/types'
 import { t, lang as explainLang, formatInMinutes, formatSeconds, languageName, partOfSpeechLabel } from '../lib/i18n'
 
@@ -359,7 +360,7 @@ export function QuizVerdictView({ task, result, details, onNext, onOverride, ove
             <span key={r.code} className="text-[11px] px-2 py-0.5 rounded-full bg-white text-gray-500">{reasonText(r)}</span>
           ))}
         </div>
-        {v.confused_with && (
+        {v.confused_with && (task.grammar || !result.card) && (
           <div className="grid grid-cols-2 gap-2">
             <div className="bg-white rounded-xl p-2 text-center">
               <div className="text-lg">{task.word}</div>
@@ -372,6 +373,10 @@ export function QuizVerdictView({ task, result, details, onNext, onOverride, ove
           </div>
         )}
       </div>
+
+      {v.confused_with && !task.grammar && result.card && (
+        <MixupDiff cardId={result.card.id} word={task.word} reading={task.reading} meaning={task.meaning} other={v.confused_with} />
+      )}
 
       {task.placement && (
         <p className="text-xs text-center text-gray-600">{v.correct ? t('quiz.checkPassed') : t('quiz.checkMissed')}</p>

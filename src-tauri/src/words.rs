@@ -594,6 +594,8 @@ fn delete_card(conn: &Connection, id: &str) -> Result<(), String> {
         params![id],
     )
     .map_err(|e| e.to_string())?;
+    conn.execute("DELETE FROM confusion_diffs WHERE item_a=?1 OR item_b=?1", params![id])
+        .map_err(|e| e.to_string())?;
     conn.execute("DELETE FROM review_items WHERE id=?1", params![id])
         .map_err(|e| e.to_string())?;
     Ok(())

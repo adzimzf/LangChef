@@ -11,6 +11,7 @@ mod chat;
 mod sessions;
 mod srs;
 mod quiz;
+mod mixup;
 mod words;
 mod stats;
 mod grammar;
@@ -195,6 +196,7 @@ pub fn run() {
             srs::db_session_start,
             srs::db_session_grade,
             quiz::db_session_answer,
+            mixup::llm_confusion_diff,
             quiz::db_session_override,
             quiz::db_session_summary,
             quiz::db_session_save_meaning,

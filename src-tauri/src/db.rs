@@ -141,6 +141,17 @@ pub fn prepare_db(conn: &Connection) -> Result<(), String> {
             last_at INTEGER NOT NULL,
             PRIMARY KEY (review_item_id, confused_with_id)
         );
+        CREATE TABLE IF NOT EXISTS confusion_diffs(
+            item_a TEXT NOT NULL,
+            item_b TEXT NOT NULL,
+            explain_lang TEXT NOT NULL,
+            kind TEXT NOT NULL,
+            note TEXT NOT NULL,
+            parts_a TEXT NOT NULL,
+            parts_b TEXT NOT NULL,
+            created_at INTEGER NOT NULL,
+            PRIMARY KEY (item_a, item_b, explain_lang)
+        );
         CREATE TABLE IF NOT EXISTS app_settings(
             key TEXT PRIMARY KEY,
             value TEXT NOT NULL
