@@ -104,6 +104,16 @@ pub const TABLES: &[Table] = &[
         skip: NONE,
         filter: None,
     },
+    Table {
+        name: "confusion_diffs",
+        key: &["item_a", "item_b", "explain_lang"],
+        gid: false,
+        legacy_fields: NONE,
+        refs: &[("item_a", Target::Item), ("item_b", Target::Item)],
+        counters: NONE,
+        skip: NONE,
+        filter: None,
+    },
     // The explanation language follows each device's own UI setting (localStorage).
     Table { name: "app_settings", key: &["key"], gid: false, legacy_fields: NONE, refs: &[], counters: NONE, skip: NONE, filter: Some("{R}.key <> 'explain_lang'") },
     Table {

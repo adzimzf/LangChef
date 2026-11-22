@@ -134,7 +134,21 @@ export type AnswerVerdict = {
   next_minutes: number
   can_override: boolean
   overridden: boolean
-  confused_with: { word: string; reading: string; meaning: string } | null
+  confused_with: ConfusedWord | null
+}
+
+/** The card whose meaning was picked instead; `count` = mix-ups of the pair, both ways. */
+export type ConfusedWord = { id: string; word: string; reading: string; meaning: string; count: number }
+
+/** One part of a word in the mix-up diff (a kanji, a kanji component, a root or affix). */
+export type DiffPart = { text: string; meaning: string; differs: boolean }
+
+/** `llm_confusion_diff`: the asked card first, then the word picked instead. */
+export type ConfusionDiff = {
+  kind: 'order' | 'shape' | 'sound' | 'meaning'
+  note: string
+  words: { id: string; word: string; reading: string; meaning: string; parts: DiffPart[] }[]
+  count: number
 }
 
 /** Why a card got its grade (code from quiz.rs `compute_grade`, translated by the frontend) */

@@ -30,3 +30,11 @@ export const DEFAULT_PROVIDER = PROVIDER_PRESETS[0]
 
 /** Where "Report a wrong translation" goes. */
 export const TRANSLATION_REPORT_URL = 'https://github.com/adzimzf/LangChef/issues/new?labels=translation&title=Terjemahan%20salah'
+
+/** The AI connection saved in Settings, as the Tauri LLM commands take it. */
+export function getApiConfig() {
+  const apiHost = localStorage.getItem('api_host') || ''
+  const apiKey = localStorage.getItem('api_key') || ''
+  const model = localStorage.getItem('api_vocab_model') || localStorage.getItem('api_model') || 'gpt-3.5-turbo'
+  return { apiHost, apiKey, model, ready: !!apiHost && !!apiKey }
+}
