@@ -265,6 +265,7 @@ export default function Review() {
             part_of_speech: parsed.part_of_speech || '',
             example: parsed.example || '',
             example_meaning: parsed.example_meaning || '',
+            more_examples: parsed.more_examples || [],
           },
         })
       }
@@ -538,6 +539,12 @@ export default function Review() {
               )}
             </div>
           )}
+          {parsed.more_examples?.map(e => (
+            <div key={e.sentence} className="mt-2 p-2 bg-gray-50 rounded-lg">
+              <p className="text-sm italic">{e.sentence}</p>
+              {e.meaning && <p className="text-xs text-gray-500 mt-1">{e.meaning}</p>}
+            </div>
+          ))}
           <div className="mt-3 pt-2 border-t border-gray-100">
             <div className="flex items-center justify-between mb-1">
               <span className="text-xs text-gray-400">{t('card.mnemonic')}</span>

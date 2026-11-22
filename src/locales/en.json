@@ -737,6 +737,7 @@
   "reason.mature_card": "mature card",
   "reason.meaning_still_known": "meaning still known",
   "reason.no_hints": "no hints",
+  "reason.needs_one_more_check": "one more check before it counts",
   "reason.no_lapse_mature": "no lapse on a mature card",
   "reason.reading_slip": "reading slip",
   "reason.recalled_in": "recalled in {time}",

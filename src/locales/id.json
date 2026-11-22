@@ -737,6 +737,7 @@
   "reason.mature_card": "kartu matang",
   "reason.meaning_still_known": "arti masih diingat",
   "reason.no_hints": "tanpa petunjuk",
+  "reason.needs_one_more_check": "perlu satu cek lagi sebelum dihitung",
   "reason.no_lapse_mature": "kartu matang tidak diulang dari awal",
   "reason.reading_slip": "salah bacaan",
   "reason.recalled_in": "diingat dalam {time}",

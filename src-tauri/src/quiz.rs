@@ -60,6 +60,26 @@ pub struct CardDetail {
     pub part_of_speech: String,
     pub example: String,
     pub example_meaning: String,
+    /// More sentences with the word, so context questions don't always show the same one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub more_examples: Vec<ExampleSentence>,
+}
+
+#[derive(Default, Clone, Serialize, Deserialize, PartialEq, Debug)]
+pub struct ExampleSentence {
+    pub sentence: String,
+    pub meaning: String,
+}
+
+impl CardDetail {
+    /// The extra examples with surrounding space trimmed and empty ones dropped.
+    fn clean_examples(examples: &[ExampleSentence]) -> Vec<ExampleSentence> {
+        examples
+            .iter()
+            .map(|e| ExampleSentence { sentence: e.sentence.trim().to_string(), meaning: e.meaning.trim().to_string() })
+            .filter(|e| !e.sentence.is_empty())
+            .collect()
+    }
 }
 
 /// Parses `review_items.detail`: the JSON object written by `db_generate_detail`, or the plain
@@ -81,6 +101,11 @@ pub fn parse_detail(detail: Option<&str>) -> CardDetail {
                 part_of_speech: field("part_of_speech"),
                 example: field("example"),
                 example_meaning: field("example_meaning"),
+                more_examples: v
+                    .get("more_examples")
+                    .and_then(|x| serde_json::from_value::<Vec<ExampleSentence>>(x.clone()).ok())
+                    .map(|list| CardDetail::clean_examples(&list))
+                    .unwrap_or_default(),
             }
         }
         None => CardDetail {
@@ -197,6 +222,9 @@ pub struct QuizTask {
     statement_true: bool,
     #[serde(skip_serializing, default)]
     easy_allowed: bool,
+    /// True/false on a card still being learned: half of guesses are right, so a right answer is Hard at most.
+    #[serde(skip_serializing, default)]
+    guessable: bool,
 }
 
 impl QuizTask {
@@ -218,6 +246,7 @@ impl QuizTask {
             fix: String::new(),
             statement_true: false,
             easy_allowed: false,
+            guessable: false,
         }
     }
 }
@@ -414,6 +443,14 @@ fn split_sentence(example: &str, word: &str, translation: &str) -> Option<Senten
     })
 }
 
+/// One of the card's example sentences that contains the word, picked at random.
+fn pick_example(detail: &CardDetail, word: &str, rng: &mut impl Rng) -> Option<SentenceParts> {
+    let all = std::iter::once((detail.example.as_str(), detail.example_meaning.as_str()))
+        .chain(detail.more_examples.iter().map(|e| (e.sentence.as_str(), e.meaning.as_str())));
+    let usable: Vec<SentenceParts> = all.filter_map(|(s, m)| split_sentence(s, word, m)).collect();
+    usable.choose(rng).cloned()
+}
+
 fn draft_text(conn: &Connection, id: &str) -> Result<Option<String>, String> {
     Ok(conn
         .query_row("SELECT draft_detail FROM review_items WHERE id = ?1", params![id], |row| row.get(0))
@@ -454,7 +491,7 @@ fn build_task(conn: &Connection, card: &ReviewItem, meaning_just_shown: bool, rn
     let hint_available = card.language.as_deref() == Some("ja")
         && card.content.chars().any(is_cjk)
         && is_kana(&detail.reading);
-    let sentence = split_sentence(&detail.example, &card.content, &detail.example_meaning);
+    let sentence = pick_example(&detail, &card.content, rng);
     let readings = if hint_available { reading_distractors(&detail.reading, &candidates, 3, rng) } else { vec![] };
 
     let kind = if pool.is_empty() {
@@ -484,6 +521,7 @@ fn build_task(conn: &Connection, card: &ReviewItem, meaning_just_shown: bool, rn
     task.mature = mature;
     task.hint_available = hint_available && kind != KIND_READING;
     task.easy_allowed = mature && (kind == KIND_RECALL || kind == KIND_CONTEXT);
+    task.guessable = is_guessable(kind, &card.state);
     let correct = QuizOption { text: detail.meaning.clone(), item_id: Some(card.id.clone()) };
 
     match kind {
@@ -635,6 +673,7 @@ fn build_grammar_task(conn: &Connection, card: &ReviewItem, meaning_just_shown: 
     task.mature = mature;
     task.placement = new && card.placement;
     task.easy_allowed = mature && [KIND_GRAMMAR_GAP, KIND_GRAMMAR_MEANING, KIND_GRAMMAR_MISTAKE].contains(&kind);
+    task.guessable = is_guessable(kind, &card.state);
     let shown: Vec<&GrammarExample> = if kind == KIND_INTRO_TF || kind == KIND_TRUE_FALSE { vec![&example] } else { vec![] };
     task.grammar = Some(grammar_info(card, &g, &shown));
     let correct = QuizOption { text: g.meaning.clone(), item_id: Some(card.id.clone()) };
@@ -755,6 +794,12 @@ impl Serialize for StoredTask<'_> {
 // Grading
 // ---------------------------------------------------------------------------
 
+/// A true/false question on a card that isn't in review yet. Being right half the time by chance,
+/// it can't be what moves a card a learning step on: a right answer counts as Hard.
+fn is_guessable(kind: &str, state: &str) -> bool {
+    (kind == KIND_INTRO_TF || kind == KIND_TRUE_FALSE) && state != "review"
+}
+
 fn default_usual_ms(kind: &str) -> i64 {
     match kind {
         KIND_INTRO_TF | KIND_TRUE_FALSE => 2500,
@@ -812,6 +857,7 @@ struct GradeInput<'a> {
     usual_ms: i64,
     /// A level check: right means already known, wrong means it gets taught.
     placement: bool,
+    guessable: bool,
 }
 
 fn compute_grade(g: &GradeInput) -> (&'static str, Vec<GradeReason>) {
@@ -841,6 +887,10 @@ fn compute_grade(g: &GradeInput) -> (&'static str, Vec<GradeReason>) {
     }
     if g.elapsed_ms >= g.usual_ms * 2 {
         reasons.push(timed("slower_than_usual", g.usual_ms));
+        return ("hard", reasons);
+    }
+    if g.guessable {
+        reasons.push(reason("needs_one_more_check"));
         return ("hard", reasons);
     }
     reasons.push(reason("no_hints"));
@@ -1015,13 +1065,15 @@ struct CardState {
     mastered_at: Option<i64>,
     #[serde(default)]
     placement: bool,
+    #[serde(default)]
+    last_review: Option<i64>,
 }
 
 fn snapshot_state(conn: &Connection, id: &str) -> Result<String, String> {
     let s = conn
         .query_row(
             "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty, mastered_at,
-                    COALESCE(placement, 0)
+                    COALESCE(placement, 0), last_review
              FROM review_items WHERE id = ?1",
             params![id],
             |row| {
@@ -1037,6 +1089,7 @@ fn snapshot_state(conn: &Connection, id: &str) -> Result<String, String> {
                     difficulty: row.get(8)?,
                     mastered_at: row.get(9)?,
                     placement: row.get(10)?,
+                    last_review: row.get(11)?,
                 })
             },
         )
@@ -1048,8 +1101,9 @@ fn restore_state(conn: &Connection, id: &str, json: &str) -> Result<(), String> 
     let s: CardState = serde_json::from_str(json).map_err(|e| e.to_string())?;
     conn.execute(
         "UPDATE review_items SET EF = ?1, I = ?2, R = ?3, state = ?4, step = ?5, lapse_count = ?6,
-         next_review = ?7, fsrs_stability = ?8, fsrs_difficulty = ?9, mastered_at = ?10, placement = ?11 WHERE id = ?12",
-        params![s.ef, s.i, s.r, s.state, s.step, s.lapse_count, s.next_review, s.stability, s.difficulty, s.mastered_at, s.placement, id],
+         next_review = ?7, fsrs_stability = ?8, fsrs_difficulty = ?9, mastered_at = ?10, placement = ?11,
+         last_review = ?12 WHERE id = ?13",
+        params![s.ef, s.i, s.r, s.state, s.step, s.lapse_count, s.next_review, s.stability, s.difficulty, s.mastered_at, s.placement, s.last_review, id],
     )
     .map_err(|e| e.to_string())?;
     Ok(())
@@ -1097,6 +1151,7 @@ pub fn db_session_answer(
         easy_allowed: task.easy_allowed,
         usual_ms: usual,
         placement: task.placement,
+        guessable: task.guessable,
     });
 
     let prev_state = snapshot_state(&conn, &card_id)?;
@@ -1199,6 +1254,7 @@ pub fn db_session_override(
         easy_allowed,
         usual_ms: usual,
         placement,
+        guessable: is_guessable(&kind, &serde_json::from_str::<CardState>(&prev_state).map(|s| s.state).unwrap_or_default()),
     });
     reasons.insert(0, reason("marked_mistap"));
 
@@ -1276,6 +1332,7 @@ pub fn db_session_save_meaning(
         part_of_speech: clean(&meaning.part_of_speech),
         example: clean(&meaning.example),
         example_meaning: clean(&meaning.example_meaning),
+        more_examples: CardDetail::clean_examples(&meaning.more_examples),
     };
     if detail.meaning.is_empty() {
         return Err(app_error("meaning_required", ""));
@@ -1545,6 +1602,7 @@ mod tests {
             easy_allowed: mature && (kind == KIND_RECALL || kind == KIND_CONTEXT),
             usual_ms: 3500,
             placement: false,
+            guessable: false,
         }
     }
 
@@ -1565,6 +1623,35 @@ mod tests {
         let mut dk = input(KIND_RECALL, true, 1000, true);
         dk.dont_know = true;
         assert_eq!(compute_grade(&dk).0, "again");
+    }
+
+    #[test]
+    fn context_questions_rotate_examples() {
+        let d = parse_detail(Some(
+            r#"{"meaning":"walk","example":"公園を散歩する。","example_meaning":"Walk in the park.",
+                "more_examples":[{"sentence":"犬と散歩した。","meaning":"I walked the dog."},
+                                 {"sentence":"","meaning":"dropped"},
+                                 {"sentence":"歩きます。","meaning":"no target word"}]}"#,
+        ));
+        assert_eq!(d.more_examples.len(), 2);
+        let mut rng = rand::thread_rng();
+        let seen: HashSet<String> = (0..200).filter_map(|_| pick_example(&d, "散歩", &mut rng)).map(|s| s.before).collect();
+        assert_eq!(seen, HashSet::from(["公園を".to_string(), "犬と".to_string()]));
+    }
+
+    #[test]
+    fn true_false_on_a_learning_card_is_hard_at_most() {
+        assert!(is_guessable(KIND_INTRO_TF, "new"));
+        assert!(is_guessable(KIND_TRUE_FALSE, "learning"));
+        assert!(!is_guessable(KIND_TRUE_FALSE, "review"));
+        assert!(!is_guessable(KIND_CHOICE, "learning"));
+        let mut tf = input(KIND_TRUE_FALSE, true, 1000, false);
+        tf.guessable = true;
+        let (grade, reasons) = compute_grade(&tf);
+        assert_eq!(grade, "hard");
+        assert_eq!(reasons.last(), Some(&reason("needs_one_more_check")));
+        tf.correct = false;
+        assert_eq!(compute_grade(&tf).0, "again");
     }
 
     #[test]
@@ -1762,6 +1849,7 @@ mod tests {
             fix: String::new(),
             statement_true: false,
             easy_allowed: true,
+            guessable: false,
         };
         let public = serde_json::to_string(&t).unwrap();
         assert!(!public.contains("easy_allowed") && !public.contains(NONE_ANSWER));
