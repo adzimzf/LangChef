@@ -253,6 +253,16 @@ pub fn prepare_db(conn: &Connection) -> Result<(), String> {
     let _ = conn.execute("ALTER TABLE review_items ADD COLUMN placement INTEGER NOT NULL DEFAULT 0", []);
     let _ = conn.execute("CREATE INDEX IF NOT EXISTS idx_review_items_grammar ON review_items(grammar_id)", []);
     let _ = conn.execute("ALTER TABLE review_answers ADD COLUMN placement INTEGER NOT NULL DEFAULT 0", []);
+    // When a card was last graded (seconds): FSRS needs the days since then, not since it was due.
+    // Filled once from the answer log; cards without answers fall back to due date minus interval.
+    if conn.execute("ALTER TABLE review_items ADD COLUMN last_review INTEGER", []).is_ok() {
+        let _ = conn.execute(
+            "UPDATE review_items SET last_review =
+                (SELECT MAX(answered_at) / 1000 FROM review_answers a WHERE a.review_item_id = review_items.id)
+             WHERE EXISTS (SELECT 1 FROM review_answers a WHERE a.review_item_id = review_items.id)",
+            [],
+        );
+    }
     // A translated grammar row points at the row it was translated from.
     let _ = conn.execute("ALTER TABLE grammar_items ADD COLUMN source_id TEXT", []);
     let _ = conn.execute("ALTER TABLE messages ADD COLUMN parent_message_id INTEGER", []);

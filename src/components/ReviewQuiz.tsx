@@ -501,7 +501,7 @@ export function SessionSummaryView({ summary }: { summary: SessionSummary }) {
 
 const EMPTY_DETAIL: CardDetail = { reading: '', meaning: '', part_of_speech: '', example: '', example_meaning: '' }
 
-const DETAIL_FIELDS: { key: keyof CardDetail; label: string; placeholder: string }[] = [
+const DETAIL_FIELDS: { key: Exclude<keyof CardDetail, 'more_examples'>; label: string; placeholder: string }[] = [
   { key: 'meaning', label: t('card.meaning'), placeholder: t('card.meaningPlaceholder') },
   { key: 'reading', label: t('card.reading'), placeholder: 'さんぽ' },
   { key: 'part_of_speech', label: t('card.partOfSpeech'), placeholder: t('pos.noun') },
@@ -643,6 +643,12 @@ export function MeaningSetup({ task, isGrammar = false, hasApi, generating, savi
               {draft.example_meaning && <div className="text-xs text-gray-500 mt-0.5">{draft.example_meaning}</div>}
             </div>
           )}
+          {draft.more_examples?.map(e => (
+            <div key={e.sentence} className="bg-gray-50 rounded-xl p-2.5 text-sm">
+              <div>{e.sentence}</div>
+              {e.meaning && <div className="text-xs text-gray-500 mt-0.5">{e.meaning}</div>}
+            </div>
+          ))}
         </div>
         {error && <p className="text-xs text-center text-red-500">{error}</p>}
         <button type="button" className={primaryBtn} disabled={saving} onClick={() => onSave(draft)}>

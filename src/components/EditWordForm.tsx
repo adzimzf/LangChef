@@ -6,7 +6,7 @@ import {
   RobotOutlined,
   BulbOutlined,
 } from '@ant-design/icons'
-import type { ReviewItem } from '../lib/types'
+import type { ExampleSentence, ReviewItem } from '../lib/types'
 import { parseDetailJson } from '../lib/types'
 import { t, lang as explainLang, errorText, languageName } from '../lib/i18n'
 
@@ -26,6 +26,8 @@ export default function EditWordForm({ item, onSave, onCancel, title = t('word.e
   const [editPartOfSpeech, setEditPartOfSpeech] = useState('')
   const [editExample, setEditExample] = useState('')
   const [editExampleMeaning, setEditExampleMeaning] = useState('')
+  // Not editable here, but kept when the card is saved.
+  const [moreExamples, setMoreExamples] = useState<ExampleSentence[]>([])
   const [editMnemonic, setEditMnemonic] = useState('')
   const [generatingMnemonic, setGeneratingMnemonic] = useState(false)
   const [saveError, setSaveError] = useState<string | null>(null)
@@ -40,16 +42,18 @@ export default function EditWordForm({ item, onSave, onCancel, title = t('word.e
     setEditPartOfSpeech(parsed?.part_of_speech || '')
     setEditExample(parsed?.example || '')
     setEditExampleMeaning(parsed?.example_meaning || '')
+    setMoreExamples(parsed?.more_examples || [])
     setEditMnemonic(item.mnemonic || '')
   }, [item])
 
   function serializeDetail(): string {
-    const obj: Record<string, string> = {}
+    const obj: Record<string, string | ExampleSentence[]> = {}
     if (editReading) obj.reading = editReading
     if (editMeaning) obj.meaning = editMeaning
     if (editPartOfSpeech) obj.part_of_speech = editPartOfSpeech
     if (editExample) obj.example = editExample
     if (editExampleMeaning) obj.example_meaning = editExampleMeaning
+    if (moreExamples.length > 0) obj.more_examples = moreExamples
     return Object.keys(obj).length > 0 ? JSON.stringify(obj) : ''
   }
 
@@ -76,6 +80,7 @@ export default function EditWordForm({ item, onSave, onCancel, title = t('word.e
       setEditPartOfSpeech(parsed?.part_of_speech || '')
       setEditExample(parsed?.example || '')
       setEditExampleMeaning(parsed?.example_meaning || '')
+      setMoreExamples(parsed?.more_examples || [])
     } catch (e) {
       alert(t('review.generationFailed', { error: errorText(e) }))
     }

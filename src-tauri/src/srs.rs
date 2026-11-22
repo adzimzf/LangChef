@@ -112,19 +112,24 @@ fn memory_state_from_db(stability: Option<f32>, difficulty: Option<f32>) -> Opti
     }
 }
 
-fn compute_days_elapsed(next_review: Option<i64>) -> u32 {
-    match next_review {
-        Some(nr) => {
-            let now = chrono::Utc::now().timestamp();
-            let elapsed_secs = now.saturating_sub(nr);
-            if elapsed_secs <= 0 {
-                0
-            } else {
-                ((elapsed_secs as f64) / 86400.0).ceil() as u32
-            }
-        }
-        None => 0,
+/// Calendar days (local time) from the last review to `now`: FSRS's elapsed days. 0 for a card
+/// already seen today, which FSRS treats as a same-day review.
+fn days_since(last_review: Option<i64>, now: i64) -> u32 {
+    use chrono::TimeZone;
+    let day = |ts: i64| chrono::Local.timestamp_opt(ts, 0).single().map(|d| d.date_naive());
+    match (last_review.and_then(day), day(now)) {
+        (Some(a), Some(b)) => (b - a).num_days().max(0) as u32,
+        _ => 0,
     }
+}
+
+/// When the card was last reviewed (seconds). Cards graded before `last_review` was recorded fall
+/// back to their due date minus their interval, which is when that interval was set.
+fn last_review_of(last_review: Option<i64>, state: &str, next_review: Option<i64>, interval_days: i64) -> Option<i64> {
+    last_review.or_else(|| match (state, next_review) {
+        ("review", Some(nr)) if interval_days > 0 => Some(nr - interval_days * 86_400),
+        _ => None,
+    })
 }
 
 fn fsrs_difficulty_to_ef(difficulty: f32) -> f64 {
@@ -449,227 +454,103 @@ fn schedule_card(
     }
 }
 
-fn graduate_with_fsrs(
-    memory: Option<fsrs::MemoryState>,
-    review_count: i64,
-    lapse_count: i64,
-    grade: &str,
-    now: i64,
-) -> Result<(SRSResult, Option<fsrs::MemoryState>), String> {
-    let fsrs = get_fsrs();
-    let next_states = fsrs.next_states(memory, DESIRED_RETENTION, 0)
-        .map_err(|e| e.to_string())?;
-    let chosen = match grade {
-        "easy" => &next_states.easy,
-        _ => &next_states.good,
-    };
-    let interval_days = chosen.interval;
-    let approx_ef = fsrs_difficulty_to_ef(chosen.memory.difficulty);
-    #[allow(non_snake_case)]
-    Ok((SRSResult {
-        EF: approx_ef,
-        I: interval_days.round() as i64,
-        R: review_count + 1,
-        state: "review".to_string(),
-        step: 0,
-        lapse_count,
-        next_review: now + (interval_days * 86400.0) as i64,
-        next_minutes: (interval_days * 24.0 * 60.0) as i64,
-        lapsed: false,
-        graduated: true,
-        fsrs_stability: Some(chosen.memory.stability),
-        fsrs_difficulty: Some(chosen.memory.difficulty),
-    }, Some(chosen.memory)))
-}
-
-fn re_graduate_with_fsrs(
-    memory: Option<fsrs::MemoryState>,
-    stored_interval: i64,
-    review_count: i64,
-    lapse_count: i64,
-    now: i64,
-) -> Result<(SRSResult, Option<fsrs::MemoryState>), String> {
-    let interval_days = i64::max(1, stored_interval);
-    let (approx_ef, stab, diff) = match memory {
-        Some(m) => (fsrs_difficulty_to_ef(m.difficulty), Some(m.stability), Some(m.difficulty)),
-        None => (2.5, None, None),
-    };
-    #[allow(non_snake_case)]
-    Ok((SRSResult {
-        EF: approx_ef,
-        I: interval_days,
-        R: review_count + 1,
-        state: "review".to_string(),
-        step: 0,
-        lapse_count,
-        next_review: now + interval_days * 86400,
-        next_minutes: interval_days * 24 * 60,
-        lapsed: false,
-        graduated: true,
-        fsrs_stability: stab,
-        fsrs_difficulty: diff,
-    }, memory))
-}
-
+/// Schedules one answer with FSRS. The memory state is updated on every answer, learning and
+/// relearning steps included (an answer on the same day uses FSRS's short-term formula), so
+/// how a new card went while it was being learned decides its first interval. The steps only
+/// set how many minutes until the card comes back today.
+#[allow(clippy::too_many_arguments)]
 fn schedule_fsrs(
+    fsrs: &fsrs::FSRS,
     state: &str,
     step: i64,
-    current_memory: Option<fsrs::MemoryState>,
-    stored_interval: i64,
+    memory: Option<fsrs::MemoryState>,
     review_count: i64,
     lapse_count: i64,
-    next_review: Option<i64>,
+    days_elapsed: u32,
     grade: &str,
     config: &SRSConfig,
 ) -> Result<(SRSResult, Option<fsrs::MemoryState>), String> {
     let now = chrono::Utc::now().timestamp();
+    let state = match state {
+        "learning" | "review" | "relearning" => state,
+        _ => "new",
+    };
+    // A new card has no memory yet: its first answer sets it.
+    let memory = if state == "new" { None } else { memory };
+    let elapsed = if memory.is_some() { days_elapsed } else { 0 };
+    let next = fsrs
+        .next_states(memory, DESIRED_RETENTION, elapsed)
+        .or_else(|e| {
+            eprintln!("[fsrs] next_states error: {}; treating as new card", e);
+            fsrs.next_states(None, DESIRED_RETENTION, 0)
+        })
+        .map_err(|e| e.to_string())?;
+    let chosen = match grade {
+        "again" => &next.again,
+        "hard" => &next.hard,
+        "easy" => &next.easy,
+        _ => &next.good,
+    };
+    let mem = chosen.memory;
+    let ef = fsrs_difficulty_to_ef(mem.difficulty);
 
-    match state {
-        "new" | "learning" => {
-            let steps = &config.learning_steps;
-            match grade {
-                "again" => {
-                    let nm = steps.get(0).copied().unwrap_or(1);
-                    #[allow(non_snake_case)]
-                    Ok((SRSResult {
-                        EF: -1.0, I: 0, R: 0, state: "learning".to_string(),
-                        step: 0, lapse_count, next_review: now + nm * 60,
-                        next_minutes: nm, lapsed: false, graduated: false,
-                        fsrs_stability: None, fsrs_difficulty: None,
-                    }, None))
-                }
-                "hard" => {
-                    let ns = i64::max(0, step);
-                    let nm = steps.get(ns as usize).copied().unwrap_or(1);
-                    #[allow(non_snake_case)]
-                    Ok((SRSResult {
-                        EF: -1.0, I: 0, R: 0, state: "learning".to_string(),
-                        step: ns, lapse_count, next_review: now + nm * 60,
-                        next_minutes: nm, lapsed: false, graduated: false,
-                        fsrs_stability: None, fsrs_difficulty: None,
-                    }, None))
-                }
-                "good" => {
-                    let next_step = step + 1;
-                    if (next_step as usize) >= steps.len() {
-                        graduate_with_fsrs(None, review_count, lapse_count, "good", now)
-                    } else {
-                        let nm = steps.get(next_step as usize).copied().unwrap_or(1);
-                        #[allow(non_snake_case)]
-                        Ok((SRSResult {
-                            EF: -1.0, I: 0, R: 0, state: "learning".to_string(),
-                            step: next_step, lapse_count, next_review: now + nm * 60,
-                            next_minutes: nm, lapsed: false, graduated: false,
-                            fsrs_stability: None, fsrs_difficulty: None,
-                        }, None))
-                    }
-                }
-                _ => {
-                    graduate_with_fsrs(None, review_count, lapse_count, "easy", now)
-                }
-            }
+    // Still being learned: back in `minutes`.
+    #[allow(non_snake_case)]
+    let stay = |st: &str, s: i64, minutes: i64, lapses: i64, lapsed: bool| SRSResult {
+        EF: ef,
+        I: if st == "relearning" { chosen.interval.round() as i64 } else { 0 },
+        R: 0,
+        state: st.to_string(),
+        step: s,
+        lapse_count: lapses,
+        next_review: now + minutes * 60,
+        next_minutes: minutes,
+        lapsed,
+        graduated: false,
+        fsrs_stability: Some(mem.stability),
+        fsrs_difficulty: Some(mem.difficulty),
+    };
+    #[allow(non_snake_case)]
+    let to_review = |graduated: bool| {
+        let days = chosen.interval.max(1.0);
+        SRSResult {
+            EF: ef,
+            I: days.round() as i64,
+            R: review_count + 1,
+            state: "review".to_string(),
+            step: 0,
+            lapse_count,
+            next_review: now + (days * 86400.0) as i64,
+            next_minutes: (days * 24.0 * 60.0) as i64,
+            lapsed: false,
+            graduated,
+            fsrs_stability: Some(mem.stability),
+            fsrs_difficulty: Some(mem.difficulty),
         }
-        "review" => {
-            let fsrs = get_fsrs();
-            let days_elapsed = compute_days_elapsed(next_review);
-            let next_states = fsrs.next_states(current_memory, DESIRED_RETENTION, days_elapsed)
-                .unwrap_or_else(|e| {
-                    eprintln!("[fsrs] next_states error: {}; treating as new card", e);
-                    fsrs.next_states(None, DESIRED_RETENTION, 0).unwrap()
-                });
+    };
 
-            if grade == "again" {
-                let post_lapse = next_states.again.memory;
-                let relearning_steps = &config.relearning_steps;
-                let nm = relearning_steps.get(0).copied().unwrap_or(10);
-                #[allow(non_snake_case)]
-                Ok((SRSResult {
-                    EF: fsrs_difficulty_to_ef(post_lapse.difficulty),
-                    I: next_states.again.interval.round() as i64,
-                    R: 0,
-                    state: "relearning".to_string(),
-                    step: 0,
-                    lapse_count: lapse_count + 1,
-                    next_review: now + nm * 60,
-                    next_minutes: nm,
-                    lapsed: true,
-                    graduated: false,
-                    fsrs_stability: Some(post_lapse.stability),
-                    fsrs_difficulty: Some(post_lapse.difficulty),
-                }, Some(post_lapse)))
-            } else {
-                let chosen = match grade {
-                    "hard" => &next_states.hard,
-                    "easy" => &next_states.easy,
-                    _ => &next_states.good,
-                };
-                let interval_days = chosen.interval;
-                #[allow(non_snake_case)]
-                Ok((SRSResult {
-                    EF: fsrs_difficulty_to_ef(chosen.memory.difficulty),
-                    I: interval_days.round() as i64,
-                    R: review_count + 1,
-                    state: "review".to_string(),
-                    step: 0,
-                    lapse_count,
-                    next_review: now + (interval_days * 86400.0) as i64,
-                    next_minutes: (interval_days * 24.0 * 60.0) as i64,
-                    lapsed: false,
-                    graduated: false,
-                    fsrs_stability: Some(chosen.memory.stability),
-                    fsrs_difficulty: Some(chosen.memory.difficulty),
-                }, Some(chosen.memory)))
-            }
+    let result = if state == "review" {
+        if grade == "again" {
+            let minutes = config.relearning_steps.first().copied().unwrap_or(10);
+            stay("relearning", 0, minutes, lapse_count + 1, true)
+        } else {
+            to_review(false)
         }
-        "relearning" => {
-            let steps = &config.relearning_steps;
-            match grade {
-                "again" => {
-                    let nm = steps.get(0).copied().unwrap_or(10);
-                    #[allow(non_snake_case)]
-                    Ok((SRSResult {
-                        EF: -1.0, I: stored_interval, R: 0, state: "relearning".to_string(),
-                        step: 0, lapse_count, next_review: now + nm * 60,
-                        next_minutes: nm, lapsed: false, graduated: false,
-                        fsrs_stability: current_memory.map(|m| m.stability),
-                        fsrs_difficulty: current_memory.map(|m| m.difficulty),
-                    }, current_memory))
-                }
-                "hard" => {
-                    let ns = i64::max(0, step);
-                    let nm = steps.get(ns as usize).copied().unwrap_or(10);
-                    #[allow(non_snake_case)]
-                    Ok((SRSResult {
-                        EF: -1.0, I: stored_interval, R: 0, state: "relearning".to_string(),
-                        step: ns, lapse_count, next_review: now + nm * 60,
-                        next_minutes: nm, lapsed: false, graduated: false,
-                        fsrs_stability: current_memory.map(|m| m.stability),
-                        fsrs_difficulty: current_memory.map(|m| m.difficulty),
-                    }, current_memory))
-                }
-                "good" => {
-                    let next_step = step + 1;
-                    if (next_step as usize) >= steps.len() {
-                        re_graduate_with_fsrs(current_memory, stored_interval, review_count, lapse_count, now)
-                    } else {
-                        let nm = steps.get(next_step as usize).copied().unwrap_or(10);
-                        #[allow(non_snake_case)]
-                        Ok((SRSResult {
-                            EF: -1.0, I: stored_interval, R: 0, state: "relearning".to_string(),
-                            step: next_step, lapse_count, next_review: now + nm * 60,
-                            next_minutes: nm, lapsed: false, graduated: false,
-                            fsrs_stability: current_memory.map(|m| m.stability),
-                            fsrs_difficulty: current_memory.map(|m| m.difficulty),
-                        }, current_memory))
-                    }
-                }
-                _ => {
-                    re_graduate_with_fsrs(current_memory, stored_interval, review_count, lapse_count, now)
-                }
-            }
+    } else {
+        let (steps, st, fallback) = if state == "relearning" {
+            (&config.relearning_steps, "relearning", 10)
+        } else {
+            (&config.learning_steps, "learning", 1)
+        };
+        let at = |s: i64| steps.get(s.max(0) as usize).copied().unwrap_or(fallback);
+        match grade {
+            "again" => stay(st, 0, at(0), lapse_count, false),
+            "hard" => stay(st, step.max(0), at(step), lapse_count, false),
+            "good" if ((step + 1) as usize) < steps.len() => stay(st, step + 1, at(step + 1), lapse_count, false),
+            _ => to_review(true),
         }
-        _ => schedule_fsrs("new", step, current_memory, stored_interval, review_count, lapse_count, next_review, grade, config),
-    }
+    };
+    Ok((result, Some(mem)))
 }
 
 /// The card a word was saved as: an existing card for the same word, or a new one in dictionary form.
@@ -769,73 +650,62 @@ pub struct GradePreview {
 
 #[tauri::command]
 pub fn db_preview_srs_grades(app: tauri::AppHandle, id: String) -> Result<Vec<GradePreview>, String> {
-    let conn = open_db(&app)?;
-    let row: (f64, i64, i64, String, i64, i64, Option<i64>, Option<f32>, Option<f32>) = conn.query_row(
-        "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty
+    compute_grade_previews(&open_db(&app)?, &id)
+}
+
+/// A card's scheduling columns, as `schedule_fsrs` needs them.
+struct CardSchedule {
+    ef: f64,
+    i: i64,
+    r: i64,
+    state: String,
+    step: i64,
+    lapse_count: i64,
+    next_review: Option<i64>,
+    /// `Err` when an old SM-2 card can't be converted to FSRS.
+    memory: Result<Option<fsrs::MemoryState>, String>,
+    days_elapsed: u32,
+}
+
+fn load_schedule(conn: &rusqlite::Connection, id: &str) -> Result<CardSchedule, String> {
+    #[allow(clippy::type_complexity)]
+    let row: (f64, i64, i64, String, i64, i64, Option<i64>, Option<f32>, Option<f32>, Option<i64>) = conn.query_row(
+        "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty, last_review
          FROM review_items WHERE id=?1",
         params![id],
         |row| Ok((
-            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
+            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
+            row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?,
         )),
     ).map_err(|e| e.to_string())?;
-
-    let (ef, i, r, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty) = row;
-
-    let current_memory = if ef == -1.0 {
-        memory_state_from_db(fsrs_stability, fsrs_difficulty)
+    let (ef, i, r, state, step, lapse_count, next_review, stability, difficulty, last_review) = row;
+    let memory = if ef == -1.0 {
+        Ok(memory_state_from_db(stability, difficulty))
+    } else if state == "new" || state == "learning" {
+        // Nothing worth converting: FSRS starts from this answer.
+        Ok(None)
     } else {
-        let fsrs = get_fsrs();
-        fsrs.memory_state_from_sm2(ef as f32, i as f32, DESIRED_RETENTION).ok()
+        get_fsrs()
+            .memory_state_from_sm2(ef as f32, i as f32, DESIRED_RETENTION)
+            .map(Some)
+            .map_err(|e| e.to_string())
     };
-
-    let config = SRSConfig::default();
-    let grades = ["again", "hard", "good", "easy"];
-    let labels = ["Again", "Hard", "Good", "Easy"];
-
-    let mut previews = Vec::new();
-    for idx in 0..grades.len() {
-        let (result, _) = schedule_fsrs(&state, step, current_memory, i, r, lapse_count, next_review, grades[idx], &config)?;
-        previews.push(GradePreview {
-            grade: grades[idx].to_string(),
-            label: labels[idx].to_string(),
-            next_minutes: result.next_minutes,
-            next_review_formatted: format_next_review_minutes(result.next_minutes),
-            state: result.state,
-            lapsed: result.lapsed,
-            graduated: result.graduated,
-        });
-    }
-    Ok(previews)
+    let now = chrono::Utc::now().timestamp();
+    let days_elapsed = days_since(last_review_of(last_review, &state, next_review, i), now);
+    Ok(CardSchedule { ef, i, r, state, step, lapse_count, next_review, memory, days_elapsed })
 }
 
 fn compute_grade_previews(conn: &rusqlite::Connection, id: &str) -> Result<Vec<GradePreview>, String> {
-    let row: (f64, i64, i64, String, i64, i64, Option<i64>, Option<f32>, Option<f32>) = conn.query_row(
-        "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty
-         FROM review_items WHERE id=?1",
-        params![id],
-        |row| Ok((
-            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
-        )),
-    ).map_err(|e| e.to_string())?;
-
-    let (ef, i, r, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty) = row;
-
-    let current_memory = if ef == -1.0 {
-        memory_state_from_db(fsrs_stability, fsrs_difficulty)
-    } else {
-        let fsrs = get_fsrs();
-        fsrs.memory_state_from_sm2(ef as f32, i as f32, DESIRED_RETENTION).ok()
-    };
-
+    let c = load_schedule(conn, id)?;
+    let memory = c.memory.clone().ok().flatten();
     let config = SRSConfig::default();
+    let fsrs = get_fsrs();
     let grades = ["again", "hard", "good", "easy"];
     let labels = ["Again", "Hard", "Good", "Easy"];
 
     let mut previews = Vec::new();
     for idx in 0..grades.len() {
-        let (result, _) = schedule_fsrs(&state, step, current_memory, i, r, lapse_count, next_review, grades[idx], &config)?;
+        let (result, _) = schedule_fsrs(&fsrs, &c.state, c.step, memory, c.r, c.lapse_count, c.days_elapsed, grades[idx], &config)?;
         previews.push(GradePreview {
             grade: grades[idx].to_string(),
             label: labels[idx].to_string(),
@@ -850,53 +720,42 @@ fn compute_grade_previews(conn: &rusqlite::Connection, id: &str) -> Result<Vec<G
 }
 
 fn grade_card_in_db(conn: &rusqlite::Connection, id: &str, grade: &str) -> Result<SRSResult, String> {
-    #[allow(clippy::type_complexity)]
-    let row: (f64, i64, i64, String, i64, i64, Option<i64>, Option<f32>, Option<f32>) = conn.query_row(
-        "SELECT EF, I, R, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty
-         FROM review_items WHERE id=?1",
-        params![id],
-        |row| Ok((
-            row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?,
-            row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?,
-        )),
-    ).map_err(|e| e.to_string())?;
+    let c = load_schedule(conn, id)?;
+    let now = chrono::Utc::now().timestamp();
+    let config = SRSConfig::default();
 
-    let (ef, i, r, state, step, lapse_count, next_review, fsrs_stability, fsrs_difficulty) = row;
-
-    let current_memory = if ef == -1.0 {
-        memory_state_from_db(fsrs_stability, fsrs_difficulty)
-    } else {
-        let fsrs = get_fsrs();
-        match fsrs.memory_state_from_sm2(ef as f32, i as f32, DESIRED_RETENTION) {
-            Ok(ms) => Some(ms),
-            Err(e) => {
-                eprintln!("[fsrs] On-the-fly migration failed for card {}: {}", id, e);
-                let config = SRSConfig::default();
-                let result = schedule_card(ef, i, r, &state, step, lapse_count, next_review, grade, &config);
-                conn.execute(
-                    "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7 WHERE id=?8",
-                    params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, id],
-                ).map_err(|e| e.to_string())?;
-                return Ok(result);
-            }
+    let current_memory = match c.memory {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("[fsrs] On-the-fly migration failed for card {}: {}", id, e);
+            let result = schedule_card(c.ef, c.i, c.r, &c.state, c.step, c.lapse_count, c.next_review, grade, &config);
+            conn.execute(
+                "UPDATE review_items SET EF=?1, I=?2, R=?3, state=?4, step=?5, lapse_count=?6, next_review=?7, last_review=?8 WHERE id=?9",
+                params![result.EF, result.I, result.R, result.state, result.step, result.lapse_count, result.next_review, now, id],
+            ).map_err(|e| e.to_string())?;
+            return Ok(result);
         }
     };
 
-    let config = SRSConfig::default();
-    let (result, new_memory_opt) = schedule_fsrs(&state, step, current_memory, i, r, lapse_count, next_review, grade, &config)?;
+    let (result, new_memory_opt) = {
+        let fsrs = get_fsrs();
+        schedule_fsrs(&fsrs, &c.state, c.step, current_memory, c.r, c.lapse_count, c.days_elapsed, grade, &config)?
+    };
 
     conn.execute(
-        "UPDATE review_items SET EF=-1.0, I=?1, R=?2, state=?3, step=?4, lapse_count=?5, next_review=?6, fsrs_stability=?7, fsrs_difficulty=?8 WHERE id=?9",
+        "UPDATE review_items SET EF=-1.0, I=?1, R=?2, state=?3, step=?4, lapse_count=?5, next_review=?6, fsrs_stability=?7,
+            fsrs_difficulty=?8, last_review=?9 WHERE id=?10",
         params![
             result.I, result.R, result.state, result.step, result.lapse_count,
             result.next_review,
             new_memory_opt.as_ref().map(|m| m.stability),
             new_memory_opt.as_ref().map(|m| m.difficulty),
+            now,
             id,
         ],
     ).map_err(|e| e.to_string())?;
 
-    if result.state == "review" && state != "review" {
+    if result.state == "review" && c.state != "review" {
         let _ = conn.execute(
             "UPDATE review_items SET mastered_at = CAST(strftime('%s', 'now') * 1000 AS INTEGER)
              WHERE id = ?1 AND mastered_at IS NULL",
@@ -1402,6 +1261,54 @@ pub fn db_session_grade(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Answers a card through its learning steps with FSRS and returns the first interval in days.
+    fn graduate(grades: &[&str]) -> i64 {
+        let fsrs = get_fsrs();
+        let config = SRSConfig::default();
+        let (mut state, mut step, mut memory) = ("new".to_string(), 0, None);
+        for g in grades {
+            let (r, m) = schedule_fsrs(&fsrs, &state, step, memory, 0, 0, 0, g, &config).unwrap();
+            (state, step, memory) = (r.state.clone(), r.step, m);
+            if r.state == "review" {
+                return r.I;
+            }
+        }
+        panic!("never graduated");
+    }
+
+    #[test]
+    fn learning_mistakes_shorten_the_first_interval() {
+        let clean = graduate(&["good", "good"]);
+        let struggled = graduate(&["again", "again", "good", "good"]);
+        assert!(struggled < clean, "struggled {struggled} vs clean {clean}");
+        assert!(struggled >= 1);
+        // A Hard answer keeps the card on its step.
+        assert_eq!(graduate(&["hard", "good", "good"]) > 0, true);
+    }
+
+    #[test]
+    fn elapsed_days_come_from_the_last_review() {
+        let now = chrono::Utc::now().timestamp();
+        assert_eq!(days_since(Some(now), now), 0);
+        assert_eq!(days_since(Some(now - 10 * 86_400), now), 10);
+        assert_eq!(days_since(None, now), 0);
+        // Old cards: due date minus interval, i.e. when the interval was set.
+        let due = now + 2 * 86_400;
+        assert_eq!(days_since(last_review_of(None, "review", Some(due), 12), now), 10);
+        assert_eq!(last_review_of(None, "learning", Some(due), 0), None);
+    }
+
+    #[test]
+    fn an_on_time_review_grows_the_interval() {
+        let fsrs = get_fsrs();
+        let config = SRSConfig::default();
+        let memory = Some(fsrs::MemoryState { stability: 10.0, difficulty: 5.0 });
+        let (on_time, _) = schedule_fsrs(&fsrs, "review", 0, memory, 3, 0, 10, "good", &config).unwrap();
+        let (same_day, _) = schedule_fsrs(&fsrs, "review", 0, memory, 3, 0, 0, "good", &config).unwrap();
+        assert!(on_time.I > 15, "on time: {}", on_time.I);
+        assert!(on_time.I > same_day.I);
+    }
 
     /// Plays today's queue: reviews are answered right except `wrong`, new cards are met once.
     fn play(conn: &rusqlite::Connection, study: i64, wrong: &str, n: usize) -> Vec<String> {

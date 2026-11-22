@@ -56,7 +56,11 @@ export type CardDetail = {
   part_of_speech: string
   example: string
   example_meaning: string
+  /** More sentences with the word; context questions rotate between them */
+  more_examples?: ExampleSentence[]
 }
+
+export type ExampleSentence = { sentence: string; meaning: string }
 
 /** Value sent for "None of these" in recall → confirm */
 export const NONE_ANSWER = '__none'
@@ -285,6 +289,7 @@ export type GrammarPlan = {
 
 export function parseDetailJson(detail: string): {
   reading?: string; meaning?: string; part_of_speech?: string; example?: string; example_meaning?: string
+  more_examples?: ExampleSentence[]
 } | null {
   try {
     const match = detail.match(/\{[\s\S]*\}/)

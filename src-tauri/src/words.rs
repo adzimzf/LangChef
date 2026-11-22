@@ -748,7 +748,8 @@ pub(crate) async fn generate_detail_text(api_host: &str, api_key: &str, model: &
     };
     let prompt = format!(
         "You are a language learning assistant. For the {lang_name} word/phrase \"{content}\", provide a vocabulary card in this exact JSON format:\n\
-        {{\"reading\": \"hiragana reading for Japanese (e.g., たべる for 食べる, しょくどう for 食堂), or IPA/romaji for non-Japanese\", \"meaning\": \"{meaning_hint}\", \"part_of_speech\": \"one of: {pos}\", \"example\": \"a natural example sentence in {lang_name}\", \"example_meaning\": \"{explain_name} translation of the example\"}}\n\
+        {{\"reading\": \"hiragana reading for Japanese (e.g., たべる for 食べる, しょくどう for 食堂), or IPA/romaji for non-Japanese\", \"meaning\": \"{meaning_hint}\", \"part_of_speech\": \"one of: {pos}\", \"example\": \"a natural example sentence in {lang_name}\", \"example_meaning\": \"{explain_name} translation of the example\", \"more_examples\": [{{\"sentence\": \"another example sentence in {lang_name}\", \"meaning\": \"its {explain_name} translation\"}}]}}\n\
+        Give 2 more_examples, each in a different everyday situation from the first example and from each other, and each containing \"{content}\" written exactly as given.\n\
         Translate directly from {lang_name} into {explain_name}, not via another language.\n\
         {pair_rule}Return ONLY the JSON object, nothing else.",
         pos = PART_OF_SPEECH_CODES.join(", "),
