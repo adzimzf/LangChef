@@ -808,6 +808,7 @@ mod tests {
              CREATE TABLE review_confusions(review_item_id TEXT, confused_with_id TEXT, count INTEGER, last_at INTEGER,
                PRIMARY KEY (review_item_id, confused_with_id));
              CREATE TABLE study_card(review_item_id TEXT);
+             CREATE TABLE confusion_diffs(item_a TEXT, item_b TEXT, explain_lang TEXT);
              INSERT INTO review_items(id, content, language, state, fsrs_stability, created_at, detail, meaning_lang) VALUES
                ('a', '下がる', 'ja', 'new', NULL, 1, NULL, NULL),
                ('b', '下がります', 'ja', 'review', 30.0, 2, 'to go down', 'en'),
